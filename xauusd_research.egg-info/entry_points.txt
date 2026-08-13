@@ -1,0 +1,2 @@
+[console_scripts]
+xauusd = xauusd.cli:main

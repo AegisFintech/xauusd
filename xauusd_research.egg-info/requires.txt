@@ -1,0 +1,9 @@
+numpy>=1.26
+pandas>=2.1
+pyarrow>=14
+fastapi>=0.110
+uvicorn[standard]>=0.27
+plotly>=5.18
+scikit-learn>=1.4
+optuna>=3.5
+python-dotenv>=1.0

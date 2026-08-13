@@ -1,0 +1,13 @@
+README.md
+pyproject.toml
+tests/test_core.py
+xauusd/__init__.py
+xauusd/cli.py
+xauusd/core.py
+xauusd/dashboard.py
+xauusd_research.egg-info/PKG-INFO
+xauusd_research.egg-info/SOURCES.txt
+xauusd_research.egg-info/dependency_links.txt
+xauusd_research.egg-info/entry_points.txt
+xauusd_research.egg-info/requires.txt
+xauusd_research.egg-info/top_level.txt
