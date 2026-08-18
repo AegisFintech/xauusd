@@ -14,6 +14,19 @@ The API/dashboard is available at http://localhost:8080. To run a local syntheti
 python -m xauusd.cli campaign --synthetic
 ```
 
+With cTrader Open API credentials in `.env`, download and incrementally update
+historical XAUUSD M1 bars:
+
+```bash
+python -m xauusd.cli data download --start 2024-01-01
+python -m xauusd.cli data update
+python -m xauusd.cli data validate
+```
+
+Each API page is archived under `data/raw/ctrader`; normalized, deduplicated UTC
+bars are merged into `data/processed/XAUUSD_M1.parquet`. The downloader is
+read-only and contains no order or position-management requests.
+
 Install with `pip install -e .` or Docker Compose. Historical bars are stored under `data/raw` and processed Parquet under `data/processed`.
 
 ## Build roadmap

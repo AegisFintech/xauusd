@@ -11,6 +11,8 @@ pnpm-debug.log*
 *.pid
 *.seed
 *.pid.lock
+data/raw/
+data/processed/
 
 # Coverage and test output
 coverage/
