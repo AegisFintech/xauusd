@@ -120,6 +120,22 @@ The snapshot is content-addressed and read-only, with fixed chronological
 engine/cost-model change creates a distinct tournament version; previous
 results can remain reproducible against their original dataset.
 
+## Experiment registry
+
+Seed the frozen tournament's currently defined methods and inspect the durable
+SQLite registry:
+
+```bash
+python -m xauusd.cli experiments seed
+python -m xauusd.cli experiments summary
+python -m xauusd.cli experiments list --status queued
+```
+
+Experiment fingerprints cover the exact formula, parameters, dataset, engine,
+and cost-model versions. Duplicate identities are ignored; lifecycle events,
+worker ownership, heartbeats, metrics, validation, artifacts, failures, and
+promotion decisions remain auditable. Stale running jobs can be safely requeued.
+
 ## Dashboard and operations
 
 Start the read-only dashboard with `./start.sh` or `docker compose up --build`,

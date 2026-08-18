@@ -11,6 +11,8 @@ from .ml import GradientBoostingResearch, MLConfig
 from .ml_campaign import WalkForwardMLCampaign
 from .automation import DailyResearchPipeline, automated_attempt, weekly_comparison
 from .tournament_data import TournamentDataset
+from .experiment_registry import ExperimentRegistry, from_strategy
+import subprocess
 def campaign(synthetic: bool=False):
  Path("reports").mkdir(exist_ok=True); bars=synthetic_bars() if synthetic else None
  if bars is None: raise RuntimeError("Configure cTrader historical-data adapter before downloading live data")
@@ -84,6 +86,7 @@ def main():
  sub.add_parser("daily-run"); sub.add_parser("weekly-report")
  sub.add_parser("automated-run")
  td=sub.add_parser("tournament-data"); td.add_argument("action",choices=["create","status","verify"]); td.add_argument("--partition",choices=["train","validation","test"])
+ er=sub.add_parser("experiments"); er.add_argument("action",choices=["seed","summary","list"]); er.add_argument("--status",choices=["queued","running","completed","failed","cancelled"]); er.add_argument("--limit",type=int,default=100)
  d=sub.add_parser("data"); ds=d.add_subparsers(dest="data_cmd"); i=ds.add_parser("import"); i.add_argument("csv"); v=ds.add_parser("validate")
  download=ds.add_parser("download"); download.add_argument("--start",required=True,help="UTC start date/time (for example 2026-08-01)"); download.add_argument("--end",help="UTC end date/time; defaults to now"); download.add_argument("--page-size",type=int,default=5000)
  update=ds.add_parser("update"); update.add_argument("--overlap-minutes",type=int,default=10)
@@ -106,6 +109,20 @@ def main():
   else:
    result=tournament.active()
    if a.partition: result={"manifest":result,"partition":a.partition,"rows":len(tournament.read(a.partition))}
+  print(json.dumps(result,indent=2,allow_nan=False,default=str))
+ if a.cmd=="experiments":
+  registry=ExperimentRegistry()
+  if a.action=="seed":
+   dataset=TournamentDataset().active()
+   try: commit=subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip()
+   except Exception: commit=None
+   created=[]; existing=[]
+   for strategy in __import__('xauusd.research',fromlist=['DEFAULT_STRATEGIES']).DEFAULT_STRATEGIES:
+    row,is_new=registry.register(from_strategy(strategy,dataset,commit))
+    (created if is_new else existing).append(row["fingerprint"])
+   result={"created":len(created),"existing":len(existing),"summary":registry.summary()}
+  elif a.action=="summary": result=registry.summary()
+  else: result=registry.list(a.status,a.limit)
   print(json.dumps(result,indent=2,allow_nan=False,default=str))
  if a.cmd=="data":
   s=HistoricalDataStore()

@@ -21,8 +21,8 @@ def setup_files(tmp_path):
 
 
 def test_health_is_public_but_api_can_require_auth(tmp_path,monkeypatch):
-    reports,data=setup_files(tmp_path); monkeypatch.setattr(dashboard,"REPORTS",reports); monkeypatch.setattr(dashboard,"DATA_FILE",data); monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("DASHBOARD_USERNAME","user"); monkeypatch.setenv("DASHBOARD_PASSWORD","secret")
+    reports,data=setup_files(tmp_path); monkeypatch.setattr(dashboard,"REPORTS",reports); monkeypatch.setattr(dashboard,"DATA_FILE",data); monkeypatch.setattr(dashboard,"tournament_status",lambda:None)
+    monkeypatch.setenv("DASHBOARD_USERNAME","user"); monkeypatch.setenv("DASHBOARD_PASSWORD","secret"); monkeypatch.setenv("XAUUSD_EXPERIMENT_DB",str(tmp_path/"experiments.db"))
     client=TestClient(dashboard.app)
     assert client.get("/health").status_code==200
     assert client.get("/api/status").status_code==401
@@ -31,7 +31,7 @@ def test_health_is_public_but_api_can_require_auth(tmp_path,monkeypatch):
 
 def test_dashboard_reads_latest_run_and_equity(tmp_path,monkeypatch):
     reports,data=setup_files(tmp_path); monkeypatch.setattr(dashboard,"REPORTS",reports); monkeypatch.setattr(dashboard,"DATA_FILE",data)
-    monkeypatch.delenv("DASHBOARD_USERNAME",raising=False); monkeypatch.delenv("DASHBOARD_PASSWORD",raising=False)
+    monkeypatch.delenv("DASHBOARD_USERNAME",raising=False); monkeypatch.delenv("DASHBOARD_PASSWORD",raising=False); monkeypatch.setenv("XAUUSD_EXPERIMENT_DB",str(tmp_path/"experiments.db"))
     client=TestClient(dashboard.app)
     assert client.get("/api/leaderboard").json()[0]["strategy"]=="mean_reversion"
     figure=client.get("/api/equity/mean_reversion").json()
@@ -39,6 +39,7 @@ def test_dashboard_reads_latest_run_and_equity(tmp_path,monkeypatch):
     assert client.get("/api/history").json()[0]["strategy"]=="mean_reversion"
     assert len(client.get("/api/history/chart").json()["data"])==1
     assert client.get("/").status_code==200
+    assert client.get("/api/experiments").json()==[]
 
 
 def test_export_blocks_path_traversal(tmp_path,monkeypatch):
