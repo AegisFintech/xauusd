@@ -5,7 +5,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 import hashlib
 import json
+import os
 import shutil
+import time
+import traceback
 
 import pandas as pd
 
@@ -22,6 +25,8 @@ class AutomationConfig:
     minimum_freshness_hours: int = 48
     reports_dir: Path = Path("reports/automation")
     registry_path: Path = Path("reports/champion.json")
+    status_path: Path = Path("reports/automation/status.json")
+    attempts_path: Path = Path("reports/automation/attempts.jsonl")
 
 
 def atomic_json(path: Path, payload: dict | list) -> None:
@@ -29,6 +34,35 @@ def atomic_json(path: Path, payload: dict | list) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(payload, indent=2, allow_nan=False))
     temporary.replace(path)
+
+
+def append_jsonl(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as stream:
+        stream.write(json.dumps(payload, allow_nan=False) + "\n")
+
+
+class RunLock:
+    def __init__(self, path: Path):
+        self.path = path
+        self.handle = None
+
+    def __enter__(self):
+        import fcntl
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.handle = self.path.open("w")
+        try:
+            fcntl.flock(self.handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            self.handle.close()
+            raise RuntimeError("another automated research run is already active") from exc
+        self.handle.write(str(os.getpid())); self.handle.flush()
+        return self
+
+    def __exit__(self, *_):
+        import fcntl
+        fcntl.flock(self.handle, fcntl.LOCK_UN)
+        self.handle.close()
 
 
 class ChampionRegistry:
@@ -77,6 +111,36 @@ def weekly_comparison(reports_dir: Path = Path("reports/automation"), limit: int
     report = {"runs": len(manifests), "strategies": strategies}
     atomic_json(reports_dir / "weekly.json", report)
     return report
+
+
+def run_history(reports_dir: Path = Path("reports/automation"), limit: int = 100) -> list[dict]:
+    history = []
+    for path in sorted(reports_dir.glob("*/manifest.json"))[-limit:]:
+        manifest = json.loads(path.read_text())
+        best = manifest["candidates"][0] if manifest["candidates"] else None
+        history.append({"run_id": manifest["run_id"], "created_at": manifest["created_at"],
+                        "data_end": manifest["data"]["end"], "best": best,
+                        "promoted": manifest["promotion"]["promoted"]})
+    return history
+
+
+def automated_attempt(config: AutomationConfig | None = None) -> dict:
+    """Run the scheduled research stage with overlap protection and durable status."""
+    config = config or AutomationConfig()
+    started = datetime.now(timezone.utc)
+    attempt = {"started_at": started.isoformat(), "stage": "research", "status": "running"}
+    atomic_json(config.status_path, attempt)
+    try:
+        with RunLock(config.reports_dir / "automation.lock"):
+            manifest = DailyResearchPipeline(config).run(now=started)
+        attempt.update(status="success", run_id=manifest["run_id"])
+    except Exception as exc:
+        attempt.update(status="failed", error=str(exc), error_type=type(exc).__name__)
+    finished = datetime.now(timezone.utc)
+    attempt.update(finished_at=finished.isoformat(), duration_seconds=(finished-started).total_seconds())
+    atomic_json(config.status_path, attempt)
+    append_jsonl(config.attempts_path, attempt)
+    return attempt
 
 
 class DailyResearchPipeline:

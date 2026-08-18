@@ -1,0 +1,12 @@
+[Unit]
+Description=Update XAUUSD historical data
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/xauusd
+EnvironmentFile=/root/xauusd/.env
+ExecStart=/root/xauusd/.venv/bin/python -m xauusd.cli data update
+StandardOutput=journal
+StandardError=journal

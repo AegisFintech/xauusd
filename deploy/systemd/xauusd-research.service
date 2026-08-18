@@ -1,0 +1,13 @@
+[Unit]
+Description=Run automated XAUUSD research and validation
+After=network-online.target xauusd-data-update.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/xauusd
+EnvironmentFile=/root/xauusd/.env
+ExecStart=/root/xauusd/.venv/bin/python -m xauusd.cli automated-run
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=2h

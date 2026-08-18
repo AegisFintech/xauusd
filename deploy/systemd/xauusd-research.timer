@@ -1,0 +1,11 @@
+[Unit]
+Description=Run daily XAUUSD automated research
+
+[Timer]
+OnCalendar=*-*-* 02:20:00 Asia/Shanghai
+Persistent=true
+RandomizedDelaySec=600
+Unit=xauusd-research.service
+
+[Install]
+WantedBy=timers.target

@@ -75,6 +75,12 @@ def data_status() -> dict:
             "age_hours": age, "fresh": age <= 48}
 
 
+def scheduler_status() -> dict:
+    state = read_json(REPORTS / "automation" / "status.json", {"status": "never_run"})
+    timer = read_json(REPORTS / "automation" / "timer.json", {})
+    return {**state, **timer}
+
+
 @app.get("/health")
 def health():
     return {"status": "ok", "mode": "research-only"}
@@ -86,7 +92,7 @@ def api_status(_: str = Depends(authenticate)):
     manifest = latest_manifest()
     return {"status": "ok" if data.get("fresh") else "degraded", "mode": "research-only",
             "data": data, "latest_run": manifest["run_id"] if manifest else None,
-            "champion": read_json(REPORTS / "champion.json")}
+            "champion": read_json(REPORTS / "champion.json"), "scheduler": scheduler_status()}
 
 
 @app.get("/api/leaderboard")
@@ -107,6 +113,33 @@ def runs(limit: int = Query(20, ge=1, le=100), _: str = Depends(authenticate)):
                       "data": manifest["data"], "promotion": manifest["promotion"],
                       "best": manifest["candidates"][0] if manifest["candidates"] else None})
     return items
+
+
+@app.get("/api/history")
+def history(limit: int = Query(100, ge=1, le=500), _: str = Depends(authenticate)):
+    items = []
+    for path in sorted((REPORTS / "automation").glob("*/manifest.json"))[-limit:]:
+        manifest = read_json(path)
+        for candidate in manifest["candidates"]:
+            items.append({"run_id": manifest["run_id"], "created_at": manifest["created_at"],
+                          "strategy": candidate["strategy"], "score": candidate["score"],
+                          "net_profit": candidate["net_profit"], "profit_factor": candidate["profit_factor"],
+                          "max_drawdown": candidate["max_drawdown"], "passed": candidate["passed"]})
+    return items
+
+
+@app.get("/api/history/chart")
+def history_chart(_: str = Depends(authenticate)):
+    items = history(500, _)
+    figure = go.Figure()
+    strategies = sorted({item["strategy"] for item in items})
+    for strategy in strategies:
+        rows = [item for item in items if item["strategy"] == strategy]
+        figure.add_trace(go.Scatter(x=[row["created_at"] for row in rows], y=[row["net_profit"] for row in rows],
+                                    name=strategy, mode="lines+markers"))
+    figure.update_layout(template="plotly_dark", title="Historical Net P&L by Automated Run",
+                         xaxis_title="Run", yaxis_title="Net P&L")
+    return json.loads(figure.to_json())
 
 
 @app.get("/api/runs/{run_id}")
@@ -161,10 +194,11 @@ DASHBOARD_HTML = """<!doctype html><html><head><meta charset='utf-8'><meta name=
 body{margin:0;background:#0b1020;color:#e8edf7;font:14px system-ui}.wrap{max-width:1200px;margin:auto;padding:24px}
 .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px}.card{background:#151d32;padding:16px;border-radius:10px}
 table{width:100%;border-collapse:collapse;margin-top:20px;background:#151d32}th,td{text-align:left;padding:10px;border-bottom:1px solid #2b3653}
-.pass{color:#58d68d}.fail{color:#ff6b6b}button{background:#315efb;color:white;border:0;padding:6px 10px;border-radius:5px;cursor:pointer}#chart{height:430px}
+.pass{color:#58d68d}.fail{color:#ff6b6b}button{background:#315efb;color:white;border:0;padding:6px 10px;border-radius:5px;cursor:pointer}#chart,#history{height:430px}
 </style></head><body><div class='wrap'><h1>XAUUSD Research Operations</h1><p>Research-only · no execution connectivity</p>
-<div class='cards' id='cards'></div><table><thead><tr><th>Strategy</th><th>Net P&amp;L</th><th>PF</th><th>Drawdown</th><th>Gate</th><th></th></tr></thead><tbody id='rows'></tbody></table><div id='chart'></div>
+<div class='cards' id='cards'></div><table><thead><tr><th>Strategy</th><th>Net P&amp;L</th><th>PF</th><th>Drawdown</th><th>Gate</th><th></th></tr></thead><tbody id='rows'></tbody></table><div id='chart'></div><div id='history'></div>
 <script>async function load(){const s=await fetch('/api/status').then(r=>r.json()),l=await fetch('/api/leaderboard').then(r=>r.json());
-cards.innerHTML=`<div class=card>Data<br><b>${s.data.available?s.data.rows.toLocaleString():'missing'} bars</b></div><div class=card>Freshness<br><b>${s.data.age_hours?.toFixed(1)??'-'} hours</b></div><div class=card>Latest run<br><b>${s.latest_run??'none'}</b></div><div class=card>Champion<br><b>${s.champion?.strategy??'none'}</b></div>`;
+cards.innerHTML=`<div class=card>Data<br><b>${s.data.available?s.data.rows.toLocaleString():'missing'} bars</b></div><div class=card>Freshness<br><b>${s.data.age_hours?.toFixed(1)??'-'} hours</b></div><div class=card>Latest run<br><b>${s.latest_run??'none'}</b></div><div class=card>Champion<br><b>${s.champion?.strategy??'none'}</b></div><div class=card>Automation<br><b>${s.scheduler.status??'unknown'}</b><br><small>Next: ${s.scheduler.next_run??'-'}</small></div>`;
 rows.innerHTML=l.map(x=>`<tr><td>${x.strategy}</td><td>${x.net_profit.toFixed(2)}</td><td>${x.profit_factor.toFixed(3)}</td><td>${(x.max_drawdown*100).toFixed(2)}%</td><td class=${x.passed?'pass':'fail'}>${x.passed?'PASS':'FAIL'}</td><td><button onclick="chart('${x.strategy}')">Chart</button></td></tr>`).join('');if(l.length)chart(l[0].strategy)}
-async function chart(name){const f=await fetch('/api/equity/'+name).then(r=>r.json());Plotly.react('chart',f.data,f.layout)}load()</script></div></body></html>"""
+async function chart(name){const f=await fetch('/api/equity/'+name).then(r=>r.json());Plotly.react('chart',f.data,f.layout)}
+async function history(){const f=await fetch('/api/history/chart').then(r=>r.json());Plotly.react('history',f.data,f.layout)}load();history()</script></div></body></html>"""

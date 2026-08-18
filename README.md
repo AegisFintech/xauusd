@@ -97,6 +97,14 @@ validation gate and improve the champion score. `scripts/research-cron.sh` is a
 cron-compatible composition of the update and research steps; installing it in
 the host scheduler remains an explicit operational action.
 
+On the current server, systemd timers update history every six hours and run the
+full research/validation campaign daily around 02:20 Asia/Shanghai. Persistent
+timers catch up after downtime, randomized delay avoids synchronized API load,
+and a filesystem lock prevents overlapping campaigns. Every scheduled attempt
+records durable status and error history under `reports/automation`; the
+dashboard plots strategy P&L across archived runs. Reusable unit templates live
+under `deploy/systemd`.
+
 ## Dashboard and operations
 
 Start the read-only dashboard with `./start.sh` or `docker compose up --build`,

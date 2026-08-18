@@ -36,6 +36,8 @@ def test_dashboard_reads_latest_run_and_equity(tmp_path,monkeypatch):
     assert client.get("/api/leaderboard").json()[0]["strategy"]=="mean_reversion"
     figure=client.get("/api/equity/mean_reversion").json()
     assert len(figure["data"])==2
+    assert client.get("/api/history").json()[0]["strategy"]=="mean_reversion"
+    assert len(client.get("/api/history/chart").json()["data"])==1
     assert client.get("/").status_code==200
 
 

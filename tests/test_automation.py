@@ -3,7 +3,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from xauusd.automation import ChampionRegistry, atomic_json, render_html, weekly_comparison
+from xauusd.automation import (AutomationConfig, ChampionRegistry, RunLock, atomic_json,
+                               automated_attempt, render_html, weekly_comparison)
 
 
 def test_registry_only_promotes_passing_better_candidate(tmp_path):
@@ -35,3 +36,21 @@ def test_weekly_comparison_collects_archived_runs(tmp_path):
             {"strategy":"momentum","score":-number,"net_profit":-10*number,"passed":False}]})
     report=weekly_comparison(tmp_path)
     assert report["runs"]==2 and len(report["strategies"]["momentum"])==2
+
+
+def test_run_lock_rejects_overlap(tmp_path):
+    with RunLock(tmp_path/"run.lock"):
+        try:
+            with RunLock(tmp_path/"run.lock"):
+                assert False
+        except RuntimeError as exc:
+            assert "already active" in str(exc)
+
+
+def test_automated_attempt_records_failure(tmp_path,monkeypatch):
+    config=AutomationConfig(reports_dir=tmp_path,status_path=tmp_path/"status.json",attempts_path=tmp_path/"attempts.jsonl")
+    def fail(*args,**kwargs): raise RuntimeError("expected failure")
+    monkeypatch.setattr("xauusd.automation.DailyResearchPipeline.run",fail)
+    attempt=automated_attempt(config)
+    assert attempt["status"]=="failed" and "expected failure" in attempt["error"]
+    assert config.status_path.exists() and config.attempts_path.exists()
