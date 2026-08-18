@@ -30,6 +30,7 @@ app = FastAPI(title="XAUUSD Research Dashboard", version="0.7.0")
 log = logging.getLogger("xauusd.dashboard")
 _monitor_lock=threading.Lock()
 _monitor_sample: dict | None=None
+_portfolio_chart_cache: dict={}
 
 
 def _read_proc(path: str) -> str:
@@ -257,7 +258,7 @@ async def live(request: Request, _: str = Depends(authenticate)):
             snapshot["experiment_changed"]=signature!=last_signature
             last_signature=signature; sequence+=1
             yield f"event: snapshot\ndata: {json.dumps(snapshot,allow_nan=False)}\n\n"
-            await asyncio.sleep(2)
+            await asyncio.sleep(5)
     return StreamingResponse(events(),media_type="text/event-stream",headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
 
 
@@ -375,11 +376,13 @@ def tournament_equity(experiment_id: int, _: str = Depends(authenticate)):
 def portfolio_equity(_: str = Depends(authenticate)):
     report=portfolio_status()
     if not report or not Path(report.get("equity","")).is_file(): raise HTTPException(404,"portfolio not available")
-    series=pd.read_parquet(report["equity"]).iloc[:,0]
+    path=Path(report["equity"]); stamp=path.stat().st_mtime_ns
+    if _portfolio_chart_cache.get("stamp")==stamp: return _portfolio_chart_cache["figure"]
+    series=pd.read_parquet(path).iloc[:,0]
     if len(series)>3000: series=series.iloc[::max(1,len(series)//3000)]
     figure=go.Figure(go.Scatter(x=series.index,y=series.values,name="Portfolio equity"))
     figure.update_layout(template="plotly_dark",title="Validation ensemble",hovermode="x unified")
-    return json.loads(figure.to_json())
+    result=json.loads(figure.to_json()); _portfolio_chart_cache.update(stamp=stamp,figure=result); return result
 
 
 @app.get("/api/runs/{run_id}")
@@ -442,7 +445,7 @@ tr{cursor:pointer}tr:hover{background:#202b47}.pass{color:#58d68d}.fail{color:#f
 <script>
 const n=(v,d=2)=>v==null?'—':Number(v).toFixed(d), esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function json(url){const r=await fetch(url);if(!r.ok)throw Error(await r.text());return r.json()}
-let state={},followLogs=true;logs.addEventListener('scroll',()=>{followLogs=logs.scrollHeight-logs.scrollTop-logs.clientHeight<24});async function load(){state=await json('/api/status');render(state,true)}
+let state={},followLogs=true,portfolioLoaded=false;logs.addEventListener('scroll',()=>{followLogs=logs.scrollHeight-logs.scrollTop-logs.clientHeight<24});async function load(){state=await json('/api/status');render(state,true)}
 async function render(s,changed=false){const c=s.experiments.by_status,done=(c.completed??0)+(c.failed??0),pct=s.experiments.catalog_size?100*done/s.experiments.catalog_size:0;
 cards.innerHTML=`<div class=card>Worker<br><b class=${s.tournament_worker.healthy?'pass':'fail'}>${esc(s.tournament_worker.state)}</b><br><small>${n(s.tournament_worker.heartbeat_age_seconds,0)}s heartbeat</small></div><div class=card>Running now<br><b class=running>${c.running??0}</b><br><small>Last #${s.tournament_worker.last_experiment_id??'—'}</small></div><div class=card>Tested<br><b>${done.toLocaleString()} / ${s.experiments.catalog_size.toLocaleString()}</b><div class=progress><i style='width:${Math.min(100,pct)}%'></i></div><small>${n(pct,1)}% fixed catalog</small></div><div class=card>Queue<br><b>${(c.queued??0).toLocaleString()}</b><br><small>${s.tournament_worker.catalog?.remaining_unregistered?.toLocaleString()??'auto'} unregistered</small></div><div class=card>Adaptive search<br><b>${s.adaptive?.created??0}</b><br><small>${esc(s.adaptive?s.adaptive.parents+' diverse parents':'waiting for 100 results')}</small></div><div class=card>Novel proposals<br><b>${s.proposals?.created??0}</b><br><small>${esc(s.proposals?.generator_version??'waiting for catalog exhaustion')}</small></div><div class=card>Codex lab<br><b>${esc(s.codex.status)}</b><br><small>Auto-merge: ${s.codex.auto_merge?'ON':'OFF'}</small></div><div class=card>Champion<br><b>${esc(s.champion?.strategy??'none yet')}</b><br><small>Score ${n(s.champion?.score)}</small></div><div class=card>Promotions<br><b>${s.experiments.promoted}</b><br><small>Robust gates only</small></div>`;
 const sys=s.system,bps=v=>v<1024?v+' B/s':v<1048576?n(v/1024,1)+' KB/s':n(v/1048576,1)+' MB/s',duration=v=>v<3600?n(v/60,0)+'m':v<86400?n(v/3600,1)+'h':n(v/86400,1)+'d';
@@ -450,7 +453,7 @@ systemCards.innerHTML=`<div class=card>CPU load<br><b>${n(sys.cpu.load_percent,1
 processes.innerHTML=sys.services.map(x=>`<tr><td>${esc(x.service)}</td><td>${x.pid??'—'}</td><td>${x.running?n(x.cpu_percent)+'%':'stopped'}</td><td>${x.memory?n(x.memory.gb)+' GB':'—'}</td><td>${x.threads??'—'}</td><td>${x.uptime_seconds?duration(x.uptime_seconds):'—'}</td></tr>`).join('');
 const o=s.operations;ops.innerHTML=`<b class=${o.healthy?'pass':'fail'}>${o.healthy?'HEALTHY':'ATTENTION'}</b> · DB integrity: ${esc(o.database.integrity)} · disk free ${n(o.disk_free_percent)}% · backup ${o.backup_age_hours==null?'missing':n(o.backup_age_hours,1)+'h ago'}${o.alerts.length?'<br><span class=fail>'+o.alerts.map(esc).join(' · ')+'</span>':''}`;if(s.logs){logs.textContent=s.logs.join('\\n');if(followLogs)logs.scrollTop=logs.scrollHeight}
 const w=s.weekly;if(w){weekly.innerHTML=`<b>Last 7 days</b> · ${w.completed_this_week} completed · ${n(100*w.positive_validation_fraction,1)}% positive validation · throughput Δ ${w.throughput_change} · best score ${n(w.current_best_score)} · all-time ${w.all_time_completed.toLocaleString()}<br><small>Multiple-testing context: ${n(100*w.multiple_testing.familywise_false_positive_probability,1)}% nominal familywise false-positive probability across ${w.multiple_testing.experiments.toLocaleString()} trials. Robust gates remain mandatory.</small>`}
-const p=s.portfolio;if(p){portfolioSummary.innerHTML=`<b class=${p.passed?'pass':'fail'}>${p.passed?'PASS':'FAIL'}</b> · ${p.experiment_ids.length} diverse strategies · P&amp;L ${n(p.metrics.net_profit)} · Sharpe ${n(p.metrics.sharpe)} · Drawdown ${n(100*p.metrics.max_drawdown)}% · exposure ${n(100*p.average_exposure)}%`;regimes.innerHTML=p.strategies.map(x=>{const best=[...x.regimes].sort((a,b)=>b.net_profit-a.net_profit)[0];return `<tr onclick=inspect(${x.experiment_id})><td>#${x.experiment_id}</td><td>${esc(x.family)}</td><td>${esc(best?.regime??'—')}</td><td>${n(best?.net_profit)}</td></tr>`}).join('');json('/api/tournament/portfolio/equity').then(f=>Plotly.react('portfolioChart',f.data,f.layout))}
+const p=s.portfolio;if(p){portfolioSummary.innerHTML=`<b class=${p.passed?'pass':'fail'}>${p.passed?'PASS':'FAIL'}</b> · ${p.experiment_ids.length} diverse strategies · P&amp;L ${n(p.metrics.net_profit)} · Sharpe ${n(p.metrics.sharpe)} · Drawdown ${n(100*p.metrics.max_drawdown)}% · exposure ${n(100*p.average_exposure)}%`;regimes.innerHTML=p.strategies.map(x=>{const best=[...x.regimes].sort((a,b)=>b.net_profit-a.net_profit)[0];return `<tr onclick=inspect(${x.experiment_id})><td>#${x.experiment_id}</td><td>${esc(x.family)}</td><td>${esc(best?.regime??'—')}</td><td>${n(best?.net_profit)}</td></tr>`}).join('');if(!portfolioLoaded){portfolioLoaded=true;json('/api/tournament/portfolio/equity').then(f=>Plotly.react('portfolioChart',f.data,f.layout))}}
 updated.textContent='LIVE · '+new Date().toLocaleTimeString();if(changed)await Promise.all([loadExperiments(),loadLeaders()])}
 async function loadExperiments(){const status=filter.value,rows=await json('/api/experiments?limit=100'+(status?'&status='+status:''));experiments.innerHTML=rows.map(x=>{const m=x.metrics?.validation,v=x.validation;return `<tr onclick=inspect(${x.id})><td>#${x.id}</td><td>${esc(x.strategy_family)}</td><td class=${x.status}>${x.status}</td><td>${n(v?.score)}</td><td>${n(m?.net_profit)}</td><td>${n(m?.profit_factor)}</td><td>${m? n(100*m.max_drawdown,2)+'%':'—'}</td></tr>`}).join('')}
 async function loadLeaders(){const [rows,hist]=await Promise.all([json('/api/tournament/leaderboard?limit=30'),json('/api/tournament/champions?limit=10')]);leaders.innerHTML=rows.map((x,i)=>`<tr onclick=inspect(${x.id})><td>${i+1}</td><td>#${x.id}</td><td>${esc(x.strategy_family)}</td><td>${n(x.validation?.score)}</td><td class=${x.validation?.passed?'pass':'fail'}>${x.validation?.passed?'PASS':'FAIL'}</td></tr>`).join('');championHistory.textContent=hist.length?'Champion history: '+hist.map(x=>'#'+x.experiment_id+' ('+n(x.holdout_score)+')').join(' → '):'No holdout-qualified champion yet';const pts=rows.filter(x=>x.metrics?.validation);Plotly.react('scatter',[{x:pts.map(x=>100*x.metrics.validation.max_drawdown),y:pts.map(x=>x.metrics.validation.net_profit),text:pts.map(x=>'#'+x.id+' '+x.strategy_family),mode:'markers',marker:{color:pts.map(x=>x.validation.score),colorscale:'Viridis',showscale:true}}],{template:'plotly_dark',margin:{t:20},xaxis:{title:'Max drawdown %'},yaxis:{title:'Validation net P&L'},hovermode:'closest'})}

@@ -53,7 +53,7 @@ class PortfolioResearch:
         curves=[]; strategy_reports=[]
         for row in leaders:
             equity=pd.read_parquet(row["artifacts"]["equity"]).iloc[:,0].sort_index()
-            trades=pd.read_csv(row["artifacts"]["trades"],parse_dates=["exit_time"])
+            trades=pd.read_csv(row["artifacts"]["trades"],parse_dates=["exit_time"],compression="infer")
             exit_times=pd.DatetimeIndex(trades.exit_time); labels=regimes.reindex(exit_times,method="ffill").to_numpy()
             trades["regime"]=labels
             by_regime=[]

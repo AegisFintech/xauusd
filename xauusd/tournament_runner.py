@@ -131,7 +131,7 @@ class TournamentRunner:
         finalist={"eligible":True,"evaluated_at":datetime.now(timezone.utc).isoformat(),
                   "passed":holdout_validation["passed"],"score":holdout_score,
                   "gates":holdout_validation["gates"],"metrics":_finite(holdout["metrics"])}
-        holdout["trades"].to_csv(directory/"holdout_trades.csv",index=False)
+        holdout["trades"].to_csv(directory/"holdout_trades.csv.gz",index=False,compression="gzip")
         holdout["equity"].to_frame().to_parquet(directory/"holdout_equity.parquet")
         if not finalist["passed"] or (previous and float(previous["holdout_score"])>=holdout_score):
             finalist["reason"]="holdout_gates_failed" if not finalist["passed"] else "holdout_score_not_better"
@@ -172,7 +172,7 @@ class TournamentRunner:
                 validation = {"stage": "validation", **self._validation(validation_result["metrics"],
                     validation_result,validation_features,strategy,execution)}
             result = validation_result or development
-            result["trades"].to_csv(directory / "trades.csv", index=False)
+            result["trades"].to_csv(directory / "trades.csv.gz", index=False, compression="gzip")
             result["equity"].to_frame().to_parquet(directory / "equity.parquet")
             promoted,holdout,finalist = self._promote(experiment,strategy,execution,validation,directory)
             metrics = {"development": _finite(development["metrics"]),
@@ -184,9 +184,9 @@ class TournamentRunner:
                        "validation": validation, "promoted": promoted}
             (directory / "summary.json").write_text(json.dumps(_finite(summary), indent=2, allow_nan=False))
             artifacts = {"directory": str(directory), "summary": str(directory / "summary.json"),
-                         "trades": str(directory / "trades.csv"), "equity": str(directory / "equity.parquet")}
+                         "trades": str(directory / "trades.csv.gz"), "equity": str(directory / "equity.parquet")}
             if holdout:
-                artifacts.update({"holdout_trades":str(directory/"holdout_trades.csv"),
+                artifacts.update({"holdout_trades":str(directory/"holdout_trades.csv.gz"),
                                   "holdout_equity":str(directory/"holdout_equity.parquet")})
             return self.registry.complete(experiment["id"], self.worker_id, metrics, validation, artifacts, promoted)
         except Exception as error:

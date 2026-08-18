@@ -22,3 +22,14 @@ def test_backup_uses_sqlite_snapshot_and_manifest(tmp_path,monkeypatch):
  with sqlite3.connect(snapshot) as db: assert db.execute("SELECT value FROM test").fetchone()[0]=="safe"
  latest=json.loads((tmp_path/"backups"/"latest.json").read_text())
  assert latest["run_id"]==result["run_id"] and snapshot.exists()
+
+
+def test_compaction_compresses_trade_ledgers_and_updates_registry(tmp_path):
+ database=tmp_path/"registry.db"; ledger=tmp_path/"trades.csv"; ledger.write_text("pnl\n"+("1.25\n"*1000))
+ artifacts=json.dumps({"trades":str(ledger)})
+ with sqlite3.connect(database) as db:
+  db.execute("CREATE TABLE experiments(id INTEGER,artifacts_json TEXT)"); db.execute("INSERT INTO experiments VALUES(1,?)",(artifacts,))
+ result=OperationsManager(database,tmp_path/"b",tmp_path/"r").compact_artifacts()
+ with sqlite3.connect(database) as db: updated=json.loads(db.execute("SELECT artifacts_json FROM experiments").fetchone()[0])
+ assert result["compressed"]==1 and result["bytes_saved"]>0
+ assert not ledger.exists() and updated["trades"].endswith(".gz")

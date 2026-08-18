@@ -5,6 +5,7 @@ from pathlib import Path
 import json
 import shutil
 import sqlite3
+import gzip
 
 
 class OperationsManager:
@@ -44,3 +45,23 @@ class OperationsManager:
   (directory/"manifest.json").write_text(json.dumps(state,indent=2))
   latest=self.backup_root/"latest.json"; temporary=latest.with_suffix(".json.tmp"); temporary.write_text(json.dumps(state,indent=2)); temporary.replace(latest)
   return state
+
+ def compact_artifacts(self) -> dict:
+  compressed=skipped=0; before=after=0
+  with sqlite3.connect(self.registry_path) as db:
+   rows=db.execute("SELECT id,artifacts_json FROM experiments WHERE artifacts_json IS NOT NULL").fetchall()
+   for experiment_id,encoded in rows:
+    artifacts=json.loads(encoded); changed=False
+    for key in ("trades","holdout_trades"):
+     value=artifacts.get(key)
+     if not value: continue
+     source=Path(value)
+     if source.suffix==".gz" or not source.is_file(): skipped+=1; continue
+     target=source.with_suffix(source.suffix+".gz"); before+=source.stat().st_size
+     temporary=target.with_suffix(target.suffix+".tmp")
+     with source.open("rb") as input_file,gzip.open(temporary,"wb",compresslevel=6) as output_file:
+      shutil.copyfileobj(input_file,output_file)
+     temporary.replace(target); after+=target.stat().st_size
+     source.unlink(); artifacts[key]=str(target); compressed+=1; changed=True
+    if changed: db.execute("UPDATE experiments SET artifacts_json=? WHERE id=?",(json.dumps(artifacts,sort_keys=True,separators=(",",":")),experiment_id))
+  return {"compressed":compressed,"skipped":skipped,"bytes_before":before,"bytes_after":after,"bytes_saved":before-after}
