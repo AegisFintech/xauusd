@@ -207,12 +207,28 @@ class TournamentRunner:
 class ContinuousTournamentWorker:
     def __init__(self, runner: TournamentRunner | None = None,
                  status_path: Path = Path("reports/tournament/worker-status.json"),
-                 idle_seconds: float = 30, queue_floor: int = 100, replenish_size: int = 500):
+                 idle_seconds: float = 30, queue_floor: int = 100, replenish_size: int = 500,
+                 adaptive_interval: int = 250, adaptive_batch_size: int = 25,
+                 adaptive_queue_ceiling: int = 500):
         self.runner = runner or TournamentRunner()
         self.status_path = status_path
         self.idle_seconds = idle_seconds
         self.queue_floor = queue_floor
         self.replenish_size = replenish_size
+        self.adaptive_interval = adaptive_interval
+        self.adaptive_batch_size = adaptive_batch_size
+        self.adaptive_queue_ceiling = adaptive_queue_ceiling
+
+    def _adaptive_generation(self,completed: int,queued: int) -> dict | None:
+        path=Path("reports/tournament/adaptive.json")
+        try: previous=json.loads(path.read_text()) if path.exists() else {}
+        except (OSError,json.JSONDecodeError): previous={}
+        last=int(previous.get("last_completed_trigger",100 if previous else 0) or 0)
+        threshold=100 if not previous else last+self.adaptive_interval
+        if completed < threshold or queued >= self.adaptive_queue_ceiling: return None
+        return AdaptiveSearch(self.runner.registry,path).generate(
+            self.runner.dataset.active(),self.adaptive_batch_size,
+            int(previous.get("generation",1 if previous else 0) or 0)+1,completed)
 
     def _status(self, state: str, **details) -> None:
         self.status_path.parent.mkdir(parents=True, exist_ok=True)
@@ -232,9 +248,7 @@ class ContinuousTournamentWorker:
                 replenishment=None
                 adaptive=None
                 completed=self.runner.registry.count("completed")
-                adaptive_path=Path("reports/tournament/adaptive.json")
-                if completed>=100 and not adaptive_path.exists():
-                    adaptive=AdaptiveSearch(self.runner.registry).generate(self.runner.dataset.active(),50)
+                adaptive=self._adaptive_generation(completed,queued)
                 portfolio_path=Path("reports/tournament/portfolio/latest.json")
                 portfolio=None
                 if completed>=150 and not portfolio_path.exists():

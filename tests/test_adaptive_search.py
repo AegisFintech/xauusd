@@ -45,3 +45,8 @@ def test_adaptive_generation_walks_past_duplicates(tmp_path):
  engine=AdaptiveSearch(registry,tmp_path/"adaptive.json")
  first=engine.generate(DATASET,3); second=engine.generate(DATASET,3)
  assert first["created"]==3 and second["created"]==3 and second["duplicates"]>=3
+ assert first["generation"]==1 and second["generation"]==2
+ assert (tmp_path/"adaptive"/"generation-0001.json").exists()
+ assert (tmp_path/"adaptive"/"generation-0002.json").exists()
+ rows=[x for x in registry.list(limit=20) if x["parameters"].get("provenance")]
+ assert {x["parameters"]["provenance"]["generation"] for x in rows}=={1,2}

@@ -40,7 +40,16 @@ class AdaptiveSearch:
    if len(grouped[row["strategy_family"]])<per_family: grouped[row["strategy_family"]].append(row)
   return [row for family in sorted(grouped) for row in grouped[family]]
 
- def generate(self,dataset: dict,limit: int=50) -> dict:
+ def _previous(self) -> dict:
+  if not self.output_path.exists(): return {}
+  try: return json.loads(self.output_path.read_text())
+  except (OSError,json.JSONDecodeError): return {}
+
+ def generate(self,dataset: dict,limit: int=50,generation: int | None=None,
+              trigger_completed: int | None=None) -> dict:
+  previous=self._previous()
+  previous_generation=int(previous.get("generation",1 if previous else 0) or 0)
+  generation=generation or previous_generation+1
   parents=self._parents(); all_rows=self.registry.list(limit=max(1000,self.registry.count()))
   seen={semantic_identity(row["strategy_family"],row["parameters"]) for row in all_rows}
   created=[]; duplicates=0
@@ -61,6 +70,7 @@ class AdaptiveSearch:
     if identity in seen: duplicates+=1; continue
     seen.add(identity)
     provenance={"generator":GENERATOR_VERSION,"operation":operation,"parent_experiment_ids":[parent["id"]],
+                "generation":generation,
                 "mutated_parameter":key,"multiplier":multiplier,
                 "parent_validation_score":parent["validation"].get("score")}
     parameters={"strategy":child_strategy,"execution":child_execution,"provenance":provenance}
@@ -72,9 +82,19 @@ class AdaptiveSearch:
     if len(created)>=limit: break
    if len(created)>=limit: break
   family_counts=dict(sorted(__import__("collections").Counter(x["family"] for x in created).items()))
-  report={"generator_version":GENERATOR_VERSION,"dataset_version":dataset["version"],"parents":len(parents),
+  parent_details=[{"experiment_id":row["id"],"family":row["strategy_family"],
+                   "score":row["validation"].get("score")} for row in parents]
+  best_score=max((x["score"] for x in parent_details if x["score"] is not None),default=None)
+  report={"generator_version":GENERATOR_VERSION,"dataset_version":dataset["version"],
+          "generation":generation,"trigger_completed":trigger_completed,
+          "last_completed_trigger":trigger_completed,"best_score_before":best_score,
+          "parents":len(parents),"parent_details":parent_details,
           "created":len(created),"duplicates":duplicates,"family_counts":family_counts,
           "exhausted":len(created)==0,"challengers":created}
   self.output_path.parent.mkdir(parents=True,exist_ok=True)
+  history=self.output_path.parent/"adaptive"/f"generation-{generation:04d}.json"
+  history.parent.mkdir(parents=True,exist_ok=True)
+  history_temporary=history.with_suffix(".json.tmp")
+  history_temporary.write_text(json.dumps(report,indent=2)); history_temporary.replace(history)
   temporary=self.output_path.with_suffix(".json.tmp"); temporary.write_text(json.dumps(report,indent=2)); temporary.replace(self.output_path)
   return report

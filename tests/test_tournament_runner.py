@@ -65,6 +65,26 @@ def test_continuous_worker_records_idle_heartbeat(tmp_path, monkeypatch):
     assert status["state"]=="stopped" and status["worker_id"]=="worker-test"
 
 
+def test_adaptive_generations_wait_for_completion_interval(tmp_path,monkeypatch):
+    class Runner:
+        registry=object()
+        class Dataset:
+            def active(self): return {"version":"v1"}
+        dataset=Dataset()
+    worker=ContinuousTournamentWorker(Runner(),adaptive_interval=250,adaptive_batch_size=25)
+    report=tmp_path/"reports"/"tournament"/"adaptive.json"
+    report.parent.mkdir(parents=True)
+    report.write_text('{"generation": 2, "last_completed_trigger": 500}')
+    monkeypatch.chdir(tmp_path)
+    calls=[]
+    monkeypatch.setattr("xauusd.tournament_runner.AdaptiveSearch.generate",
+                        lambda self,*args: calls.append(args) or {"generation":3})
+    assert worker._adaptive_generation(749,10) is None
+    assert worker._adaptive_generation(750,500) is None
+    assert worker._adaptive_generation(750,10)=={"generation":3}
+    assert calls[0][1:]==(25,3,750)
+
+
 def test_robust_validation_adds_walk_forward_and_bootstrap(tmp_path):
     parameters={"strategy":{"fast":8,"slow":34,"threshold_atr":.1},"execution":{}}
     gates=TournamentGates(1,1,-1,-999,-1,walk_forward_folds=2,minimum_positive_folds=0,
