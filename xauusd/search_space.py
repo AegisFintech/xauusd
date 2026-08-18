@@ -52,3 +52,21 @@ def seed_catalog(registry: ExperimentRegistry,dataset: dict,commit: str|None=Non
  summary=registry.summary(); total=catalog_size()
  return {"catalog_size":total,"considered":seen,"created":created,"existing":existing,
          "registered_for_dataset":summary["total"],"completion":min(1.0,summary["total"]/total)}
+
+
+def replenish_catalog(registry: ExperimentRegistry,dataset: dict,target_new: int=250,commit: str|None=None) -> dict:
+ """Add the next unseen catalog entries, scanning deterministically past duplicates."""
+ created=existing=considered=0
+ for strategy,execution in candidate_specs():
+  base=from_strategy(strategy,dataset,commit)
+  spec=ExperimentSpec(base.strategy_family,base.formula,
+   {"strategy":strategy.parameters,"execution":execution},base.dataset_version,base.dataset_fingerprint,
+   base.engine_version,base.cost_model_version,commit)
+  _,is_new=registry.register(spec)
+  created+=int(is_new); existing+=int(not is_new); considered+=1
+  if created>=target_new: break
+ total=catalog_size()
+ registered=registry.count(dataset_version=dataset["version"])
+ return {"catalog_size":total,"considered":considered,"created":created,"existing":existing,
+         "registered_for_dataset":registered,"remaining_unregistered":max(0,total-registered),
+         "exhausted":created==0 and considered==total,"completion":min(1.0,registered/total)}

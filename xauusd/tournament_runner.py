@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import json
 import os
@@ -14,6 +14,7 @@ from .engine import EventDrivenBacktester, ExecutionConfig
 from .experiment_registry import ExperimentRegistry
 from .research import StrategySpec, build_features, generate_signal
 from .tournament_data import TournamentDataset
+from .search_space import replenish_catalog
 
 
 @dataclass(frozen=True)
@@ -152,10 +153,12 @@ class TournamentRunner:
 class ContinuousTournamentWorker:
     def __init__(self, runner: TournamentRunner | None = None,
                  status_path: Path = Path("reports/tournament/worker-status.json"),
-                 idle_seconds: float = 30):
+                 idle_seconds: float = 30, queue_floor: int = 100, replenish_size: int = 500):
         self.runner = runner or TournamentRunner()
         self.status_path = status_path
         self.idle_seconds = idle_seconds
+        self.queue_floor = queue_floor
+        self.replenish_size = replenish_size
 
     def _status(self, state: str, **details) -> None:
         self.status_path.parent.mkdir(parents=True, exist_ok=True)
@@ -166,17 +169,23 @@ class ContinuousTournamentWorker:
         temporary.replace(self.status_path)
 
     def run_forever(self) -> None:
-        self._status("starting")
+        replaced=self.runner.registry.recover_other_workers(self.runner.worker_id)
+        self._status("starting",recovered_replaced_workers=replaced)
         while True:
             try:
-                self._status("running")
+                recovered=self.runner.registry.recover_stale(datetime.now(timezone.utc)-timedelta(minutes=10))
+                queued=self.runner.registry.count("queued")
+                replenishment=None
+                if queued < self.queue_floor:
+                    replenishment=replenish_catalog(self.runner.registry,self.runner.dataset.active(),self.replenish_size)
+                self._status("running", recovered_stale=recovered)
                 result = self.runner.run_once()
                 if result is None:
-                    self._status("idle", message="experiment queue is empty")
+                    self._status("idle", message="experiment catalog is exhausted", catalog=replenishment)
                     time.sleep(self.idle_seconds)
                 else:
                     self._status("running", last_experiment_id=result["id"],
-                                 last_result=result["status"], promoted=result["promoted"])
+                                 last_result=result["status"], promoted=result["promoted"], catalog=replenishment)
             except KeyboardInterrupt:
                 self._status("stopped")
                 return

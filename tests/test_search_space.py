@@ -1,7 +1,7 @@
 from xauusd.core import synthetic_bars
 from xauusd.experiment_registry import ExperimentRegistry
 from xauusd.research import StrategySpec,build_features,generate_signal
-from xauusd.search_space import candidate_specs,catalog_size,seed_catalog
+from xauusd.search_space import candidate_specs,catalog_size,replenish_catalog,seed_catalog
 
 
 DATASET={"version":"v1","fingerprint":"abc","engine_version":"e1","cost_model_version":"c1"}
@@ -24,3 +24,9 @@ def test_dynamic_parameters_change_signal():
  a=generate_signal(features,StrategySpec("momentum",{"fast":5,"slow":20,"threshold_atr":.1}))
  b=generate_signal(features,StrategySpec("momentum",{"fast":12,"slow":50,"threshold_atr":.5}))
  assert not a.equals(b)
+
+
+def test_replenishment_scans_past_existing_prefix(tmp_path):
+ registry=ExperimentRegistry(tmp_path/"x.db"); seed_catalog(registry,DATASET,limit=10)
+ result=replenish_catalog(registry,DATASET,target_new=5)
+ assert result["created"]==5 and registry.count(dataset_version="v1")==15

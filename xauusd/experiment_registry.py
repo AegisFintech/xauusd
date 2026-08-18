@@ -166,6 +166,18 @@ class ExperimentRegistry:
                 self._event(db, row["id"], "requeued_stale", {"previous_worker": row["worker_id"]})
             return len(rows)
 
+    def recover_other_workers(self, active_worker_id: str) -> int:
+        """Recover claims left by a previous instance of the single system worker."""
+        now=self._now()
+        with self.connect() as db:
+            rows=db.execute("SELECT id,worker_id FROM experiments WHERE status='running' AND worker_id<>?",
+                            (active_worker_id,)).fetchall()
+            for row in rows:
+                db.execute("UPDATE experiments SET status='queued',worker_id=NULL,started_at=NULL,heartbeat_at=NULL,error=? WHERE id=?",
+                           (f"recovered replaced worker {row['worker_id']} at {now}",row["id"]))
+                self._event(db,row["id"],"requeued_replaced_worker",{"previous_worker":row["worker_id"]})
+            return len(rows)
+
     def get(self, experiment_id: int, db: sqlite3.Connection | None = None) -> dict:
         if db is not None:
             row = db.execute("SELECT * FROM experiments WHERE id=?", (experiment_id,)).fetchone()
@@ -191,6 +203,20 @@ class ExperimentRegistry:
             families = db.execute("SELECT COUNT(DISTINCT strategy_family) count FROM experiments").fetchone()["count"]
             promoted = db.execute("SELECT COUNT(*) count FROM experiments WHERE promoted=1").fetchone()["count"]
             return {"total": sum(counts.values()), "by_status": counts, "strategy_families": families, "promoted": promoted}
+
+    def count(self, status: ExperimentStatus | None = None, dataset_version: str | None = None) -> int:
+        clauses=[]; params=[]
+        if status: clauses.append("status=?"); params.append(status)
+        if dataset_version: clauses.append("dataset_version=?"); params.append(dataset_version)
+        query="SELECT COUNT(*) count FROM experiments"+(" WHERE "+" AND ".join(clauses) if clauses else "")
+        with self.connect() as db:
+            return int(db.execute(query,params).fetchone()["count"])
+
+    def leaderboard(self, limit: int = 25) -> list[dict]:
+        with self.connect() as db:
+            rows=db.execute("""SELECT * FROM experiments WHERE status='completed' AND validation_json IS NOT NULL
+                ORDER BY json_extract(validation_json,'$.score') DESC LIMIT ?""",(limit,)).fetchall()
+            return [self._decode(row) for row in rows]
 
     def events(self, experiment_id: int) -> list[dict]:
         with self.connect() as db:

@@ -46,3 +46,16 @@ def test_stale_work_is_requeued(tmp_path):
         db.execute("UPDATE experiments SET heartbeat_at=? WHERE id=?", ((datetime.now(timezone.utc)-timedelta(hours=2)).isoformat(),registered["id"]))
     assert registry.recover_stale(datetime.now(timezone.utc)-timedelta(hours=1))==1
     assert registry.get(registered["id"])["status"]=="queued"
+
+
+def test_leaderboard_orders_validation_score(tmp_path):
+ registry=ExperimentRegistry(tmp_path/"registry.db")
+ for value,score in ((1,2.0),(2,1.0)):
+  row,_=registry.register(spec(x=value)); claimed=registry.claim_next("w")
+  registry.complete(claimed["id"],"w",{"validation":{"net_profit":value}}, {"passed":True,"score":score})
+ assert [row["validation"]["score"] for row in registry.leaderboard()]==[2.0,1.0]
+
+
+def test_replaced_worker_is_recovered_immediately(tmp_path):
+ registry=ExperimentRegistry(tmp_path/"registry.db"); row,_=registry.register(spec()); registry.claim_next("old")
+ assert registry.recover_other_workers("new")==1 and registry.get(row["id"])["status"]=="queued"

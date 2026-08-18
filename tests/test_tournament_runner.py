@@ -52,6 +52,11 @@ def test_failure_is_durable(tmp_path, monkeypatch):
 def test_continuous_worker_records_idle_heartbeat(tmp_path, monkeypatch):
     class EmptyRunner:
         worker_id="worker-test"
+        class Registry:
+            def count(self,status): return 100
+            def recover_stale(self,before): return 0
+            def recover_other_workers(self,worker): return 0
+        registry=Registry()
         def run_once(self): return None
     worker=ContinuousTournamentWorker(EmptyRunner(),tmp_path/"status.json",.01)
     monkeypatch.setattr("xauusd.tournament_runner.time.sleep",lambda _: (_ for _ in ()).throw(KeyboardInterrupt()))

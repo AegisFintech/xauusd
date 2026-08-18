@@ -198,6 +198,36 @@ def experiment_detail(experiment_id: int, _: str = Depends(authenticate)):
     return item
 
 
+@app.get("/api/tournament/leaderboard")
+def tournament_leaderboard(limit: int = Query(25, ge=1, le=100), _: str = Depends(authenticate)):
+    database=registry()
+    return database.leaderboard(limit) if database else []
+
+
+@app.get("/api/tournament/equity/{experiment_id}")
+def tournament_equity(experiment_id: int, _: str = Depends(authenticate)):
+    database=registry()
+    try:
+        item=database.get(experiment_id) if database else None
+    except KeyError:
+        item=None
+    if not item or not item.get("artifacts"):
+        raise HTTPException(404,"experiment artifact not found")
+    allowed=(REPORTS/"tournament").resolve()
+    path=Path(item["artifacts"]["equity"]).resolve()
+    if allowed not in path.parents or not path.is_file():
+        raise HTTPException(404,"equity artifact not found")
+    series=pd.read_parquet(path).iloc[:,0]
+    if len(series)>3000: series=series.iloc[::max(1,len(series)//3000)]
+    drawdown=series/series.cummax()-1
+    figure=go.Figure()
+    figure.add_trace(go.Scatter(x=series.index,y=series.values,name="Equity"))
+    figure.add_trace(go.Scatter(x=drawdown.index,y=drawdown.values,name="Drawdown",yaxis="y2"))
+    figure.update_layout(template="plotly_dark",title=f"Experiment #{experiment_id}",hovermode="x unified",
+                         yaxis2={"overlaying":"y","side":"right","tickformat":".1%"})
+    return json.loads(figure.to_json())
+
+
 @app.get("/api/runs/{run_id}")
 def run_detail(run_id: str, _: str = Depends(authenticate)):
     if not run_id.replace("-", "").isalnum():
@@ -246,15 +276,25 @@ def home(_: str = Depends(authenticate)):
 
 
 DASHBOARD_HTML = """<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width'>
-<title>XAUUSD Research</title><script src='https://cdn.plot.ly/plotly-2.35.2.min.js'></script><style>
-body{margin:0;background:#0b1020;color:#e8edf7;font:14px system-ui}.wrap{max-width:1200px;margin:auto;padding:24px}
-.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px}.card{background:#151d32;padding:16px;border-radius:10px}
-table{width:100%;border-collapse:collapse;margin-top:20px;background:#151d32}th,td{text-align:left;padding:10px;border-bottom:1px solid #2b3653}
-.pass{color:#58d68d}.fail{color:#ff6b6b}button{background:#315efb;color:white;border:0;padding:6px 10px;border-radius:5px;cursor:pointer}#chart,#history{height:430px}
-</style></head><body><div class='wrap'><h1>XAUUSD Research Operations</h1><p>Research-only · no execution connectivity</p>
-<div class='cards' id='cards'></div><table><thead><tr><th>Strategy</th><th>Net P&amp;L</th><th>PF</th><th>Drawdown</th><th>Gate</th><th></th></tr></thead><tbody id='rows'></tbody></table><div id='chart'></div><div id='history'></div>
-<script>async function load(){const s=await fetch('/api/status').then(r=>r.json()),l=await fetch('/api/leaderboard').then(r=>r.json());
-cards.innerHTML=`<div class=card>Tournament<br><b>${s.tournament?.version??'not frozen'}</b><br><small>${s.tournament?.rows?.toLocaleString()??'-'} bars</small></div><div class=card>Experiments<br><b>${s.experiments.total.toLocaleString()} / ${s.experiments.catalog_size.toLocaleString()}</b><br><small>${s.experiments.by_status.queued??0} queued · ${s.experiments.by_status.completed??0} completed</small></div><div class=card>Tournament worker<br><b class=${s.tournament_worker.healthy?'pass':'fail'}>${s.tournament_worker.state}</b><br><small>${s.tournament_worker.last_experiment_id?'Last #'+s.tournament_worker.last_experiment_id:'Waiting for first result'}</small></div><div class=card>Live data<br><b>${s.data.available?s.data.rows.toLocaleString():'missing'} bars</b></div><div class=card>Freshness<br><b>${s.data.age_hours?.toFixed(1)??'-'} hours</b></div><div class=card>Latest run<br><b>${s.latest_run??'none'}</b></div><div class=card>Champion<br><b>${s.champion?.strategy??'none'}</b></div><div class=card>Automation<br><b>${s.scheduler.status??'unknown'}</b><br><small>Next: ${s.scheduler.next_run??'-'}</small></div>`;
-rows.innerHTML=l.map(x=>`<tr><td>${x.strategy}</td><td>${x.net_profit.toFixed(2)}</td><td>${x.profit_factor.toFixed(3)}</td><td>${(x.max_drawdown*100).toFixed(2)}%</td><td class=${x.passed?'pass':'fail'}>${x.passed?'PASS':'FAIL'}</td><td><button onclick="chart('${x.strategy}')">Chart</button></td></tr>`).join('');if(l.length)chart(l[0].strategy)}
-async function chart(name){const f=await fetch('/api/equity/'+name).then(r=>r.json());Plotly.react('chart',f.data,f.layout)}
-async function history(){const f=await fetch('/api/history/chart').then(r=>r.json());Plotly.react('history',f.data,f.layout)}load();history()</script></div></body></html>"""
+<title>XAUUSD Tournament</title><script src='https://cdn.plot.ly/plotly-2.35.2.min.js'></script><style>
+body{margin:0;background:#09101f;color:#e8edf7;font:14px system-ui}.wrap{max-width:1400px;margin:auto;padding:22px}.top{display:flex;justify-content:space-between;align-items:center}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.card,.panel{background:#151d32;padding:16px;border-radius:10px}.card b{font-size:20px}.muted,small{color:#9ca9c3}
+.progress{height:8px;background:#293550;border-radius:5px;margin-top:8px}.progress i{display:block;height:100%;background:#3b82f6;border-radius:5px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:16px}.panel{overflow:auto}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:9px;border-bottom:1px solid #2b3653;white-space:nowrap}
+tr{cursor:pointer}tr:hover{background:#202b47}.pass{color:#58d68d}.fail{color:#ff6b6b}.running{color:#60a5fa}button,select{background:#253454;color:white;border:1px solid #3b4c70;padding:7px 10px;border-radius:6px}#tchart,#scatter{height:390px}
+@media(max-width:900px){.grid{grid-template-columns:1fr}.wrap{padding:12px}}
+</style></head><body><div class='wrap'><div class=top><div><h1>Strategy Tournament</h1><p class=muted>Frozen XAUUSD M1 research · live competition · no order execution</p></div><div><span id=updated></span> <button onclick=load()>Refresh</button></div></div>
+<div class=cards id=cards></div><div class=grid><section class=panel><h2>Live experiments</h2><label>Status <select id=filter onchange=loadExperiments()><option value=''>All</option><option>running</option><option>completed</option><option>failed</option><option>queued</option></select></label><table><thead><tr><th>ID</th><th>Family</th><th>Status</th><th>Score</th><th>Validation P&amp;L</th><th>PF</th><th>Drawdown</th></tr></thead><tbody id=experiments></tbody></table></section>
+<section class=panel><h2>Best challengers</h2><table><thead><tr><th>Rank</th><th>ID</th><th>Family</th><th>Score</th><th>Gate</th></tr></thead><tbody id=leaders></tbody></table></section></div>
+<div class=grid><section class=panel><h2>Selected experiment</h2><div id=detail class=muted>Select an experiment row to inspect parameters, gates and event history.</div><div id=tchart></div></section><section class=panel><h2>Risk / return field</h2><div id=scatter></div></section></div>
+<script>
+const n=(v,d=2)=>v==null?'—':Number(v).toFixed(d), esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function json(url){const r=await fetch(url);if(!r.ok)throw Error(await r.text());return r.json()}
+async function load(){const s=await json('/api/status'),c=s.experiments.by_status,done=(c.completed??0)+(c.failed??0),pct=s.experiments.catalog_size?100*done/s.experiments.catalog_size:0;
+cards.innerHTML=`<div class=card>Worker<br><b class=${s.tournament_worker.healthy?'pass':'fail'}>${esc(s.tournament_worker.state)}</b><br><small>${n(s.tournament_worker.heartbeat_age_seconds,0)}s heartbeat</small></div><div class=card>Running now<br><b class=running>${c.running??0}</b><br><small>Last #${s.tournament_worker.last_experiment_id??'—'}</small></div><div class=card>Tested<br><b>${done.toLocaleString()} / ${s.experiments.catalog_size.toLocaleString()}</b><div class=progress><i style='width:${Math.min(100,pct)}%'></i></div><small>${n(pct,1)}% complete</small></div><div class=card>Queue<br><b>${(c.queued??0).toLocaleString()}</b><br><small>${s.tournament_worker.catalog?.remaining_unregistered?.toLocaleString()??'auto'} unregistered</small></div><div class=card>Champion<br><b>${esc(s.champion?.strategy??'none yet')}</b><br><small>Score ${n(s.champion?.score)}</small></div><div class=card>Promotions<br><b>${s.experiments.promoted}</b><br><small>Robust gates only</small></div>`;
+updated.textContent='Updated '+new Date().toLocaleTimeString();await Promise.all([loadExperiments(),loadLeaders()])}
+async function loadExperiments(){const status=filter.value,rows=await json('/api/experiments?limit=100'+(status?'&status='+status:''));experiments.innerHTML=rows.map(x=>{const m=x.metrics?.validation,v=x.validation;return `<tr onclick=inspect(${x.id})><td>#${x.id}</td><td>${esc(x.strategy_family)}</td><td class=${x.status}>${x.status}</td><td>${n(v?.score)}</td><td>${n(m?.net_profit)}</td><td>${n(m?.profit_factor)}</td><td>${m? n(100*m.max_drawdown,2)+'%':'—'}</td></tr>`}).join('')}
+async function loadLeaders(){const rows=await json('/api/tournament/leaderboard?limit=30');leaders.innerHTML=rows.map((x,i)=>`<tr onclick=inspect(${x.id})><td>${i+1}</td><td>#${x.id}</td><td>${esc(x.strategy_family)}</td><td>${n(x.validation?.score)}</td><td class=${x.validation?.passed?'pass':'fail'}>${x.validation?.passed?'PASS':'FAIL'}</td></tr>`).join('');const pts=rows.filter(x=>x.metrics?.validation);Plotly.react('scatter',[{x:pts.map(x=>100*x.metrics.validation.max_drawdown),y:pts.map(x=>x.metrics.validation.net_profit),text:pts.map(x=>'#'+x.id+' '+x.strategy_family),mode:'markers',marker:{color:pts.map(x=>x.validation.score),colorscale:'Viridis',showscale:true}}],{template:'plotly_dark',margin:{t:20},xaxis:{title:'Max drawdown %'},yaxis:{title:'Validation net P&L'},hovermode:'closest'})}
+async function inspect(id){const x=await json('/api/experiments/'+id),g=x.validation?.gates??{};detail.innerHTML=`<h3>#${x.id} ${esc(x.strategy_family)} <span class=${x.status}>${x.status}</span></h3><p><b>Parameters</b><br><code>${esc(JSON.stringify(x.parameters))}</code></p><p><b>Gates</b><br>${Object.entries(g).map(([k,v])=>`<span class=${v?'pass':'fail'}>${v?'✓':'✗'} ${esc(k)}</span>`).join(' · ')||'Pending'}</p><p><b>Timeline</b><br>${x.events.map(e=>esc(e.occurred_at.slice(11,19))+' '+esc(e.event)).join(' → ')}</p>`;if(x.artifacts?.equity){const f=await json('/api/tournament/equity/'+id);Plotly.react('tchart',f.data,f.layout)}else Plotly.purge('tchart')}
+load();setInterval(load,15000);
+</script></div></body></html>"""

@@ -46,3 +46,17 @@ def test_export_blocks_path_traversal(tmp_path,monkeypatch):
     reports,data=setup_files(tmp_path); monkeypatch.setattr(dashboard,"REPORTS",reports); monkeypatch.setattr(dashboard,"DATA_FILE",data)
     client=TestClient(dashboard.app)
     assert client.get("/api/export/run-1/../../outside.txt").status_code==404
+
+
+def test_tournament_equity_and_leaderboard(tmp_path,monkeypatch):
+ reports,data=setup_files(tmp_path); monkeypatch.setattr(dashboard,"REPORTS",reports); monkeypatch.setattr(dashboard,"DATA_FILE",data)
+ database=__import__("xauusd.experiment_registry",fromlist=["ExperimentRegistry"]).ExperimentRegistry(tmp_path/"registry.db")
+ spec=__import__("xauusd.experiment_registry",fromlist=["ExperimentSpec"]).ExperimentSpec("momentum","f",{},"v","d","e","c")
+ row,_=database.register(spec); claimed=database.claim_next("w")
+ artifact=reports/"tournament"/"v"/str(row["id"]); artifact.mkdir(parents=True)
+ index=pd.date_range("2026-01-01",periods=3,freq="min",tz="UTC"); pd.DataFrame({"equity":[100,101,99]},index=index).to_parquet(artifact/"equity.parquet")
+ database.complete(claimed["id"],"w",{"validation":{"net_profit":-1,"max_drawdown":-.02}}, {"passed":False,"score":-1}, {"equity":str(artifact/"equity.parquet")})
+ monkeypatch.setattr(dashboard,"registry",lambda:database)
+ client=TestClient(dashboard.app)
+ assert client.get("/api/tournament/leaderboard").json()[0]["id"]==row["id"]
+ assert len(client.get(f"/api/tournament/equity/{row['id']}").json()["data"])==2
