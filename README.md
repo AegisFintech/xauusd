@@ -68,6 +68,19 @@ The model uses causal price features, chronological partitions, probability-
 filtered signals, and the same realistic execution engine. Outputs are research
 artifacts under `reports/ml`; failing models are never promoted.
 
+Run the regime-aware ensemble across anchored walk-forward folds:
+
+```bash
+python -m xauusd.cli ml-walk-forward \
+  --start 2026-01-01 --end 2026-07-31 --threshold 0.58
+```
+
+The core ensemble uses histogram boosting, random forests, extra trees, and a
+training-only KMeans regime transformer. XGBoost, LightGBM, CatBoost, HMM, and
+PyTorch adapters are optional install extras (`boosting`, `regimes`, and
+`sequence`) so the research core stays lightweight. All policy interfaces are
+offline-only and have no broker execution methods.
+
 Install with `pip install -e .` or Docker Compose. Historical bars are stored under `data/raw` and processed Parquet under `data/processed`.
 
 ## Build roadmap

@@ -8,6 +8,7 @@ from .engine import EventDrivenBacktester, ExecutionConfig
 from .research import ResearchCampaign, StrategySpec
 from .validation import StrategyValidator, ValidationConfig
 from .ml import GradientBoostingResearch, MLConfig
+from .ml_campaign import WalkForwardMLCampaign
 def campaign(synthetic: bool=False):
  Path("reports").mkdir(exist_ok=True); bars=synthetic_bars() if synthetic else None
  if bars is None: raise RuntimeError("Configure cTrader historical-data adapter before downloading live data")
@@ -60,6 +61,13 @@ def ml_research(start: str|None, end: str|None, threshold: float):
  report=GradientBoostingResearch(MLConfig(probability_threshold=threshold)).run(bars)
  print(json.dumps(report,indent=2,allow_nan=False))
 
+def ml_walk_forward(start: str|None, end: str|None, threshold: float):
+ bars=HistoricalDataStore().read()
+ if start: bars=bars.loc[start:]
+ if end: bars=bars.loc[:end]
+ report=WalkForwardMLCampaign(MLConfig(probability_threshold=threshold)).run(bars)
+ print(json.dumps(report,indent=2,allow_nan=False))
+
 def main():
  load_dotenv(".env")
  p=argparse.ArgumentParser(); sub=p.add_subparsers(dest="cmd"); c=sub.add_parser("campaign"); c.add_argument("--synthetic",action="store_true")
@@ -67,6 +75,7 @@ def main():
  r=sub.add_parser("research"); r.add_argument("--start"); r.add_argument("--end")
  vld=sub.add_parser("validate-strategy"); vld.add_argument("--strategy",choices=["mean_reversion","momentum"],default="mean_reversion"); vld.add_argument("--start"); vld.add_argument("--end"); vld.add_argument("--bootstrap-samples",type=int,default=500)
  ml=sub.add_parser("ml-research"); ml.add_argument("--start"); ml.add_argument("--end"); ml.add_argument("--threshold",type=float,default=.58)
+ mlwf=sub.add_parser("ml-walk-forward"); mlwf.add_argument("--start"); mlwf.add_argument("--end"); mlwf.add_argument("--threshold",type=float,default=.58)
  d=sub.add_parser("data"); ds=d.add_subparsers(dest="data_cmd"); i=ds.add_parser("import"); i.add_argument("csv"); v=ds.add_parser("validate")
  download=ds.add_parser("download"); download.add_argument("--start",required=True,help="UTC start date/time (for example 2026-08-01)"); download.add_argument("--end",help="UTC end date/time; defaults to now"); download.add_argument("--page-size",type=int,default=5000)
  update=ds.add_parser("update"); update.add_argument("--overlap-minutes",type=int,default=10)
@@ -76,6 +85,7 @@ def main():
  if a.cmd=="research": research_campaign(a.start,a.end)
  if a.cmd=="validate-strategy": validate_strategy(a.strategy,a.start,a.end,a.bootstrap_samples)
  if a.cmd=="ml-research": ml_research(a.start,a.end,a.threshold)
+ if a.cmd=="ml-walk-forward": ml_walk_forward(a.start,a.end,a.threshold)
  if a.cmd=="data":
   s=HistoricalDataStore()
   if a.data_cmd=="import": result=CTraderHistoricalAdapter(s).import_csv(Path(a.csv))
