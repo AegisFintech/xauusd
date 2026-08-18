@@ -5,7 +5,7 @@ import pandas as pd
 from xauusd.core import synthetic_bars
 from xauusd.experiment_registry import ExperimentRegistry, ExperimentSpec
 from xauusd.tournament_data import TournamentDataConfig, TournamentDataset
-from xauusd.tournament_runner import TournamentGates, TournamentRunner
+from xauusd.tournament_runner import ContinuousTournamentWorker, TournamentGates, TournamentRunner
 
 
 def setup_runner(tmp_path, parameters, gates=None):
@@ -47,3 +47,14 @@ def test_failure_is_durable(tmp_path, monkeypatch):
     try: runner.run_once()
     except RuntimeError: pass
     assert registry.get(row["id"])["status"]=="failed"
+
+
+def test_continuous_worker_records_idle_heartbeat(tmp_path, monkeypatch):
+    class EmptyRunner:
+        worker_id="worker-test"
+        def run_once(self): return None
+    worker=ContinuousTournamentWorker(EmptyRunner(),tmp_path/"status.json",.01)
+    monkeypatch.setattr("xauusd.tournament_runner.time.sleep",lambda _: (_ for _ in ()).throw(KeyboardInterrupt()))
+    worker.run_forever()
+    status=__import__("json").loads((tmp_path/"status.json").read_text())
+    assert status["state"]=="stopped" and status["worker_id"]=="worker-test"

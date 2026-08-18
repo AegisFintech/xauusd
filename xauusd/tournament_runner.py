@@ -6,6 +6,7 @@ from pathlib import Path
 import json
 import os
 import socket
+import time
 
 import numpy as np
 
@@ -146,3 +147,39 @@ class TournamentRunner:
                 break
             completed.append(result)
         return completed
+
+
+class ContinuousTournamentWorker:
+    def __init__(self, runner: TournamentRunner | None = None,
+                 status_path: Path = Path("reports/tournament/worker-status.json"),
+                 idle_seconds: float = 30):
+        self.runner = runner or TournamentRunner()
+        self.status_path = status_path
+        self.idle_seconds = idle_seconds
+
+    def _status(self, state: str, **details) -> None:
+        self.status_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"state": state, "worker_id": self.runner.worker_id,
+                   "updated_at": datetime.now(timezone.utc).isoformat(), **details}
+        temporary = self.status_path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(_finite(payload), indent=2, allow_nan=False))
+        temporary.replace(self.status_path)
+
+    def run_forever(self) -> None:
+        self._status("starting")
+        while True:
+            try:
+                self._status("running")
+                result = self.runner.run_once()
+                if result is None:
+                    self._status("idle", message="experiment queue is empty")
+                    time.sleep(self.idle_seconds)
+                else:
+                    self._status("running", last_experiment_id=result["id"],
+                                 last_result=result["status"], promoted=result["promoted"])
+            except KeyboardInterrupt:
+                self._status("stopped")
+                return
+            except Exception as error:
+                self._status("error", error=f"{type(error).__name__}: {error}")
+                time.sleep(self.idle_seconds)

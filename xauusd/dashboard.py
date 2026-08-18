@@ -95,6 +95,18 @@ def tournament_champion() -> dict | None:
     return read_json(REPORTS / "tournament" / tournament["version"] / "champion.json")
 
 
+def tournament_worker_status() -> dict:
+    state = read_json(REPORTS / "tournament" / "worker-status.json", {"state": "not_started"})
+    updated = state.get("updated_at")
+    if updated:
+        age = (datetime.now(timezone.utc) - datetime.fromisoformat(updated)).total_seconds()
+        state["heartbeat_age_seconds"] = max(0, age)
+        state["healthy"] = state.get("state") in {"running", "idle"} and age < 120
+    else:
+        state["healthy"] = False
+    return state
+
+
 def registry() -> ExperimentRegistry | None:
     path=Path(os.getenv("XAUUSD_EXPERIMENT_DB", "data/experiments/registry.sqlite3"))
     return ExperimentRegistry(path,initialize=False) if path.exists() else None
@@ -112,6 +124,7 @@ def api_status(_: str = Depends(authenticate)):
     return {"status": "ok" if data.get("fresh") else "degraded", "mode": "research-only",
             "data": data, "latest_run": manifest["run_id"] if manifest else None,
             "champion": tournament_champion() or read_json(REPORTS / "champion.json"), "scheduler": scheduler_status(),
+            "tournament_worker": tournament_worker_status(),
             "tournament": tournament_status(), "experiments": {**(registry().summary() if registry() else
             {"total":0,"by_status":{},"strategy_families":0,"promoted":0}),"catalog_size":catalog_size()}}
 
@@ -241,7 +254,7 @@ table{width:100%;border-collapse:collapse;margin-top:20px;background:#151d32}th,
 </style></head><body><div class='wrap'><h1>XAUUSD Research Operations</h1><p>Research-only · no execution connectivity</p>
 <div class='cards' id='cards'></div><table><thead><tr><th>Strategy</th><th>Net P&amp;L</th><th>PF</th><th>Drawdown</th><th>Gate</th><th></th></tr></thead><tbody id='rows'></tbody></table><div id='chart'></div><div id='history'></div>
 <script>async function load(){const s=await fetch('/api/status').then(r=>r.json()),l=await fetch('/api/leaderboard').then(r=>r.json());
-cards.innerHTML=`<div class=card>Tournament<br><b>${s.tournament?.version??'not frozen'}</b><br><small>${s.tournament?.rows?.toLocaleString()??'-'} bars</small></div><div class=card>Experiments<br><b>${s.experiments.total.toLocaleString()} / ${s.experiments.catalog_size.toLocaleString()}</b><br><small>${s.experiments.by_status.queued??0} queued · ${s.experiments.by_status.completed??0} completed</small></div><div class=card>Live data<br><b>${s.data.available?s.data.rows.toLocaleString():'missing'} bars</b></div><div class=card>Freshness<br><b>${s.data.age_hours?.toFixed(1)??'-'} hours</b></div><div class=card>Latest run<br><b>${s.latest_run??'none'}</b></div><div class=card>Champion<br><b>${s.champion?.strategy??'none'}</b></div><div class=card>Automation<br><b>${s.scheduler.status??'unknown'}</b><br><small>Next: ${s.scheduler.next_run??'-'}</small></div>`;
+cards.innerHTML=`<div class=card>Tournament<br><b>${s.tournament?.version??'not frozen'}</b><br><small>${s.tournament?.rows?.toLocaleString()??'-'} bars</small></div><div class=card>Experiments<br><b>${s.experiments.total.toLocaleString()} / ${s.experiments.catalog_size.toLocaleString()}</b><br><small>${s.experiments.by_status.queued??0} queued · ${s.experiments.by_status.completed??0} completed</small></div><div class=card>Tournament worker<br><b class=${s.tournament_worker.healthy?'pass':'fail'}>${s.tournament_worker.state}</b><br><small>${s.tournament_worker.last_experiment_id?'Last #'+s.tournament_worker.last_experiment_id:'Waiting for first result'}</small></div><div class=card>Live data<br><b>${s.data.available?s.data.rows.toLocaleString():'missing'} bars</b></div><div class=card>Freshness<br><b>${s.data.age_hours?.toFixed(1)??'-'} hours</b></div><div class=card>Latest run<br><b>${s.latest_run??'none'}</b></div><div class=card>Champion<br><b>${s.champion?.strategy??'none'}</b></div><div class=card>Automation<br><b>${s.scheduler.status??'unknown'}</b><br><small>Next: ${s.scheduler.next_run??'-'}</small></div>`;
 rows.innerHTML=l.map(x=>`<tr><td>${x.strategy}</td><td>${x.net_profit.toFixed(2)}</td><td>${x.profit_factor.toFixed(3)}</td><td>${(x.max_drawdown*100).toFixed(2)}%</td><td class=${x.passed?'pass':'fail'}>${x.passed?'PASS':'FAIL'}</td><td><button onclick="chart('${x.strategy}')">Chart</button></td></tr>`).join('');if(l.length)chart(l[0].strategy)}
 async function chart(name){const f=await fetch('/api/equity/'+name).then(r=>r.json());Plotly.react('chart',f.data,f.layout)}
 async function history(){const f=await fetch('/api/history/chart').then(r=>r.json());Plotly.react('history',f.data,f.layout)}load();history()</script></div></body></html>"""

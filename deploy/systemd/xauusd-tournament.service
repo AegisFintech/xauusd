@@ -1,0 +1,18 @@
+[Unit]
+Description=Run continuous XAUUSD strategy tournament
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/xauusd
+EnvironmentFile=/root/xauusd/.env
+ExecStart=/root/xauusd/.venv/bin/python -m xauusd.cli tournament-worker --continuous
+Restart=always
+RestartSec=10
+TimeoutStopSec=60
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
