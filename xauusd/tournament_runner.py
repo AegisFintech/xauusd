@@ -17,6 +17,7 @@ from .research import StrategySpec, build_features, generate_signal
 from .tournament_data import TournamentDataset
 from .search_space import replenish_catalog
 from .validation import bootstrap_trade_paths
+from .strategy_proposals import ProposalEngine
 
 
 @dataclass(frozen=True)
@@ -228,6 +229,9 @@ class ContinuousTournamentWorker:
                 replenishment=None
                 if queued < self.queue_floor:
                     replenishment=replenish_catalog(self.runner.registry,self.runner.dataset.active(),self.replenish_size)
+                    if replenishment["exhausted"]:
+                        replenishment["novelty"]=ProposalEngine(self.runner.registry).generate(
+                            self.runner.dataset.active(),self.replenish_size)
                 self._status("running", recovered_stale=recovered)
                 result = self.runner.run_once()
                 if result is None:

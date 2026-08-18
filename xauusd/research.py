@@ -100,6 +100,18 @@ def generate_signal(features: pd.DataFrame, spec: StrategySpec) -> pd.Series:
         revert_signal = np.where(f.zscore_20 < -float(p["entry_z"]), 1,
                                  np.where(f.zscore_20 > float(p["entry_z"]), -1, 0))
         return pd.Series(np.where(trending, trend_signal, revert_signal), index=f.index, dtype=int)
+    if spec.name == "trend_pullback":
+        trend=(ema(p["fast"])-ema(p["slow"]))/f.atr_14
+        strength=float(p["min_strength"]); pullback=float(p["pullback_z"])
+        signal=pd.Series(np.where((trend>strength)&(f.zscore_20 < -pullback),1,
+                         np.where((trend < -strength)&(f.zscore_20 > pullback),-1,0)),index=f.index,dtype=int)
+        return directional(signal)
+    if spec.name == "confirmed_breakout":
+        lookback=int(p["lookback"]); high=f.high.rolling(lookback).max().shift(1); low=f.low.rolling(lookback).min().shift(1)
+        trend=(f.ema_8-f.ema_34)/f.atr_14; active=f.range_ratio>=float(p["range_ratio"]); strength=float(p["min_strength"])
+        signal=pd.Series(np.where(active&(f.close>high)&(trend>strength),1,
+                         np.where(active&(f.close<low)&(trend < -strength),-1,0)),index=f.index,dtype=int)
+        return directional(signal)
     raise ValueError(f"unknown strategy: {spec.name}")
 
 

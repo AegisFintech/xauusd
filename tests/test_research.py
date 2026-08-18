@@ -22,6 +22,14 @@ def test_all_baseline_signals_are_aligned_and_bounded():
         assert set(np.unique(signal)).issubset({-1, 0, 1})
 
 
+def test_novel_signal_formulas_are_causal():
+ bars=synthetic_bars(500,seed=111); earlier=build_features(bars.iloc[:400]); full=build_features(bars)
+ from xauusd.research import StrategySpec
+ for spec in (StrategySpec("trend_pullback",{"fast":5,"slow":34,"min_strength":.2,"pullback_z":.75}),
+              StrategySpec("confirmed_breakout",{"lookback":20,"min_strength":.2,"range_ratio":1.1})):
+  pd.testing.assert_series_equal(generate_signal(earlier,spec),generate_signal(full.loc[earlier.index],spec))
+
+
 def test_breakout_channel_excludes_current_bar():
     bars = synthetic_bars(100, seed=3)
     features = build_features(bars)
