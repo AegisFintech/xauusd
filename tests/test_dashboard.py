@@ -21,7 +21,7 @@ def setup_files(tmp_path):
 
 
 def test_health_is_public_but_api_can_require_auth(tmp_path,monkeypatch):
-    reports,data=setup_files(tmp_path); monkeypatch.setattr(dashboard,"REPORTS",reports); monkeypatch.setattr(dashboard,"DATA_FILE",data)
+    reports,data=setup_files(tmp_path); monkeypatch.setattr(dashboard,"REPORTS",reports); monkeypatch.setattr(dashboard,"DATA_FILE",data); monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("DASHBOARD_USERNAME","user"); monkeypatch.setenv("DASHBOARD_PASSWORD","secret")
     client=TestClient(dashboard.app)
     assert client.get("/health").status_code==200

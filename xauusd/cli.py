@@ -10,6 +10,7 @@ from .validation import StrategyValidator, ValidationConfig
 from .ml import GradientBoostingResearch, MLConfig
 from .ml_campaign import WalkForwardMLCampaign
 from .automation import DailyResearchPipeline, automated_attempt, weekly_comparison
+from .tournament_data import TournamentDataset
 def campaign(synthetic: bool=False):
  Path("reports").mkdir(exist_ok=True); bars=synthetic_bars() if synthetic else None
  if bars is None: raise RuntimeError("Configure cTrader historical-data adapter before downloading live data")
@@ -82,6 +83,7 @@ def main():
  mlwf=sub.add_parser("ml-walk-forward"); mlwf.add_argument("--start"); mlwf.add_argument("--end"); mlwf.add_argument("--threshold",type=float,default=.58)
  sub.add_parser("daily-run"); sub.add_parser("weekly-report")
  sub.add_parser("automated-run")
+ td=sub.add_parser("tournament-data"); td.add_argument("action",choices=["create","status","verify"]); td.add_argument("--partition",choices=["train","validation","test"])
  d=sub.add_parser("data"); ds=d.add_subparsers(dest="data_cmd"); i=ds.add_parser("import"); i.add_argument("csv"); v=ds.add_parser("validate")
  download=ds.add_parser("download"); download.add_argument("--start",required=True,help="UTC start date/time (for example 2026-08-01)"); download.add_argument("--end",help="UTC end date/time; defaults to now"); download.add_argument("--page-size",type=int,default=5000)
  update=ds.add_parser("update"); update.add_argument("--overlap-minutes",type=int,default=10)
@@ -97,6 +99,14 @@ def main():
  if a.cmd=="automated-run":
   attempt=automated_attempt(); print(json.dumps(attempt,indent=2,allow_nan=False))
   if attempt["status"]!="success": raise SystemExit(1)
+ if a.cmd=="tournament-data":
+  tournament=TournamentDataset()
+  if a.action=="create": result=tournament.create()
+  elif a.action=="verify": result=tournament.verify()
+  else:
+   result=tournament.active()
+   if a.partition: result={"manifest":result,"partition":a.partition,"rows":len(tournament.read(a.partition))}
+  print(json.dumps(result,indent=2,allow_nan=False,default=str))
  if a.cmd=="data":
   s=HistoricalDataStore()
   if a.data_cmd=="import": result=CTraderHistoricalAdapter(s).import_csv(Path(a.csv))

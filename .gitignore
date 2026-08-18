@@ -13,6 +13,7 @@ pnpm-debug.log*
 *.pid.lock
 data/raw/
 data/processed/
+data/tournaments/
 reports/backtests/
 reports/research/
 reports/validation/

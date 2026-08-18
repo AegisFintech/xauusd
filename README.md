@@ -105,6 +105,21 @@ records durable status and error history under `reports/automation`; the
 dashboard plots strategy P&L across archived runs. Reusable unit templates live
 under `deploy/systemd`.
 
+## Frozen tournament dataset
+
+Create and verify the immutable one-year M1 research snapshot:
+
+```bash
+python -m xauusd.cli tournament-data create
+python -m xauusd.cli tournament-data status
+python -m xauusd.cli tournament-data verify
+```
+
+The snapshot is content-addressed and read-only, with fixed chronological
+60%/20%/20% train, validation, and untouched test partitions. A source-data or
+engine/cost-model change creates a distinct tournament version; previous
+results can remain reproducible against their original dataset.
+
 ## Dashboard and operations
 
 Start the read-only dashboard with `./start.sh` or `docker compose up --build`,
