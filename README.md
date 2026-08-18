@@ -97,6 +97,17 @@ validation gate and improve the champion score. `scripts/research-cron.sh` is a
 cron-compatible composition of the update and research steps; installing it in
 the host scheduler remains an explicit operational action.
 
+## Dashboard and operations
+
+Start the read-only dashboard with `./start.sh` or `docker compose up --build`,
+then open `http://localhost:8080`. Set `DASHBOARD_USERNAME` and
+`DASHBOARD_PASSWORD` in `.env` to protect the UI and report APIs with HTTP Basic
+authentication. `/health` stays public for container probes.
+
+The dashboard shows data freshness, current champion status, the latest
+candidate leaderboard, pass/fail gates, equity/drawdown charts, archived runs,
+and safe artifact exports. Startup no longer creates synthetic research output.
+
 Install with `pip install -e .` or Docker Compose. Historical bars are stored under `data/raw` and processed Parquet under `data/processed`.
 
 ## Build roadmap
