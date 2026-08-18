@@ -14,6 +14,7 @@ from .tournament_data import TournamentDataset
 from .experiment_registry import ExperimentRegistry, from_strategy
 from .search_space import catalog_size,seed_catalog
 from .tournament_runner import ContinuousTournamentWorker, TournamentRunner
+from .codex_workflow import CodexImprovementWorkflow
 import subprocess
 def campaign(synthetic: bool=False):
  Path("reports").mkdir(exist_ok=True); bars=synthetic_bars() if synthetic else None
@@ -90,6 +91,7 @@ def main():
  td=sub.add_parser("tournament-data"); td.add_argument("action",choices=["create","status","verify"]); td.add_argument("--partition",choices=["train","validation","test"])
  er=sub.add_parser("experiments"); er.add_argument("action",choices=["seed","seed-catalog","catalog","summary","list"]); er.add_argument("--status",choices=["queued","running","completed","failed","cancelled"]); er.add_argument("--limit",type=int,default=100)
  worker=sub.add_parser("tournament-worker"); worker.add_argument("--count",type=int,default=1); worker.add_argument("--continuous",action="store_true"); worker.add_argument("--idle-seconds",type=float,default=30)
+ codex=sub.add_parser("codex-improve"); codex.add_argument("action",choices=["prepare","run","status"])
  d=sub.add_parser("data"); ds=d.add_subparsers(dest="data_cmd"); i=ds.add_parser("import"); i.add_argument("csv"); v=ds.add_parser("validate")
  download=ds.add_parser("download"); download.add_argument("--start",required=True,help="UTC start date/time (for example 2026-08-01)"); download.add_argument("--end",help="UTC end date/time; defaults to now"); download.add_argument("--page-size",type=int,default=5000)
  update=ds.add_parser("update"); update.add_argument("--overlap-minutes",type=int,default=10)
@@ -141,6 +143,12 @@ def main():
    if a.count < 1: p.error("--count must be positive")
    result=TournamentRunner().run(a.count)
    print(json.dumps({"processed":len(result),"experiments":result},indent=2,allow_nan=False,default=str))
+ if a.cmd=="codex-improve":
+  workflow=CodexImprovementWorkflow()
+  if a.action=="status": result=__import__('xauusd.dashboard',fromlist=['read_json']).read_json(Path("reports/tournament/codex/latest.json"),{"status":"never_run"})
+  elif a.action=="prepare": result=workflow.prepare(TournamentDataset().active())
+  else: result=workflow.run(TournamentDataset().active())
+  print(json.dumps(result,indent=2,default=str))
  if a.cmd=="data":
   s=HistoricalDataStore()
   if a.data_cmd=="import": result=CTraderHistoricalAdapter(s).import_csv(Path(a.csv))

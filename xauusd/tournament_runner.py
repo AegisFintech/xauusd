@@ -18,6 +18,7 @@ from .tournament_data import TournamentDataset
 from .search_space import replenish_catalog
 from .validation import bootstrap_trade_paths
 from .strategy_proposals import ProposalEngine
+from .codex_workflow import CodexImprovementWorkflow
 
 
 @dataclass(frozen=True)
@@ -232,6 +233,12 @@ class ContinuousTournamentWorker:
                     if replenishment["exhausted"]:
                         replenishment["novelty"]=ProposalEngine(self.runner.registry).generate(
                             self.runner.dataset.active(),self.replenish_size)
+                        if replenishment["novelty"]["exhausted"]:
+                            latest_path=Path("reports/tournament/codex/latest.json")
+                            latest=json.loads(latest_path.read_text()) if latest_path.exists() else None
+                            if latest is None:
+                                replenishment["codex"]=CodexImprovementWorkflow(self.runner.registry).run(
+                                    self.runner.dataset.active())
                 self._status("running", recovered_stale=recovered)
                 result = self.runner.run_once()
                 if result is None:
