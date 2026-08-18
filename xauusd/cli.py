@@ -12,6 +12,7 @@ from .ml_campaign import WalkForwardMLCampaign
 from .automation import DailyResearchPipeline, automated_attempt, weekly_comparison
 from .tournament_data import TournamentDataset
 from .experiment_registry import ExperimentRegistry, from_strategy
+from .search_space import catalog_size,seed_catalog
 import subprocess
 def campaign(synthetic: bool=False):
  Path("reports").mkdir(exist_ok=True); bars=synthetic_bars() if synthetic else None
@@ -86,7 +87,7 @@ def main():
  sub.add_parser("daily-run"); sub.add_parser("weekly-report")
  sub.add_parser("automated-run")
  td=sub.add_parser("tournament-data"); td.add_argument("action",choices=["create","status","verify"]); td.add_argument("--partition",choices=["train","validation","test"])
- er=sub.add_parser("experiments"); er.add_argument("action",choices=["seed","summary","list"]); er.add_argument("--status",choices=["queued","running","completed","failed","cancelled"]); er.add_argument("--limit",type=int,default=100)
+ er=sub.add_parser("experiments"); er.add_argument("action",choices=["seed","seed-catalog","catalog","summary","list"]); er.add_argument("--status",choices=["queued","running","completed","failed","cancelled"]); er.add_argument("--limit",type=int,default=100)
  d=sub.add_parser("data"); ds=d.add_subparsers(dest="data_cmd"); i=ds.add_parser("import"); i.add_argument("csv"); v=ds.add_parser("validate")
  download=ds.add_parser("download"); download.add_argument("--start",required=True,help="UTC start date/time (for example 2026-08-01)"); download.add_argument("--end",help="UTC end date/time; defaults to now"); download.add_argument("--page-size",type=int,default=5000)
  update=ds.add_parser("update"); update.add_argument("--overlap-minutes",type=int,default=10)
@@ -121,6 +122,12 @@ def main():
     row,is_new=registry.register(from_strategy(strategy,dataset,commit))
     (created if is_new else existing).append(row["fingerprint"])
    result={"created":len(created),"existing":len(existing),"summary":registry.summary()}
+  elif a.action=="seed-catalog":
+   dataset=TournamentDataset().active()
+   try: commit=subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip()
+   except Exception: commit=None
+   result=seed_catalog(registry,dataset,commit,a.limit)
+  elif a.action=="catalog": result={"catalog_size":catalog_size()}
   elif a.action=="summary": result=registry.summary()
   else: result=registry.list(a.status,a.limit)
   print(json.dumps(result,indent=2,allow_nan=False,default=str))

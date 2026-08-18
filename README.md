@@ -136,6 +136,18 @@ and cost-model versions. Duplicate identities are ignored; lifecycle events,
 worker ownership, heartbeats, metrics, validation, artifacts, failures, and
 promotion decisions remain auditable. Stale running jobs can be safely requeued.
 
+Generate the deterministic strategy tournament catalog and seed it in batches:
+
+```bash
+python -m xauusd.cli experiments catalog
+python -m xauusd.cli experiments seed-catalog --limit 500
+```
+
+The catalog combines seven strategy families with indicator thresholds,
+lookbacks, EMA pairs, sessions, long/short modes, stops, targets, and holding
+times. Invalid pairs are excluded, ordering is deterministic, and repeat seeding
+adds only fingerprints that have never been registered.
+
 ## Dashboard and operations
 
 Start the read-only dashboard with `./start.sh` or `docker compose up --build`,

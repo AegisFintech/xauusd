@@ -69,26 +69,31 @@ def _hold_until_exit(entry_long: pd.Series, entry_short: pd.Series, exit_mask: p
 
 def generate_signal(features: pd.DataFrame, spec: StrategySpec) -> pd.Series:
     p, f = spec.parameters, features
+    def ema(window): return f.close.ewm(span=int(window),adjust=False,min_periods=int(window)).mean()
+    def directional(signal):
+        mode=p.get("direction","both")
+        return signal.clip(lower=0) if mode=="long" else signal.clip(upper=0) if mode=="short" else signal
     if spec.name == "mean_reversion":
-        return _hold_until_exit(f.zscore_20 < -float(p["entry_z"]), f.zscore_20 > float(p["entry_z"]),
-                                f.zscore_20.abs() < float(p["exit_z"]))
+        window=int(p.get("window",20)); mean=f.close.rolling(window).mean(); std=f.close.rolling(window).std(); z=(f.close-mean)/std
+        return directional(_hold_until_exit(z < -float(p["entry_z"]), z > float(p["entry_z"]),z.abs() < float(p["exit_z"])))
     if spec.name == "momentum":
-        edge = (f.ema_8 - f.ema_34) / f.atr_14
+        edge = (ema(p["fast"]) - ema(p["slow"])) / f.atr_14
         threshold = float(p["threshold_atr"])
-        return pd.Series(np.where(edge > threshold, 1, np.where(edge < -threshold, -1, 0)), index=f.index)
+        return directional(pd.Series(np.where(edge > threshold, 1, np.where(edge < -threshold, -1, 0)), index=f.index))
     if spec.name == "breakout":
-        return _hold_until_exit(f.close > f.channel_high_30, f.close < f.channel_low_30,
-                                (f.close < f.ema_20) & (f.close > f.ema_20.shift(1)))
+        lookback=int(p["lookback"]); high=f.high.rolling(lookback).max().shift(1); low=f.low.rolling(lookback).min().shift(1); mid=ema(p.get("exit_ema",20))
+        return directional(_hold_until_exit(f.close > high, f.close < low,(f.close < mid) & (f.close > mid.shift(1))))
     if spec.name == "micro_trend":
-        strength = (f.ema_5 - f.ema_20) / f.atr_14
+        strength = (ema(p["fast"]) - ema(p["slow"])) / f.atr_14
         minimum = float(p["min_strength"])
-        return pd.Series(np.where(strength > minimum, 1, np.where(strength < -minimum, -1, 0)), index=f.index)
+        return directional(pd.Series(np.where(strength > minimum, 1, np.where(strength < -minimum, -1, 0)), index=f.index))
     if spec.name == "volatility_expansion":
         active = (f.range_ratio >= float(p["range_ratio"])) & (f.body_fraction >= float(p["body_fraction"]))
-        return (f.direction.where(active, 0)).astype(int)
+        return directional((f.direction.where(active, 0)).astype(int))
     if spec.name == "session_momentum":
         active = (f.hour_utc >= int(p["start_hour"])) & (f.hour_utc < int(p["end_hour"]))
-        return pd.Series(np.where(active, np.sign(f.return_15), 0), index=f.index, dtype=int)
+        period=int(p.get("return_period",15)); returns=f.close.pct_change(period)
+        return directional(pd.Series(np.where(active, np.sign(returns), 0), index=f.index, dtype=int))
     if spec.name == "regime_switch":
         trending = f.trend_strength >= float(p["trend_threshold"])
         trend_signal = np.sign(f.ema_8 - f.ema_34)
