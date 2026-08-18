@@ -81,6 +81,22 @@ PyTorch adapters are optional install extras (`boosting`, `regimes`, and
 `sequence`) so the research core stays lightweight. All policy interfaces are
 offline-only and have no broker execution methods.
 
+## Automated research
+
+Run the idempotent daily research workflow after updating data:
+
+```bash
+python -m xauusd.cli data update
+python -m xauusd.cli daily-run
+python -m xauusd.cli weekly-report
+```
+
+Daily runs use the latest 180 days, rank all baselines, validate the top three,
+write atomic JSON/HTML archives, and only promote candidates that pass every
+validation gate and improve the champion score. `scripts/research-cron.sh` is a
+cron-compatible composition of the update and research steps; installing it in
+the host scheduler remains an explicit operational action.
+
 Install with `pip install -e .` or Docker Compose. Historical bars are stored under `data/raw` and processed Parquet under `data/processed`.
 
 ## Build roadmap

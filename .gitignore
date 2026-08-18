@@ -17,6 +17,8 @@ reports/backtests/
 reports/research/
 reports/validation/
 reports/ml/
+reports/automation/
+reports/champion.json
 
 # Coverage and test output
 coverage/
