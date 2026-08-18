@@ -16,6 +16,7 @@ data/processed/
 reports/backtests/
 reports/research/
 reports/validation/
+reports/ml/
 
 # Coverage and test output
 coverage/

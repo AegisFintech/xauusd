@@ -57,6 +57,17 @@ The validator creates chronological train/validation/test splits, anchored
 walk-forward folds, ±20% parameter-neighborhood tests, seeded bootstrap trade
 paths, and an explicit pass/fail gate report under `reports/validation`.
 
+Run the first Milestone 5 gradient-boosting research model:
+
+```bash
+python -m xauusd.cli ml-research \
+  --start 2026-01-01 --end 2026-07-31 --threshold 0.58
+```
+
+The model uses causal price features, chronological partitions, probability-
+filtered signals, and the same realistic execution engine. Outputs are research
+artifacts under `reports/ml`; failing models are never promoted.
+
 Install with `pip install -e .` or Docker Compose. Historical bars are stored under `data/raw` and processed Parquet under `data/processed`.
 
 ## Build roadmap
