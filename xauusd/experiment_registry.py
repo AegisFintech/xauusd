@@ -90,6 +90,17 @@ class ExperimentRegistry:
                 payload_json TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_events_experiment ON experiment_events(experiment_id, id);
+            CREATE TABLE IF NOT EXISTS champion_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dataset_version TEXT NOT NULL,
+                experiment_id INTEGER NOT NULL REFERENCES experiments(id),
+                previous_experiment_id INTEGER REFERENCES experiments(id),
+                promoted_at TEXT NOT NULL,
+                validation_score REAL NOT NULL,
+                holdout_score REAL NOT NULL,
+                holdout_metrics_json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_champion_dataset ON champion_history(dataset_version,id);
             """)
 
     @staticmethod
@@ -218,6 +229,37 @@ class ExperimentRegistry:
                 ORDER BY json_extract(validation_json,'$.score') DESC LIMIT ?""",(limit,)).fetchall()
             return [self._decode(row) for row in rows]
 
+    def champion(self, dataset_version: str) -> dict | None:
+        with self.connect() as db:
+            row=db.execute("SELECT * FROM champion_history WHERE dataset_version=? ORDER BY id DESC LIMIT 1",
+                           (dataset_version,)).fetchone()
+            return self._decode_champion(row) if row else None
+
+    def champion_history(self, dataset_version: str, limit: int = 100) -> list[dict]:
+        with self.connect() as db:
+            return [self._decode_champion(row) for row in db.execute(
+                "SELECT * FROM champion_history WHERE dataset_version=? ORDER BY id DESC LIMIT ?",
+                (dataset_version,limit)).fetchall()]
+
+    def promote_champion(self, dataset_version: str, experiment_id: int, validation_score: float,
+                         holdout_score: float, holdout_metrics: dict) -> dict:
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            previous=db.execute("SELECT experiment_id,holdout_score FROM champion_history WHERE dataset_version=? ORDER BY id DESC LIMIT 1",
+                                (dataset_version,)).fetchone()
+            if previous and float(previous["holdout_score"]) >= holdout_score:
+                raise ValueError("challenger does not beat champion holdout score")
+            db.execute("UPDATE experiments SET promoted=0 WHERE dataset_version=? AND promoted=1",(dataset_version,))
+            db.execute("UPDATE experiments SET promoted=1 WHERE id=?",(experiment_id,))
+            cursor=db.execute("""INSERT INTO champion_history
+                (dataset_version,experiment_id,previous_experiment_id,promoted_at,validation_score,holdout_score,holdout_metrics_json)
+                VALUES(?,?,?,?,?,?,?)""",(dataset_version,experiment_id,previous["experiment_id"] if previous else None,
+                self._now(),validation_score,holdout_score,canonical_json(holdout_metrics)))
+            self._event(db,experiment_id,"champion_promoted",{"previous_experiment_id":previous["experiment_id"] if previous else None,
+                                                               "holdout_score":holdout_score})
+            row=db.execute("SELECT * FROM champion_history WHERE id=?",(cursor.lastrowid,)).fetchone()
+            return self._decode_champion(row)
+
     def events(self, experiment_id: int) -> list[dict]:
         with self.connect() as db:
             return [{"id": row["id"], "occurred_at": row["occurred_at"], "event": row["event"],
@@ -235,6 +277,10 @@ class ExperimentRegistry:
             result[key.removesuffix("_json")] = json.loads(result.pop(key)) if result[key] else None
         result["promoted"] = bool(result["promoted"])
         return result
+
+    @staticmethod
+    def _decode_champion(row: sqlite3.Row) -> dict:
+        result=dict(row); result["holdout_metrics"]=json.loads(result.pop("holdout_metrics_json")); return result
 
 
 def from_strategy(spec: StrategySpec, dataset_manifest: dict, code_commit: str | None = None) -> ExperimentSpec:

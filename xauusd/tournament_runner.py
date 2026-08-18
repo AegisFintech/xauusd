@@ -114,23 +114,38 @@ class TournamentRunner:
                        "positive_fold_fraction":positive_fraction},"bootstrap":_finite(bootstrap)})
         return report
 
-    def _promote(self, experiment: dict, strategy: StrategySpec, validation: dict, metrics: dict) -> bool:
+    def _promote(self, experiment: dict, strategy: StrategySpec, execution: ExecutionConfig,
+                 validation: dict, directory: Path) -> tuple[bool, dict | None, dict]:
         if not validation["passed"]:
-            return False
-        directory = self.output_root / experiment["dataset_version"]
-        directory.mkdir(parents=True, exist_ok=True)
-        path = directory / "champion.json"
-        previous = json.loads(path.read_text()) if path.exists() else None
-        if previous and float(previous["score"]) >= validation["score"]:
-            return False
+            return False,None,{}
+        previous=self.registry.champion(experiment["dataset_version"])
+        if previous and float(previous["validation_score"]) >= validation["score"]:
+            return False,None,{"eligible":False,"reason":"validation_score_not_better"}
+        holdout=self._backtest("test",strategy,execution)
+        holdout_validation=self._validation(holdout["metrics"])
+        holdout_score=holdout_validation["score"]
+        finalist={"eligible":True,"evaluated_at":datetime.now(timezone.utc).isoformat(),
+                  "passed":holdout_validation["passed"],"score":holdout_score,
+                  "gates":holdout_validation["gates"],"metrics":_finite(holdout["metrics"])}
+        holdout["trades"].to_csv(directory/"holdout_trades.csv",index=False)
+        holdout["equity"].to_frame().to_parquet(directory/"holdout_equity.parquet")
+        if not finalist["passed"] or (previous and float(previous["holdout_score"])>=holdout_score):
+            finalist["reason"]="holdout_gates_failed" if not finalist["passed"] else "holdout_score_not_better"
+            return False,holdout,finalist
+        self.registry.promote_champion(experiment["dataset_version"],experiment["id"],validation["score"],
+                                       holdout_score,_finite(holdout["metrics"]))
+        champion_dir=self.output_root/experiment["dataset_version"]
+        champion_dir.mkdir(parents=True,exist_ok=True)
+        path=champion_dir/"champion.json"
         champion = {"experiment_id": experiment["id"], "fingerprint": experiment["fingerprint"],
                     "strategy": strategy.name, "parameters": strategy.parameters,
-                    "score": validation["score"], "metrics": _finite(metrics),
+                    "score": holdout_score, "validation_score":validation["score"],
+                    "metrics": _finite(holdout["metrics"]),
                     "promoted_at": datetime.now(timezone.utc).isoformat()}
         temporary = path.with_suffix(".json.tmp")
         temporary.write_text(json.dumps(champion, indent=2, allow_nan=False))
         temporary.replace(path)
-        return True
+        return True,holdout,finalist
 
     def run_once(self) -> dict | None:
         experiment = self.registry.claim_next(self.worker_id)
@@ -155,16 +170,20 @@ class TournamentRunner:
             result = validation_result or development
             result["trades"].to_csv(directory / "trades.csv", index=False)
             result["equity"].to_frame().to_parquet(directory / "equity.parquet")
+            promoted,holdout,finalist = self._promote(experiment,strategy,execution,validation,directory)
             metrics = {"development": _finite(development["metrics"]),
-                       "validation": _finite(validation_result["metrics"]) if validation_result else None}
-            promoted = self._promote(experiment, strategy, validation,
-                                     validation_result["metrics"] if validation_result else development["metrics"])
+                       "validation": _finite(validation_result["metrics"]) if validation_result else None,
+                       "holdout":_finite(holdout["metrics"]) if holdout else None}
+            validation["finalist"]=finalist
             summary = {"experiment_id": experiment["id"], "strategy": asdict(strategy),
                        "execution": asdict(execution), "metrics": metrics,
                        "validation": validation, "promoted": promoted}
             (directory / "summary.json").write_text(json.dumps(_finite(summary), indent=2, allow_nan=False))
             artifacts = {"directory": str(directory), "summary": str(directory / "summary.json"),
                          "trades": str(directory / "trades.csv"), "equity": str(directory / "equity.parquet")}
+            if holdout:
+                artifacts.update({"holdout_trades":str(directory/"holdout_trades.csv"),
+                                  "holdout_equity":str(directory/"holdout_equity.parquet")})
             return self.registry.complete(experiment["id"], self.worker_id, metrics, validation, artifacts, promoted)
         except Exception as error:
             self.registry.fail(experiment["id"], self.worker_id, f"{type(error).__name__}: {error}",

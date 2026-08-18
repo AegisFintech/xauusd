@@ -59,3 +59,14 @@ def test_leaderboard_orders_validation_score(tmp_path):
 def test_replaced_worker_is_recovered_immediately(tmp_path):
  registry=ExperimentRegistry(tmp_path/"registry.db"); row,_=registry.register(spec()); registry.claim_next("old")
  assert registry.recover_other_workers("new")==1 and registry.get(row["id"])["status"]=="queued"
+
+
+def test_champion_history_is_atomic_and_requires_improvement(tmp_path):
+ registry=ExperimentRegistry(tmp_path/"registry.db")
+ rows=[]
+ for value in (1,2): rows.append(registry.register(spec(x=value))[0])
+ first=registry.promote_champion("dataset-v1",rows[0]["id"],1,2,{"net_profit":10})
+ second=registry.promote_champion("dataset-v1",rows[1]["id"],2,3,{"net_profit":20})
+ assert second["previous_experiment_id"]==first["experiment_id"]
+ assert [x["experiment_id"] for x in registry.champion_history("dataset-v1")]==[rows[1]["id"],rows[0]["id"]]
+ with pytest.raises(ValueError): registry.promote_champion("dataset-v1",rows[0]["id"],4,2.5,{})
