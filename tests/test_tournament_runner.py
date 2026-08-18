@@ -53,7 +53,7 @@ def test_continuous_worker_records_idle_heartbeat(tmp_path, monkeypatch):
     class EmptyRunner:
         worker_id="worker-test"
         class Registry:
-            def count(self,status): return 100
+            def count(self,status): return 100 if status=="queued" else 0
             def recover_stale(self,before): return 0
             def recover_other_workers(self,worker): return 0
         registry=Registry()
