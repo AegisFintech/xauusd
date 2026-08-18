@@ -6,6 +6,8 @@ import json
 import logging
 import os
 import secrets
+import shutil
+import threading
 import time
 
 import pandas as pd
@@ -22,6 +24,63 @@ DATA_FILE = Path(os.getenv("XAUUSD_DATA_FILE", "data/processed/XAUUSD_M1.parquet
 security = HTTPBasic(auto_error=False)
 app = FastAPI(title="XAUUSD Research Dashboard", version="0.7.0")
 log = logging.getLogger("xauusd.dashboard")
+_monitor_lock=threading.Lock()
+_monitor_sample: dict | None=None
+
+
+def _read_proc(path: str) -> str:
+    try: return Path(path).read_text()
+    except (FileNotFoundError,PermissionError,OSError): return ""
+
+
+def _bytes(value: int | float) -> dict:
+    return {"bytes":int(value),"gb":round(value/1024**3,2)}
+
+
+def _service_process(service: str) -> dict:
+    pids=[line for line in _read_proc(f"/sys/fs/cgroup/system.slice/{service}.service/cgroup.procs").splitlines() if line]
+    if not pids: return {"service":service,"running":False}
+    pid=int(pids[0]); status={}
+    for line in _read_proc(f"/proc/{pid}/status").splitlines():
+        if ":" in line:
+            key,value=line.split(":",1); status[key]=value.strip()
+    stat=_read_proc(f"/proc/{pid}/stat").split(); uptime=float(_read_proc("/proc/uptime").split()[0] or 0)
+    ticks=os.sysconf("SC_CLK_TCK"); process_seconds=(float(stat[13])+float(stat[14]))/ticks if len(stat)>21 else 0
+    elapsed=max(.001,uptime-float(stat[21])/ticks) if len(stat)>21 else .001
+    memory_kb=int(status.get("VmRSS","0 kB").split()[0])
+    return {"service":service,"running":True,"pid":pid,"memory":_bytes(memory_kb*1024),
+            "cpu_percent":round(100*process_seconds/elapsed,2),"uptime_seconds":round(elapsed),
+            "threads":int(status.get("Threads",0))}
+
+
+def system_metrics() -> dict:
+    global _monitor_sample
+    now=time.monotonic(); memory={}
+    for line in _read_proc("/proc/meminfo").splitlines():
+        key,value=line.split(":",1); memory[key]=int(value.strip().split()[0])*1024
+    total=memory.get("MemTotal",0); available=memory.get("MemAvailable",0); used=max(0,total-available)
+    disk=shutil.disk_usage(Path.cwd()); load=tuple(map(float,_read_proc("/proc/loadavg").split()[:3] or (0,0,0)))
+    network={}
+    for line in _read_proc("/proc/net/dev").splitlines()[2:]:
+        interface,raw=line.split(":",1); values=raw.split(); name=interface.strip()
+        if name!="lo": network[name]={"rx_bytes":int(values[0]),"tx_bytes":int(values[8])}
+    with _monitor_lock:
+        previous=_monitor_sample; _monitor_sample={"time":now,"network":network}
+    elapsed=now-previous["time"] if previous else 0
+    rx=sum(row["rx_bytes"] for row in network.values()); tx=sum(row["tx_bytes"] for row in network.values())
+    old_rx=sum(row["rx_bytes"] for row in previous["network"].values()) if previous else rx
+    old_tx=sum(row["tx_bytes"] for row in previous["network"].values()) if previous else tx
+    cpu_count=os.cpu_count() or 1
+    return {"cpu":{"cores":cpu_count,"load_1m":load[0],"load_5m":load[1],"load_15m":load[2],
+                   "load_percent":round(100*load[0]/cpu_count,1)},
+            "memory":{"total":_bytes(total),"used":_bytes(used),"available":_bytes(available),
+                      "percent":round(100*used/total,1) if total else 0},
+            "disk":{"path":str(Path.cwd()),"total":_bytes(disk.total),"used":_bytes(disk.used),
+                    "free":_bytes(disk.free),"percent":round(100*disk.used/disk.total,1)},
+            "network":{"interfaces":network,"rx":_bytes(rx),"tx":_bytes(tx),
+                       "rx_bytes_per_second":round(max(0,rx-old_rx)/elapsed) if elapsed else 0,
+                       "tx_bytes_per_second":round(max(0,tx-old_tx)/elapsed) if elapsed else 0},
+            "services":[_service_process("xauusd-tournament"),_service_process("xauusd-dashboard")]}
 
 
 @app.middleware("http")
@@ -140,6 +199,7 @@ def api_status(_: str = Depends(authenticate)):
             "proposals":proposal_status(),
             "codex":codex_status(),
             "adaptive":adaptive_status(),
+            "system":system_metrics(),
             "tournament": tournament_status(), "experiments": {**(registry().summary() if registry() else
             {"total":0,"by_status":{},"strategy_families":0,"promoted":0}),"catalog_size":catalog_size()}}
 
@@ -307,12 +367,15 @@ tr{cursor:pointer}tr:hover{background:#202b47}.pass{color:#58d68d}.fail{color:#f
 </style></head><body><div class='wrap'><div class=top><div><h1>Strategy Tournament</h1><p class=muted>Frozen XAUUSD M1 research · live competition · no order execution</p></div><div><span id=updated></span> <button onclick=load()>Refresh</button></div></div>
 <div class=cards id=cards></div><div class=grid><section class=panel><h2>Live experiments</h2><label>Status <select id=filter onchange=loadExperiments()><option value=''>All</option><option>running</option><option>completed</option><option>failed</option><option>queued</option></select></label><table><thead><tr><th>ID</th><th>Family</th><th>Status</th><th>Score</th><th>Validation P&amp;L</th><th>PF</th><th>Drawdown</th></tr></thead><tbody id=experiments></tbody></table></section>
 <section class=panel><h2>Best challengers</h2><table><thead><tr><th>Rank</th><th>ID</th><th>Family</th><th>Score</th><th>Gate</th></tr></thead><tbody id=leaders></tbody><tfoot><tr><td colspan=5 id=championHistory class=muted></td></tr></tfoot></table></section></div>
-<div class=grid><section class=panel><h2>Selected experiment</h2><div id=detail class=muted>Select an experiment row to inspect parameters, gates and event history.</div><div id=tchart></div></section><section class=panel><h2>Risk / return field</h2><div id=scatter></div></section></div>
+<div class=grid><section class=panel><h2>Selected experiment</h2><div id=detail class=muted>Select an experiment row to inspect parameters, gates and event history.</div><div id=tchart></div></section><section class=panel><h2>Risk / return field</h2><div id=scatter></div></section></div><section class=panel style='margin-top:16px'><h2>Server resources</h2><div class=cards id=systemCards></div><table><thead><tr><th>Service</th><th>PID</th><th>CPU</th><th>Memory</th><th>Threads</th><th>Uptime</th></tr></thead><tbody id=processes></tbody></table></section>
 <script>
 const n=(v,d=2)=>v==null?'—':Number(v).toFixed(d), esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function json(url){const r=await fetch(url);if(!r.ok)throw Error(await r.text());return r.json()}
 async function load(){const s=await json('/api/status'),c=s.experiments.by_status,done=(c.completed??0)+(c.failed??0),pct=s.experiments.catalog_size?100*done/s.experiments.catalog_size:0;
 cards.innerHTML=`<div class=card>Worker<br><b class=${s.tournament_worker.healthy?'pass':'fail'}>${esc(s.tournament_worker.state)}</b><br><small>${n(s.tournament_worker.heartbeat_age_seconds,0)}s heartbeat</small></div><div class=card>Running now<br><b class=running>${c.running??0}</b><br><small>Last #${s.tournament_worker.last_experiment_id??'—'}</small></div><div class=card>Tested<br><b>${done.toLocaleString()} / ${s.experiments.catalog_size.toLocaleString()}</b><div class=progress><i style='width:${Math.min(100,pct)}%'></i></div><small>${n(pct,1)}% fixed catalog</small></div><div class=card>Queue<br><b>${(c.queued??0).toLocaleString()}</b><br><small>${s.tournament_worker.catalog?.remaining_unregistered?.toLocaleString()??'auto'} unregistered</small></div><div class=card>Adaptive search<br><b>${s.adaptive?.created??0}</b><br><small>${esc(s.adaptive?s.adaptive.parents+' diverse parents':'waiting for 100 results')}</small></div><div class=card>Novel proposals<br><b>${s.proposals?.created??0}</b><br><small>${esc(s.proposals?.generator_version??'waiting for catalog exhaustion')}</small></div><div class=card>Codex lab<br><b>${esc(s.codex.status)}</b><br><small>Auto-merge: ${s.codex.auto_merge?'ON':'OFF'}</small></div><div class=card>Champion<br><b>${esc(s.champion?.strategy??'none yet')}</b><br><small>Score ${n(s.champion?.score)}</small></div><div class=card>Promotions<br><b>${s.experiments.promoted}</b><br><small>Robust gates only</small></div>`;
+const sys=s.system,bps=v=>v<1024?v+' B/s':v<1048576?n(v/1024,1)+' KB/s':n(v/1048576,1)+' MB/s',duration=v=>v<3600?n(v/60,0)+'m':v<86400?n(v/3600,1)+'h':n(v/86400,1)+'d';
+systemCards.innerHTML=`<div class=card>CPU load<br><b>${n(sys.cpu.load_percent,1)}%</b><div class=progress><i style='width:${Math.min(100,sys.cpu.load_percent)}%'></i></div><small>${sys.cpu.cores} cores · ${n(sys.cpu.load_1m)} / ${n(sys.cpu.load_5m)} / ${n(sys.cpu.load_15m)}</small></div><div class=card>Memory<br><b>${n(sys.memory.percent,1)}%</b><div class=progress><i style='width:${sys.memory.percent}%'></i></div><small>${n(sys.memory.used.gb)} / ${n(sys.memory.total.gb)} GB</small></div><div class=card>Disk usage<br><b>${n(sys.disk.percent,1)}%</b><div class=progress><i style='width:${sys.disk.percent}%'></i></div><small>${n(sys.disk.used.gb)} / ${n(sys.disk.total.gb)} GB · ${n(sys.disk.free.gb)} GB free</small></div><div class=card>Network live<br><b>↓ ${bps(sys.network.rx_bytes_per_second)}</b><br><small>↑ ${bps(sys.network.tx_bytes_per_second)} · total ↓ ${n(sys.network.rx.gb)} GB ↑ ${n(sys.network.tx.gb)} GB</small></div>`;
+processes.innerHTML=sys.services.map(x=>`<tr><td>${esc(x.service)}</td><td>${x.pid??'—'}</td><td>${x.running?n(x.cpu_percent)+'%':'stopped'}</td><td>${x.memory?n(x.memory.gb)+' GB':'—'}</td><td>${x.threads??'—'}</td><td>${x.uptime_seconds?duration(x.uptime_seconds):'—'}</td></tr>`).join('');
 updated.textContent='Updated '+new Date().toLocaleTimeString();await Promise.all([loadExperiments(),loadLeaders()])}
 async function loadExperiments(){const status=filter.value,rows=await json('/api/experiments?limit=100'+(status?'&status='+status:''));experiments.innerHTML=rows.map(x=>{const m=x.metrics?.validation,v=x.validation;return `<tr onclick=inspect(${x.id})><td>#${x.id}</td><td>${esc(x.strategy_family)}</td><td class=${x.status}>${x.status}</td><td>${n(v?.score)}</td><td>${n(m?.net_profit)}</td><td>${n(m?.profit_factor)}</td><td>${m? n(100*m.max_drawdown,2)+'%':'—'}</td></tr>`}).join('')}
 async function loadLeaders(){const [rows,hist]=await Promise.all([json('/api/tournament/leaderboard?limit=30'),json('/api/tournament/champions?limit=10')]);leaders.innerHTML=rows.map((x,i)=>`<tr onclick=inspect(${x.id})><td>${i+1}</td><td>#${x.id}</td><td>${esc(x.strategy_family)}</td><td>${n(x.validation?.score)}</td><td class=${x.validation?.passed?'pass':'fail'}>${x.validation?.passed?'PASS':'FAIL'}</td></tr>`).join('');championHistory.textContent=hist.length?'Champion history: '+hist.map(x=>'#'+x.experiment_id+' ('+n(x.holdout_score)+')').join(' → '):'No holdout-qualified champion yet';const pts=rows.filter(x=>x.metrics?.validation);Plotly.react('scatter',[{x:pts.map(x=>100*x.metrics.validation.max_drawdown),y:pts.map(x=>x.metrics.validation.net_profit),text:pts.map(x=>'#'+x.id+' '+x.strategy_family),mode:'markers',marker:{color:pts.map(x=>x.validation.score),colorscale:'Viridis',showscale:true}}],{template:'plotly_dark',margin:{t:20},xaxis:{title:'Max drawdown %'},yaxis:{title:'Validation net P&L'},hovermode:'closest'})}
