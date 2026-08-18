@@ -34,6 +34,13 @@ def test_adaptive_search_preserves_family_exploration(tmp_path):
  assert set(report["family_counts"])=={"micro_trend","momentum"}
 
 
+def test_small_adaptive_batch_round_robins_families(tmp_path):
+ registry=ExperimentRegistry(tmp_path/"registry.db")
+ completed(registry,"mean_reversion",0,10); completed(registry,"momentum",1,1)
+ report=AdaptiveSearch(registry,tmp_path/"adaptive.json").generate(DATASET,4)
+ assert report["family_counts"]=={"mean_reversion":2,"momentum":2}
+
+
 def test_semantic_identity_ignores_provenance():
  base={"strategy":{"fast":5},"execution":{"stop_distance":2}}
  with_lineage={**base,"provenance":{"parent_experiment_ids":[1]}}

@@ -52,7 +52,7 @@ class AdaptiveSearch:
   generation=generation or previous_generation+1
   parents=self._parents(); all_rows=self.registry.list(limit=max(1000,self.registry.count()))
   seen={semantic_identity(row["strategy_family"],row["parameters"]) for row in all_rows}
-  created=[]; duplicates=0
+  created=[]; duplicates=0; candidate_groups=[]
   for parent in parents:
    raw=parent["parameters"]; strategy=dict(raw.get("strategy",raw)); execution=dict(raw.get("execution",{}))
    candidates=[]
@@ -65,22 +65,28 @@ class AdaptiveSearch:
       target[key]=_bounded(key,value,multiplier)
       if "fast" in child_strategy and "slow" in child_strategy and child_strategy["fast"]>=child_strategy["slow"]: continue
       candidates.append((child_strategy,child_execution,"bounded_mutation",key,multiplier))
-   for child_strategy,child_execution,operation,key,multiplier in candidates:
+   candidate_groups.append((parent,candidates))
+  while candidate_groups and len(created)<limit:
+   remaining=[]
+   for parent,candidates in candidate_groups:
+    if not candidates: continue
+    child_strategy,child_execution,operation,key,multiplier=candidates.pop(0)
     identity=semantic_identity(parent["strategy_family"],{"strategy":child_strategy,"execution":child_execution})
-    if identity in seen: duplicates+=1; continue
-    seen.add(identity)
-    provenance={"generator":GENERATOR_VERSION,"operation":operation,"parent_experiment_ids":[parent["id"]],
-                "generation":generation,
-                "mutated_parameter":key,"multiplier":multiplier,
-                "parent_validation_score":parent["validation"].get("score")}
-    parameters={"strategy":child_strategy,"execution":child_execution,"provenance":provenance}
-    spec=ExperimentSpec(parent["strategy_family"],parent["formula"],parameters,dataset["version"],dataset["fingerprint"],
-                        dataset["engine_version"],dataset["cost_model_version"])
-    row,is_new=self.registry.register(spec,priority=20)
-    if is_new: created.append({"experiment_id":row["id"],"family":row["strategy_family"],"provenance":provenance})
-    else: duplicates+=1
+    if identity in seen: duplicates+=1
+    else:
+     seen.add(identity)
+     provenance={"generator":GENERATOR_VERSION,"operation":operation,"parent_experiment_ids":[parent["id"]],
+                 "generation":generation,"mutated_parameter":key,"multiplier":multiplier,
+                 "parent_validation_score":parent["validation"].get("score")}
+     parameters={"strategy":child_strategy,"execution":child_execution,"provenance":provenance}
+     spec=ExperimentSpec(parent["strategy_family"],parent["formula"],parameters,dataset["version"],dataset["fingerprint"],
+                         dataset["engine_version"],dataset["cost_model_version"])
+     row,is_new=self.registry.register(spec,priority=20)
+     if is_new: created.append({"experiment_id":row["id"],"family":row["strategy_family"],"provenance":provenance})
+     else: duplicates+=1
+    if candidates: remaining.append((parent,candidates))
     if len(created)>=limit: break
-   if len(created)>=limit: break
+   candidate_groups=remaining
   family_counts=dict(sorted(__import__("collections").Counter(x["family"] for x in created).items()))
   parent_details=[{"experiment_id":row["id"],"family":row["strategy_family"],
                    "score":row["validation"].get("score")} for row in parents]
