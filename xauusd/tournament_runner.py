@@ -20,6 +20,7 @@ from .validation import bootstrap_trade_paths
 from .strategy_proposals import ProposalEngine
 from .codex_workflow import CodexImprovementWorkflow
 from .adaptive_search import AdaptiveSearch
+from .portfolio_research import PortfolioResearch
 
 
 @dataclass(frozen=True)
@@ -234,6 +235,10 @@ class ContinuousTournamentWorker:
                 adaptive_path=Path("reports/tournament/adaptive.json")
                 if completed>=100 and not adaptive_path.exists():
                     adaptive=AdaptiveSearch(self.runner.registry).generate(self.runner.dataset.active(),50)
+                portfolio_path=Path("reports/tournament/portfolio/latest.json")
+                portfolio=None
+                if completed>=150 and not portfolio_path.exists():
+                    portfolio=PortfolioResearch(self.runner.registry,self.runner.dataset).run()
                 if queued < self.queue_floor:
                     replenishment=replenish_catalog(self.runner.registry,self.runner.dataset.active(),self.replenish_size)
                     if replenishment["exhausted"]:
@@ -245,7 +250,7 @@ class ContinuousTournamentWorker:
                             if latest is None:
                                 replenishment["codex"]=CodexImprovementWorkflow(self.runner.registry).run(
                                     self.runner.dataset.active())
-                self._status("running", recovered_stale=recovered,adaptive=adaptive)
+                self._status("running", recovered_stale=recovered,adaptive=adaptive,portfolio=portfolio)
                 result = self.runner.run_once()
                 if result is None:
                     self._status("idle", message="experiment catalog is exhausted", catalog=replenishment)
