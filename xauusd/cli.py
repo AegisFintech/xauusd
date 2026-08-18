@@ -4,6 +4,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from .core import synthetic_bars, features, Backtester
 from .data import HistoricalDataStore, CTraderHistoricalAdapter, CTraderOpenApiConfig, CTraderOpenApiDownloader
+from .engine import EventDrivenBacktester, ExecutionConfig
 def campaign(synthetic: bool=False):
  Path("reports").mkdir(exist_ok=True); bars=synthetic_bars() if synthetic else None
  if bars is None: raise RuntimeError("Configure cTrader historical-data adapter before downloading live data")
@@ -11,13 +12,33 @@ def campaign(synthetic: bool=False):
  for name, sig in [("mean_reversion",(-f.bb_z).clip(-1,1)),("momentum",f.momentum.clip(-1,1)),("breakout",(f.close>f.close.rolling(30).max().shift(1)).astype(int))]:
   m=Backtester().run(f,sig); m.update(strategy=name,stability_score=max(0,min(1,1+m["max_drawdown"]))); m["score"]=.35*m["sharpe"]+.25*m["profit_factor"]+.2*(1+m["max_drawdown"])+.2*m["stability_score"]; results.append(m)
  results.sort(key=lambda x:x["score"],reverse=True); Path("reports/leaderboard.json").write_text(json.dumps(results,indent=2)); print(json.dumps(results[:10],indent=2))
+
+def event_backtest(strategy: str, start: str|None, end: str|None):
+ bars=HistoricalDataStore().read()
+ if start: bars=bars.loc[start:]
+ if end: bars=bars.loc[:end]
+ f=features(bars)
+ if strategy=="momentum": signal=(f.momentum>0).astype(int)-(f.momentum<0).astype(int)
+ elif strategy=="mean-reversion": signal=(f.bb_z < -1).astype(int)-(f.bb_z > 1).astype(int)
+ else: raise ValueError(f"unknown strategy: {strategy}")
+ result=EventDrivenBacktester(ExecutionConfig()).run(f,signal)
+ directory=Path("reports")/"backtests"; directory.mkdir(parents=True,exist_ok=True)
+ result["trades"].to_csv(directory/f"{strategy}_trades.csv",index=False)
+ result["equity"].to_frame().to_parquet(directory/f"{strategy}_equity.parquet")
+ summary={"strategy":strategy,"start":f.index.min().isoformat(),"end":f.index.max().isoformat(),**result["metrics"]}
+ (directory/f"{strategy}_summary.json").write_text(json.dumps(summary,indent=2,allow_nan=False))
+ print(json.dumps(summary,indent=2,allow_nan=False))
+
 def main():
  load_dotenv(".env")
- p=argparse.ArgumentParser(); sub=p.add_subparsers(dest="cmd"); c=sub.add_parser("campaign"); c.add_argument("--synthetic",action="store_true"); d=sub.add_parser("data"); ds=d.add_subparsers(dest="data_cmd"); i=ds.add_parser("import"); i.add_argument("csv"); v=ds.add_parser("validate")
+ p=argparse.ArgumentParser(); sub=p.add_subparsers(dest="cmd"); c=sub.add_parser("campaign"); c.add_argument("--synthetic",action="store_true")
+ b=sub.add_parser("backtest"); b.add_argument("--strategy",choices=["momentum","mean-reversion"],default="momentum"); b.add_argument("--start"); b.add_argument("--end")
+ d=sub.add_parser("data"); ds=d.add_subparsers(dest="data_cmd"); i=ds.add_parser("import"); i.add_argument("csv"); v=ds.add_parser("validate")
  download=ds.add_parser("download"); download.add_argument("--start",required=True,help="UTC start date/time (for example 2026-08-01)"); download.add_argument("--end",help="UTC end date/time; defaults to now"); download.add_argument("--page-size",type=int,default=5000)
  update=ds.add_parser("update"); update.add_argument("--overlap-minutes",type=int,default=10)
  a=p.parse_args(); logging.basicConfig(level=logging.INFO)
  if a.cmd=="campaign": campaign(a.synthetic)
+ if a.cmd=="backtest": event_backtest(a.strategy,a.start,a.end)
  if a.cmd=="data":
   s=HistoricalDataStore()
   if a.data_cmd=="import": result=CTraderHistoricalAdapter(s).import_csv(Path(a.csv))
