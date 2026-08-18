@@ -46,6 +46,17 @@ This compares causal mean-reversion, momentum, breakout, micro-trend,
 volatility-expansion, session, and regime-switching signals. The deterministic
 manifest and leaderboard are written under `reports/research`.
 
+Run the Milestone 4 out-of-sample validation gates:
+
+```bash
+python -m xauusd.cli validate-strategy \
+  --strategy mean_reversion --start 2026-01-01 --end 2026-07-31
+```
+
+The validator creates chronological train/validation/test splits, anchored
+walk-forward folds, ±20% parameter-neighborhood tests, seeded bootstrap trade
+paths, and an explicit pass/fail gate report under `reports/validation`.
+
 Install with `pip install -e .` or Docker Compose. Historical bars are stored under `data/raw` and processed Parquet under `data/processed`.
 
 ## Build roadmap

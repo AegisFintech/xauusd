@@ -15,6 +15,7 @@ data/raw/
 data/processed/
 reports/backtests/
 reports/research/
+reports/validation/
 
 # Coverage and test output
 coverage/
