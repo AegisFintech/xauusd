@@ -18,7 +18,7 @@ from .experiment_registry import ExperimentRegistry
 from .search_space import catalog_size
 from .operations import OperationsManager
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 
@@ -213,6 +213,11 @@ def live_snapshot(include_static: bool=True) -> dict:
 @app.get("/health")
 def health():
     return {"status": "ok", "mode": "research-only"}
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    return Response(status_code=204)
 
 
 @app.get("/api/status")
@@ -438,7 +443,7 @@ cards.innerHTML=`<div class=card>Worker<br><b class=${s.tournament_worker.health
 const sys=s.system,bps=v=>v<1024?v+' B/s':v<1048576?n(v/1024,1)+' KB/s':n(v/1048576,1)+' MB/s',duration=v=>v<3600?n(v/60,0)+'m':v<86400?n(v/3600,1)+'h':n(v/86400,1)+'d';
 systemCards.innerHTML=`<div class=card>CPU load<br><b>${n(sys.cpu.load_percent,1)}%</b><div class=progress><i style='width:${Math.min(100,sys.cpu.load_percent)}%'></i></div><small>${sys.cpu.cores} cores · ${n(sys.cpu.load_1m)} / ${n(sys.cpu.load_5m)} / ${n(sys.cpu.load_15m)}</small></div><div class=card>Memory<br><b>${n(sys.memory.percent,1)}%</b><div class=progress><i style='width:${sys.memory.percent}%'></i></div><small>${n(sys.memory.used.gb)} / ${n(sys.memory.total.gb)} GB</small></div><div class=card>Disk usage<br><b>${n(sys.disk.percent,1)}%</b><div class=progress><i style='width:${sys.disk.percent}%'></i></div><small>${n(sys.disk.used.gb)} / ${n(sys.disk.total.gb)} GB · ${n(sys.disk.free.gb)} GB free</small></div><div class=card>Network live<br><b>↓ ${bps(sys.network.rx_bytes_per_second)}</b><br><small>↑ ${bps(sys.network.tx_bytes_per_second)} · total ↓ ${n(sys.network.rx.gb)} GB ↑ ${n(sys.network.tx.gb)} GB</small></div>`;
 processes.innerHTML=sys.services.map(x=>`<tr><td>${esc(x.service)}</td><td>${x.pid??'—'}</td><td>${x.running?n(x.cpu_percent)+'%':'stopped'}</td><td>${x.memory?n(x.memory.gb)+' GB':'—'}</td><td>${x.threads??'—'}</td><td>${x.uptime_seconds?duration(x.uptime_seconds):'—'}</td></tr>`).join('');
-const o=s.operations;ops.innerHTML=`<b class=${o.healthy?'pass':'fail'}>${o.healthy?'HEALTHY':'ATTENTION'}</b> · DB integrity: ${esc(o.database.integrity)} · disk free ${n(o.disk_free_percent)}% · backup ${o.backup_age_hours==null?'missing':n(o.backup_age_hours,1)+'h ago'}${o.alerts.length?'<br><span class=fail>'+o.alerts.map(esc).join(' · ')+'</span>':''}`;if(s.logs)logs.textContent=s.logs.join('\n');
+const o=s.operations;ops.innerHTML=`<b class=${o.healthy?'pass':'fail'}>${o.healthy?'HEALTHY':'ATTENTION'}</b> · DB integrity: ${esc(o.database.integrity)} · disk free ${n(o.disk_free_percent)}% · backup ${o.backup_age_hours==null?'missing':n(o.backup_age_hours,1)+'h ago'}${o.alerts.length?'<br><span class=fail>'+o.alerts.map(esc).join(' · ')+'</span>':''}`;if(s.logs)logs.textContent=s.logs.join('\\n');
 const p=s.portfolio;if(p){portfolioSummary.innerHTML=`<b class=${p.passed?'pass':'fail'}>${p.passed?'PASS':'FAIL'}</b> · ${p.experiment_ids.length} diverse strategies · P&amp;L ${n(p.metrics.net_profit)} · Sharpe ${n(p.metrics.sharpe)} · Drawdown ${n(100*p.metrics.max_drawdown)}% · exposure ${n(100*p.average_exposure)}%`;regimes.innerHTML=p.strategies.map(x=>{const best=[...x.regimes].sort((a,b)=>b.net_profit-a.net_profit)[0];return `<tr onclick=inspect(${x.experiment_id})><td>#${x.experiment_id}</td><td>${esc(x.family)}</td><td>${esc(best?.regime??'—')}</td><td>${n(best?.net_profit)}</td></tr>`}).join('');json('/api/tournament/portfolio/equity').then(f=>Plotly.react('portfolioChart',f.data,f.layout))}
 updated.textContent='LIVE · '+new Date().toLocaleTimeString();if(changed)await Promise.all([loadExperiments(),loadLeaders()])}
 async function loadExperiments(){const status=filter.value,rows=await json('/api/experiments?limit=100'+(status?'&status='+status:''));experiments.innerHTML=rows.map(x=>{const m=x.metrics?.validation,v=x.validation;return `<tr onclick=inspect(${x.id})><td>#${x.id}</td><td>${esc(x.strategy_family)}</td><td class=${x.status}>${x.status}</td><td>${n(v?.score)}</td><td>${n(m?.net_profit)}</td><td>${n(m?.profit_factor)}</td><td>${m? n(100*m.max_drawdown,2)+'%':'—'}</td></tr>`}).join('')}

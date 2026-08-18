@@ -91,5 +91,10 @@ def test_live_snapshot_contains_operations_and_experiment_signature(tmp_path,mon
 
 
 def test_dashboard_uses_event_stream_not_interval_polling():
- assert "new EventSource('/api/live')" in dashboard.DASHBOARD_HTML
- assert "setInterval(load" not in dashboard.DASHBOARD_HTML
+    assert "new EventSource('/api/live')" in dashboard.DASHBOARD_HTML
+    assert "setInterval(load" not in dashboard.DASHBOARD_HTML
+    assert "logs.textContent=s.logs.join('\\n')" in dashboard.DASHBOARD_HTML
+
+
+def test_favicon_is_intentionally_empty():
+    assert TestClient(dashboard.app).get("/favicon.ico").status_code==204
