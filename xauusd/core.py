@@ -24,4 +24,4 @@ class Backtester:
         return {"cagr":float((equity.iloc[-1]/self.c.initial_cash)**(365/max((b.index[-1]-b.index[0]).days,1))-1),"sharpe":sharpe,"sortino":float(np.sqrt(252*1440)*pnl.mean()/(pnl[pnl<0].std()+1e-12)),"profit_factor":pf,"win_rate":float((pnl>0).mean()),"max_drawdown":float(dd.min()),"trades":int(trades),"expectancy":float(pnl.mean()),"exposure":float((pos!=0).mean()),"equity":equity.tolist()}
 
 def synthetic_bars(n=20000, seed=7):
-    rng=np.random.default_rng(seed); idx=pd.date_range(end=pd.Timestamp.utcnow(), periods=n, freq="min"); close=2000+np.cumsum(rng.normal(0,1,n)); return pd.DataFrame({"open":close-rng.random(n),"high":close+rng.random(n),"low":close-rng.random(n),"close":close,"volume":rng.integers(10,1000,n)},index=idx)
+    rng=np.random.default_rng(seed); idx=pd.date_range(end=pd.Timestamp.now("UTC"), periods=n, freq="min"); close=2000+np.cumsum(rng.normal(0,1,n)); return pd.DataFrame({"open":close-rng.random(n),"high":close+rng.random(n),"low":close-rng.random(n),"close":close,"volume":rng.integers(10,1000,n)},index=idx)

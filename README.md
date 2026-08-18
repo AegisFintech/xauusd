@@ -36,6 +36,16 @@ python -m xauusd.cli backtest --strategy momentum --start 2026-08-01
 Signals execute at the next bar open. Reports include a trade ledger, equity
 curve, and JSON summary under `reports/backtests`.
 
+Run the Milestone 3 baseline research campaign:
+
+```bash
+python -m xauusd.cli research --start 2026-07-01 --end 2026-07-31
+```
+
+This compares causal mean-reversion, momentum, breakout, micro-trend,
+volatility-expansion, session, and regime-switching signals. The deterministic
+manifest and leaderboard are written under `reports/research`.
+
 Install with `pip install -e .` or Docker Compose. Historical bars are stored under `data/raw` and processed Parquet under `data/processed`.
 
 ## Build roadmap
