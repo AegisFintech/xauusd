@@ -17,6 +17,7 @@ from .tournament_runner import ContinuousTournamentWorker, TournamentRunner
 from .codex_workflow import CodexImprovementWorkflow
 from .operations import OperationsManager
 from .weekly_report import WeeklyTournamentReport
+from .shadow_trading import ShadowTradingReadiness
 import subprocess
 def campaign(synthetic: bool=False):
  Path("reports").mkdir(exist_ok=True); bars=synthetic_bars() if synthetic else None
@@ -96,6 +97,7 @@ def main():
  codex=sub.add_parser("codex-improve"); codex.add_argument("action",choices=["prepare","run","status"])
  ops=sub.add_parser("operations"); ops.add_argument("action",choices=["health","backup"])
  sub.add_parser("tournament-weekly-report")
+ shadow=sub.add_parser("shadow"); shadow.add_argument("action",choices=["status","stop"]); shadow.add_argument("--reason",default="manual emergency stop")
  d=sub.add_parser("data"); ds=d.add_subparsers(dest="data_cmd"); i=ds.add_parser("import"); i.add_argument("csv"); v=ds.add_parser("validate")
  download=ds.add_parser("download"); download.add_argument("--start",required=True,help="UTC start date/time (for example 2026-08-01)"); download.add_argument("--end",help="UTC end date/time; defaults to now"); download.add_argument("--page-size",type=int,default=5000)
  update=ds.add_parser("update"); update.add_argument("--overlap-minutes",type=int,default=10)
@@ -157,6 +159,9 @@ def main():
   manager=OperationsManager(); result=manager.health() if a.action=="health" else manager.backup()
   print(json.dumps(result,indent=2,default=str))
  if a.cmd=="tournament-weekly-report": print(json.dumps(WeeklyTournamentReport().build(),indent=2,default=str))
+ if a.cmd=="shadow":
+  manager=ShadowTradingReadiness(); result=manager.readiness() if a.action=="status" else manager.emergency_stop(a.reason)
+  print(json.dumps(result,indent=2,default=str))
  if a.cmd=="data":
   s=HistoricalDataStore()
   if a.data_cmd=="import": result=CTraderHistoricalAdapter(s).import_csv(Path(a.csv))

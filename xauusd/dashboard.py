@@ -17,6 +17,7 @@ import plotly.graph_objects as go
 from .experiment_registry import ExperimentRegistry
 from .search_space import catalog_size
 from .operations import OperationsManager
+from .shadow_trading import ShadowTradingReadiness
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
@@ -238,6 +239,7 @@ def api_status(_: str = Depends(authenticate)):
             "system":system_metrics(),
             "portfolio":portfolio_status(),
             "weekly":weekly_report_status(),
+            "shadow":ShadowTradingReadiness().readiness(),
             "operations":OperationsManager().health(),
             "tournament": tournament_status(), "experiments": {**(registry().summary() if registry() else
             {"total":0,"by_status":{},"strategy_families":0,"promoted":0}),"catalog_size":catalog_size()}}
