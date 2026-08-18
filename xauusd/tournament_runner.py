@@ -9,12 +9,14 @@ import socket
 import time
 
 import numpy as np
+import pandas as pd
 
 from .engine import EventDrivenBacktester, ExecutionConfig
 from .experiment_registry import ExperimentRegistry
 from .research import StrategySpec, build_features, generate_signal
 from .tournament_data import TournamentDataset
 from .search_space import replenish_catalog
+from .validation import bootstrap_trade_paths
 
 
 @dataclass(frozen=True)
@@ -24,6 +26,10 @@ class TournamentGates:
     min_profit_factor: float = 1.0
     min_expectancy: float = 0.0
     max_drawdown: float = -0.05
+    walk_forward_folds: int = 4
+    minimum_positive_folds: float = 0.75
+    bootstrap_samples: int = 300
+    maximum_bootstrap_loss_probability: float = 0.05
 
 
 def _finite(value):
@@ -77,7 +83,9 @@ class TournamentRunner:
     def _development_passed(self, metrics: dict) -> bool:
         return metrics["trades"] >= self.gates.development_min_trades
 
-    def _validation(self, metrics: dict) -> dict:
+    def _validation(self, metrics: dict, result: dict | None = None,
+                    features=None, strategy: StrategySpec | None = None,
+                    execution: ExecutionConfig | None = None) -> dict:
         checks = {
             "minimum_trades": metrics["trades"] >= self.gates.validation_min_trades,
             "positive_expectancy": metrics["expectancy"] > self.gates.min_expectancy,
@@ -85,7 +93,26 @@ class TournamentRunner:
             "drawdown": metrics["max_drawdown"] >= self.gates.max_drawdown,
             "positive_net_profit": metrics["net_profit"] > 0,
         }
-        return {"passed": all(checks.values()), "gates": checks, "score": self.score(metrics)}
+        report = {"passed": all(checks.values()), "gates": checks, "score": self.score(metrics),
+                  "walk_forward": None, "bootstrap": None}
+        if not report["passed"] or result is None or features is None or strategy is None or execution is None:
+            return report
+        folds=[]
+        boundaries=np.linspace(0,len(features),self.gates.walk_forward_folds+1,dtype=int)
+        for number in range(1,self.gates.walk_forward_folds+1):
+            fold=features.iloc[boundaries[number-1]:boundaries[number]]
+            fold_result=EventDrivenBacktester(execution).run(fold,generate_signal(fold,strategy))
+            folds.append({"fold":number,"start":fold.index.min().isoformat(),"end":fold.index.max().isoformat(),
+                          **_finite(fold_result["metrics"])})
+        positive_fraction=float(np.mean([fold["net_profit"]>0 for fold in folds]))
+        trades=result["trades"]
+        bootstrap=bootstrap_trade_paths(trades.net_pnl if not trades.empty else pd.Series(dtype=float),
+                                        self.gates.bootstrap_samples,seed=17)
+        checks["walk_forward_consistency"]=positive_fraction>=self.gates.minimum_positive_folds
+        checks["bootstrap_confidence"]=bootstrap["loss_probability"]<=self.gates.maximum_bootstrap_loss_probability and bootstrap["p05_net_pnl"]>0
+        report.update({"passed":all(checks.values()),"walk_forward":{"folds":folds,
+                       "positive_fold_fraction":positive_fraction},"bootstrap":_finite(bootstrap)})
+        return report
 
     def _promote(self, experiment: dict, strategy: StrategySpec, validation: dict, metrics: dict) -> bool:
         if not validation["passed"]:
@@ -119,8 +146,12 @@ class TournamentRunner:
             validation = {"passed": False, "stage": "development",
                           "gates": {"minimum_trades": self._development_passed(development["metrics"])}}
             if self._development_passed(development["metrics"]):
-                validation_result = self._backtest("validation", strategy, execution)
-                validation = {"stage": "validation", **self._validation(validation_result["metrics"])}
+                bars=self.dataset.read("validation")
+                validation_features=build_features(bars)
+                validation_result=EventDrivenBacktester(execution).run(
+                    validation_features,generate_signal(validation_features,strategy))
+                validation = {"stage": "validation", **self._validation(validation_result["metrics"],
+                    validation_result,validation_features,strategy,execution)}
             result = validation_result or development
             result["trades"].to_csv(directory / "trades.csv", index=False)
             result["equity"].to_frame().to_parquet(directory / "equity.parquet")

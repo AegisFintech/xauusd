@@ -63,3 +63,17 @@ def test_continuous_worker_records_idle_heartbeat(tmp_path, monkeypatch):
     worker.run_forever()
     status=__import__("json").loads((tmp_path/"status.json").read_text())
     assert status["state"]=="stopped" and status["worker_id"]=="worker-test"
+
+
+def test_robust_validation_adds_walk_forward_and_bootstrap(tmp_path):
+    parameters={"strategy":{"fast":8,"slow":34,"threshold_atr":.1},"execution":{}}
+    gates=TournamentGates(1,1,-1,-999,-1,walk_forward_folds=2,minimum_positive_folds=0,
+                          bootstrap_samples=20,maximum_bootstrap_loss_probability=1)
+    runner,_,_=setup_runner(tmp_path,parameters,gates)
+    strategy,execution=runner.reconstruct(runner.registry.list()[0])
+    bars=runner.dataset.read("validation"); features=__import__("xauusd.research",fromlist=["build_features"]).build_features(bars)
+    result=__import__("xauusd.engine",fromlist=["EventDrivenBacktester"]).EventDrivenBacktester(execution).run(
+        features,__import__("xauusd.research",fromlist=["generate_signal"]).generate_signal(features,strategy))
+    metrics={**result["metrics"],"net_profit":1,"expectancy":1,"profit_factor":2,"max_drawdown":0}
+    report=runner._validation(metrics,result,features,strategy,execution)
+    assert len(report["walk_forward"]["folds"])==2 and report["bootstrap"]["samples"]==20
