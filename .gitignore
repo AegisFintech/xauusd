@@ -20,6 +20,7 @@ reports/research/
 reports/validation/
 reports/ml/
 reports/automation/
+reports/tournament/
 reports/champion.json
 
 # Coverage and test output

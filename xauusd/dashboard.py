@@ -88,6 +88,13 @@ def tournament_status() -> dict | None:
     return read_json(Path(pointer["manifest"])) if pointer else None
 
 
+def tournament_champion() -> dict | None:
+    tournament = tournament_status()
+    if not tournament:
+        return None
+    return read_json(REPORTS / "tournament" / tournament["version"] / "champion.json")
+
+
 def registry() -> ExperimentRegistry | None:
     path=Path(os.getenv("XAUUSD_EXPERIMENT_DB", "data/experiments/registry.sqlite3"))
     return ExperimentRegistry(path,initialize=False) if path.exists() else None
@@ -104,7 +111,7 @@ def api_status(_: str = Depends(authenticate)):
     manifest = latest_manifest()
     return {"status": "ok" if data.get("fresh") else "degraded", "mode": "research-only",
             "data": data, "latest_run": manifest["run_id"] if manifest else None,
-            "champion": read_json(REPORTS / "champion.json"), "scheduler": scheduler_status(),
+            "champion": tournament_champion() or read_json(REPORTS / "champion.json"), "scheduler": scheduler_status(),
             "tournament": tournament_status(), "experiments": {**(registry().summary() if registry() else
             {"total":0,"by_status":{},"strategy_families":0,"promoted":0}),"catalog_size":catalog_size()}}
 

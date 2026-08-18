@@ -13,6 +13,7 @@ from .automation import DailyResearchPipeline, automated_attempt, weekly_compari
 from .tournament_data import TournamentDataset
 from .experiment_registry import ExperimentRegistry, from_strategy
 from .search_space import catalog_size,seed_catalog
+from .tournament_runner import TournamentRunner
 import subprocess
 def campaign(synthetic: bool=False):
  Path("reports").mkdir(exist_ok=True); bars=synthetic_bars() if synthetic else None
@@ -88,6 +89,7 @@ def main():
  sub.add_parser("automated-run")
  td=sub.add_parser("tournament-data"); td.add_argument("action",choices=["create","status","verify"]); td.add_argument("--partition",choices=["train","validation","test"])
  er=sub.add_parser("experiments"); er.add_argument("action",choices=["seed","seed-catalog","catalog","summary","list"]); er.add_argument("--status",choices=["queued","running","completed","failed","cancelled"]); er.add_argument("--limit",type=int,default=100)
+ worker=sub.add_parser("tournament-worker"); worker.add_argument("--count",type=int,default=1)
  d=sub.add_parser("data"); ds=d.add_subparsers(dest="data_cmd"); i=ds.add_parser("import"); i.add_argument("csv"); v=ds.add_parser("validate")
  download=ds.add_parser("download"); download.add_argument("--start",required=True,help="UTC start date/time (for example 2026-08-01)"); download.add_argument("--end",help="UTC end date/time; defaults to now"); download.add_argument("--page-size",type=int,default=5000)
  update=ds.add_parser("update"); update.add_argument("--overlap-minutes",type=int,default=10)
@@ -131,6 +133,10 @@ def main():
   elif a.action=="summary": result=registry.summary()
   else: result=registry.list(a.status,a.limit)
   print(json.dumps(result,indent=2,allow_nan=False,default=str))
+ if a.cmd=="tournament-worker":
+  if a.count < 1: p.error("--count must be positive")
+  result=TournamentRunner().run(a.count)
+  print(json.dumps({"processed":len(result),"experiments":result},indent=2,allow_nan=False,default=str))
  if a.cmd=="data":
   s=HistoricalDataStore()
   if a.data_cmd=="import": result=CTraderHistoricalAdapter(s).import_csv(Path(a.csv))
