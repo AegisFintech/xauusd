@@ -1,0 +1,11 @@
+[Unit]
+Description=Generate weekly XAUUSD tournament report
+
+[Timer]
+OnCalendar=Mon *-*-* 04:00:00 Asia/Shanghai
+Persistent=true
+RandomizedDelaySec=300
+Unit=xauusd-weekly-report.service
+
+[Install]
+WantedBy=timers.target

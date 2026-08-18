@@ -1,0 +1,7 @@
+[Unit]
+Description=Generate XAUUSD tournament weekly report
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/xauusd
+ExecStart=/root/xauusd/.venv/bin/python -m xauusd.cli tournament-weekly-report
