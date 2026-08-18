@@ -81,3 +81,15 @@ def test_system_metrics_calculate_network_rate(monkeypatch):
  monkeypatch.setattr(dashboard,"_read_proc",proc)
  metrics=dashboard.system_metrics()
  assert metrics["network"]["rx_bytes_per_second"]==1000 and metrics["network"]["tx_bytes_per_second"]==1500
+
+
+def test_live_snapshot_contains_operations_and_experiment_signature(tmp_path,monkeypatch):
+ reports,data=setup_files(tmp_path); monkeypatch.setattr(dashboard,"REPORTS",reports); monkeypatch.setattr(dashboard,"DATA_FILE",data)
+ monkeypatch.setenv("XAUUSD_EXPERIMENT_DB",str(tmp_path/"missing.db")); monkeypatch.chdir(tmp_path)
+ snapshot=dashboard.live_snapshot(False)
+ assert "system" in snapshot and "operations" in snapshot and "experiments" in snapshot
+
+
+def test_dashboard_uses_event_stream_not_interval_polling():
+ assert "new EventSource('/api/live')" in dashboard.DASHBOARD_HTML
+ assert "setInterval(load" not in dashboard.DASHBOARD_HTML

@@ -9,13 +9,16 @@ import secrets
 import shutil
 import threading
 import time
+import asyncio
+import subprocess
 
 import pandas as pd
 import plotly.graph_objects as go
 from .experiment_registry import ExperimentRegistry
 from .search_space import catalog_size
+from .operations import OperationsManager
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 
@@ -187,6 +190,26 @@ def registry() -> ExperimentRegistry | None:
     return ExperimentRegistry(path,initialize=False) if path.exists() else None
 
 
+def recent_logs(lines: int=30) -> list[str]:
+    try:
+        result=subprocess.run(["journalctl","-u","xauusd-tournament.service","-n",str(lines),"--no-pager","-o","short-iso"],
+                              capture_output=True,text=True,timeout=3)
+        return result.stdout.splitlines()[-lines:]
+    except (OSError,subprocess.SubprocessError): return []
+
+
+def live_snapshot(include_static: bool=True) -> dict:
+    database=registry(); summary=database.summary() if database else {"total":0,"by_status":{},"strategy_families":0,"promoted":0}
+    result={"sent_at":datetime.now(timezone.utc).isoformat(),"tournament_worker":tournament_worker_status(),
+            "experiments":{**summary,"catalog_size":catalog_size()},"system":system_metrics(),
+            "operations":OperationsManager().health()}
+    if include_static:
+        result.update({"champion":tournament_champion() or read_json(REPORTS/"champion.json"),
+                       "proposals":proposal_status(),"codex":codex_status(),"adaptive":adaptive_status(),
+                       "portfolio":portfolio_status(),"logs":recent_logs()})
+    return result
+
+
 @app.get("/health")
 def health():
     return {"status": "ok", "mode": "research-only"}
@@ -205,8 +228,30 @@ def api_status(_: str = Depends(authenticate)):
             "adaptive":adaptive_status(),
             "system":system_metrics(),
             "portfolio":portfolio_status(),
+            "operations":OperationsManager().health(),
             "tournament": tournament_status(), "experiments": {**(registry().summary() if registry() else
             {"total":0,"by_status":{},"strategy_families":0,"promoted":0}),"catalog_size":catalog_size()}}
+
+
+@app.get("/api/live")
+async def live(request: Request, _: str = Depends(authenticate)):
+    async def events():
+        last_signature=None; sequence=0
+        while not await request.is_disconnected():
+            snapshot=await asyncio.to_thread(live_snapshot,sequence==0)
+            signature=(snapshot["experiments"].get("by_status",{}).get("completed",0),
+                       snapshot["experiments"].get("by_status",{}).get("running",0),
+                       snapshot["tournament_worker"].get("last_experiment_id"))
+            snapshot["experiment_changed"]=signature!=last_signature
+            last_signature=signature; sequence+=1
+            yield f"event: snapshot\ndata: {json.dumps(snapshot,allow_nan=False)}\n\n"
+            await asyncio.sleep(2)
+    return StreamingResponse(events(),media_type="text/event-stream",headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no"})
+
+
+@app.get("/api/operations/logs")
+def operation_logs(lines: int=Query(30,ge=1,le=200),_: str=Depends(authenticate)):
+    return {"lines":recent_logs(lines)}
 
 
 @app.get("/api/leaderboard")
@@ -383,19 +428,21 @@ tr{cursor:pointer}tr:hover{background:#202b47}.pass{color:#58d68d}.fail{color:#f
 </style></head><body><div class='wrap'><div class=top><div><h1>Strategy Tournament</h1><p class=muted>Frozen XAUUSD M1 research · live competition · no order execution</p></div><div><span id=updated></span> <button onclick=load()>Refresh</button></div></div>
 <div class=cards id=cards></div><div class=grid><section class=panel><h2>Live experiments</h2><label>Status <select id=filter onchange=loadExperiments()><option value=''>All</option><option>running</option><option>completed</option><option>failed</option><option>queued</option></select></label><table><thead><tr><th>ID</th><th>Family</th><th>Status</th><th>Score</th><th>Validation P&amp;L</th><th>PF</th><th>Drawdown</th></tr></thead><tbody id=experiments></tbody></table></section>
 <section class=panel><h2>Best challengers</h2><table><thead><tr><th>Rank</th><th>ID</th><th>Family</th><th>Score</th><th>Gate</th></tr></thead><tbody id=leaders></tbody><tfoot><tr><td colspan=5 id=championHistory class=muted></td></tr></tfoot></table></section></div>
-<div class=grid><section class=panel><h2>Selected experiment</h2><div id=detail class=muted>Select an experiment row to inspect parameters, gates and event history.</div><div id=tchart></div></section><section class=panel><h2>Risk / return field</h2><div id=scatter></div></section></div><section class=panel style='margin-top:16px'><h2>Regime &amp; portfolio competition</h2><div id=portfolioSummary class=muted>Waiting for sufficient diverse results.</div><div id=portfolioChart style='height:380px'></div><table><thead><tr><th>Experiment</th><th>Family</th><th>Best regime</th><th>Regime P&amp;L</th></tr></thead><tbody id=regimes></tbody></table></section><section class=panel style='margin-top:16px'><h2>Server resources</h2><div class=cards id=systemCards></div><table><thead><tr><th>Service</th><th>PID</th><th>CPU</th><th>Memory</th><th>Threads</th><th>Uptime</th></tr></thead><tbody id=processes></tbody></table></section>
+<div class=grid><section class=panel><h2>Selected experiment</h2><div id=detail class=muted>Select an experiment row to inspect parameters, gates and event history.</div><div id=tchart></div></section><section class=panel><h2>Risk / return field</h2><div id=scatter></div></section></div><section class=panel style='margin-top:16px'><h2>Regime &amp; portfolio competition</h2><div id=portfolioSummary class=muted>Waiting for sufficient diverse results.</div><div id=portfolioChart style='height:380px'></div><table><thead><tr><th>Experiment</th><th>Family</th><th>Best regime</th><th>Regime P&amp;L</th></tr></thead><tbody id=regimes></tbody></table></section><section class=panel style='margin-top:16px'><h2>Server resources</h2><div class=cards id=systemCards></div><table><thead><tr><th>Service</th><th>PID</th><th>CPU</th><th>Memory</th><th>Threads</th><th>Uptime</th></tr></thead><tbody id=processes></tbody></table></section><section class=panel style='margin-top:16px'><h2>Operations &amp; recovery</h2><div id=ops></div><pre id=logs style='max-height:260px;overflow:auto;color:#9ca9c3;white-space:pre-wrap'></pre></section>
 <script>
 const n=(v,d=2)=>v==null?'—':Number(v).toFixed(d), esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function json(url){const r=await fetch(url);if(!r.ok)throw Error(await r.text());return r.json()}
-async function load(){const s=await json('/api/status'),c=s.experiments.by_status,done=(c.completed??0)+(c.failed??0),pct=s.experiments.catalog_size?100*done/s.experiments.catalog_size:0;
+let state={};async function load(){state=await json('/api/status');render(state,true)}
+async function render(s,changed=false){const c=s.experiments.by_status,done=(c.completed??0)+(c.failed??0),pct=s.experiments.catalog_size?100*done/s.experiments.catalog_size:0;
 cards.innerHTML=`<div class=card>Worker<br><b class=${s.tournament_worker.healthy?'pass':'fail'}>${esc(s.tournament_worker.state)}</b><br><small>${n(s.tournament_worker.heartbeat_age_seconds,0)}s heartbeat</small></div><div class=card>Running now<br><b class=running>${c.running??0}</b><br><small>Last #${s.tournament_worker.last_experiment_id??'—'}</small></div><div class=card>Tested<br><b>${done.toLocaleString()} / ${s.experiments.catalog_size.toLocaleString()}</b><div class=progress><i style='width:${Math.min(100,pct)}%'></i></div><small>${n(pct,1)}% fixed catalog</small></div><div class=card>Queue<br><b>${(c.queued??0).toLocaleString()}</b><br><small>${s.tournament_worker.catalog?.remaining_unregistered?.toLocaleString()??'auto'} unregistered</small></div><div class=card>Adaptive search<br><b>${s.adaptive?.created??0}</b><br><small>${esc(s.adaptive?s.adaptive.parents+' diverse parents':'waiting for 100 results')}</small></div><div class=card>Novel proposals<br><b>${s.proposals?.created??0}</b><br><small>${esc(s.proposals?.generator_version??'waiting for catalog exhaustion')}</small></div><div class=card>Codex lab<br><b>${esc(s.codex.status)}</b><br><small>Auto-merge: ${s.codex.auto_merge?'ON':'OFF'}</small></div><div class=card>Champion<br><b>${esc(s.champion?.strategy??'none yet')}</b><br><small>Score ${n(s.champion?.score)}</small></div><div class=card>Promotions<br><b>${s.experiments.promoted}</b><br><small>Robust gates only</small></div>`;
 const sys=s.system,bps=v=>v<1024?v+' B/s':v<1048576?n(v/1024,1)+' KB/s':n(v/1048576,1)+' MB/s',duration=v=>v<3600?n(v/60,0)+'m':v<86400?n(v/3600,1)+'h':n(v/86400,1)+'d';
 systemCards.innerHTML=`<div class=card>CPU load<br><b>${n(sys.cpu.load_percent,1)}%</b><div class=progress><i style='width:${Math.min(100,sys.cpu.load_percent)}%'></i></div><small>${sys.cpu.cores} cores · ${n(sys.cpu.load_1m)} / ${n(sys.cpu.load_5m)} / ${n(sys.cpu.load_15m)}</small></div><div class=card>Memory<br><b>${n(sys.memory.percent,1)}%</b><div class=progress><i style='width:${sys.memory.percent}%'></i></div><small>${n(sys.memory.used.gb)} / ${n(sys.memory.total.gb)} GB</small></div><div class=card>Disk usage<br><b>${n(sys.disk.percent,1)}%</b><div class=progress><i style='width:${sys.disk.percent}%'></i></div><small>${n(sys.disk.used.gb)} / ${n(sys.disk.total.gb)} GB · ${n(sys.disk.free.gb)} GB free</small></div><div class=card>Network live<br><b>↓ ${bps(sys.network.rx_bytes_per_second)}</b><br><small>↑ ${bps(sys.network.tx_bytes_per_second)} · total ↓ ${n(sys.network.rx.gb)} GB ↑ ${n(sys.network.tx.gb)} GB</small></div>`;
 processes.innerHTML=sys.services.map(x=>`<tr><td>${esc(x.service)}</td><td>${x.pid??'—'}</td><td>${x.running?n(x.cpu_percent)+'%':'stopped'}</td><td>${x.memory?n(x.memory.gb)+' GB':'—'}</td><td>${x.threads??'—'}</td><td>${x.uptime_seconds?duration(x.uptime_seconds):'—'}</td></tr>`).join('');
+const o=s.operations;ops.innerHTML=`<b class=${o.healthy?'pass':'fail'}>${o.healthy?'HEALTHY':'ATTENTION'}</b> · DB integrity: ${esc(o.database.integrity)} · disk free ${n(o.disk_free_percent)}% · backup ${o.backup_age_hours==null?'missing':n(o.backup_age_hours,1)+'h ago'}${o.alerts.length?'<br><span class=fail>'+o.alerts.map(esc).join(' · ')+'</span>':''}`;if(s.logs)logs.textContent=s.logs.join('\n');
 const p=s.portfolio;if(p){portfolioSummary.innerHTML=`<b class=${p.passed?'pass':'fail'}>${p.passed?'PASS':'FAIL'}</b> · ${p.experiment_ids.length} diverse strategies · P&amp;L ${n(p.metrics.net_profit)} · Sharpe ${n(p.metrics.sharpe)} · Drawdown ${n(100*p.metrics.max_drawdown)}% · exposure ${n(100*p.average_exposure)}%`;regimes.innerHTML=p.strategies.map(x=>{const best=[...x.regimes].sort((a,b)=>b.net_profit-a.net_profit)[0];return `<tr onclick=inspect(${x.experiment_id})><td>#${x.experiment_id}</td><td>${esc(x.family)}</td><td>${esc(best?.regime??'—')}</td><td>${n(best?.net_profit)}</td></tr>`}).join('');json('/api/tournament/portfolio/equity').then(f=>Plotly.react('portfolioChart',f.data,f.layout))}
-updated.textContent='Updated '+new Date().toLocaleTimeString();await Promise.all([loadExperiments(),loadLeaders()])}
+updated.textContent='LIVE · '+new Date().toLocaleTimeString();if(changed)await Promise.all([loadExperiments(),loadLeaders()])}
 async function loadExperiments(){const status=filter.value,rows=await json('/api/experiments?limit=100'+(status?'&status='+status:''));experiments.innerHTML=rows.map(x=>{const m=x.metrics?.validation,v=x.validation;return `<tr onclick=inspect(${x.id})><td>#${x.id}</td><td>${esc(x.strategy_family)}</td><td class=${x.status}>${x.status}</td><td>${n(v?.score)}</td><td>${n(m?.net_profit)}</td><td>${n(m?.profit_factor)}</td><td>${m? n(100*m.max_drawdown,2)+'%':'—'}</td></tr>`}).join('')}
 async function loadLeaders(){const [rows,hist]=await Promise.all([json('/api/tournament/leaderboard?limit=30'),json('/api/tournament/champions?limit=10')]);leaders.innerHTML=rows.map((x,i)=>`<tr onclick=inspect(${x.id})><td>${i+1}</td><td>#${x.id}</td><td>${esc(x.strategy_family)}</td><td>${n(x.validation?.score)}</td><td class=${x.validation?.passed?'pass':'fail'}>${x.validation?.passed?'PASS':'FAIL'}</td></tr>`).join('');championHistory.textContent=hist.length?'Champion history: '+hist.map(x=>'#'+x.experiment_id+' ('+n(x.holdout_score)+')').join(' → '):'No holdout-qualified champion yet';const pts=rows.filter(x=>x.metrics?.validation);Plotly.react('scatter',[{x:pts.map(x=>100*x.metrics.validation.max_drawdown),y:pts.map(x=>x.metrics.validation.net_profit),text:pts.map(x=>'#'+x.id+' '+x.strategy_family),mode:'markers',marker:{color:pts.map(x=>x.validation.score),colorscale:'Viridis',showscale:true}}],{template:'plotly_dark',margin:{t:20},xaxis:{title:'Max drawdown %'},yaxis:{title:'Validation net P&L'},hovermode:'closest'})}
 async function inspect(id){const x=await json('/api/experiments/'+id),g=x.validation?.gates??{},wf=x.validation?.walk_forward,bs=x.validation?.bootstrap,fin=x.validation?.finalist;detail.innerHTML=`<h3>#${x.id} ${esc(x.strategy_family)} <span class=${x.status}>${x.status}</span></h3><p><b>Parameters</b><br><code>${esc(JSON.stringify(x.parameters))}</code></p><p><b>Gates</b><br>${Object.entries(g).map(([k,v])=>`<span class=${v?'pass':'fail'}>${v?'✓':'✗'} ${esc(k)}</span>`).join(' · ')||'Pending'}</p><p><b>Robustness</b><br>Positive walk-forward folds: ${wf?n(100*wf.positive_fold_fraction,0)+'%':'not reached'} · Bootstrap loss probability: ${bs?n(100*bs.loss_probability,1)+'%':'not reached'} · Bootstrap P05 P&amp;L: ${bs?n(bs.p05_net_pnl):'—'}</p><p><b>Finalist holdout</b><br>${fin?.eligible?'Evaluated · '+(fin.passed?'PASS':'FAIL')+' · score '+n(fin.score):esc(fin?.reason??'not eligible')}</p><p><b>Timeline</b><br>${x.events.map(e=>esc(e.occurred_at.slice(11,19))+' '+esc(e.event)).join(' → ')}</p>`;if(x.artifacts?.equity){const f=await json('/api/tournament/equity/'+id);Plotly.react('tchart',f.data,f.layout)}else Plotly.purge('tchart')}
-load();setInterval(load,15000);
+load().then(()=>{const stream=new EventSource('/api/live');stream.addEventListener('snapshot',event=>{const incoming=JSON.parse(event.data);state={...state,...incoming};render(state,incoming.experiment_changed)});stream.onerror=()=>{updated.textContent='Reconnecting live stream…'}});
 </script></div></body></html>"""

@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily XAUUSD tournament state backup
+
+[Timer]
+OnCalendar=*-*-* 03:30:00 Asia/Shanghai
+Persistent=true
+RandomizedDelaySec=300
+Unit=xauusd-backup.service
+
+[Install]
+WantedBy=timers.target
