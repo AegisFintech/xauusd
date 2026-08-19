@@ -18,6 +18,7 @@ from .experiment_registry import ExperimentRegistry
 from .search_space import catalog_size
 from .operations import OperationsManager
 from .shadow_trading import ShadowTradingReadiness
+from .distributed_compute import RemoteComputeBridge
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
@@ -363,7 +364,14 @@ def tournament_equity(experiment_id: int, _: str = Depends(authenticate)):
     if not item or not item.get("artifacts"):
         raise HTTPException(404,"experiment artifact not found")
     allowed=(REPORTS/"tournament").resolve()
-    path=Path(item["artifacts"]["equity"]).resolve()
+    artifacts=item["artifacts"]
+    if artifacts.get("storage")=="remote":
+        path=(REPORTS/"tournament"/"distributed"/"cache"/str(experiment_id)/"equity.parquet").resolve()
+        if not path.is_file():
+            try: RemoteComputeBridge(registry=database).fetch_artifact(artifacts["remote_directory"],"equity.parquet",path)
+            except (OSError,ValueError,subprocess.SubprocessError): raise HTTPException(503,"remote equity artifact unavailable")
+    else:
+        path=Path(artifacts.get("equity","")).resolve()
     if allowed not in path.parents or not path.is_file():
         raise HTTPException(404,"equity artifact not found")
     series=pd.read_parquet(path).iloc[:,0]

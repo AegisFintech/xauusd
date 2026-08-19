@@ -1,7 +1,7 @@
 import hashlib,json
 
 from xauusd.core import synthetic_bars
-from xauusd.distributed_compute import PROTOCOL_VERSION,compute_job,job_payload
+from xauusd.distributed_compute import PROTOCOL_VERSION,RemoteComputeBridge,compute_job,job_payload
 from xauusd.experiment_registry import ExperimentRegistry,ExperimentSpec,canonical_json
 from xauusd.tournament_data import TournamentDataConfig,TournamentDataset
 
@@ -35,3 +35,11 @@ def test_compute_job_rejects_wrong_dataset(tmp_path):
  try: compute_job(path,tmp_path/"result",dataset)
  except ValueError as error: assert "fingerprint mismatch" in str(error)
  else: raise AssertionError("mismatch accepted")
+
+
+def test_remote_artifact_fetch_restricts_path_and_name(tmp_path,monkeypatch):
+ monkeypatch.setenv("COMPUTE_HOST","example"); bridge=RemoteComputeBridge(root=tmp_path)
+ for path,name in (("/etc","equity.parquet"),("/tmp/xauusd-result-1","secret")):
+  try: bridge.fetch_artifact(path,name,tmp_path/"out")
+  except ValueError: pass
+  else: raise AssertionError("unsafe artifact accepted")

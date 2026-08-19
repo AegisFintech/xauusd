@@ -153,6 +153,15 @@ class RemoteComputeBridge:
         payload={**previous,"protocol":PROTOCOL_VERSION,"updated_at":datetime.now(timezone.utc).isoformat(),**extra}
         _atomic_json(path,payload); return payload
 
+    def fetch_artifact(self,remote_directory: str,name: str,destination: Path) -> Path:
+        if name not in {"equity.parquet","trades.csv.gz"}: raise ValueError("unsupported artifact")
+        if not remote_directory.startswith("/tmp/xauusd-result-"): raise ValueError("invalid remote artifact path")
+        destination.parent.mkdir(parents=True,exist_ok=True)
+        temporary=destination.with_suffix(destination.suffix+".tmp")
+        command=["ssh",*self._ssh_options(),f"{self.user}@{self.host}",f"cat {remote_directory}/{name}"]
+        with temporary.open("wb") as output: subprocess.run(command,stdout=output,check=True,timeout=300)
+        temporary.replace(destination); return destination
+
     def process_claimed(self,experiment: dict,code_commit: str) -> dict:
         eid=experiment["id"]; worker=experiment["worker_id"]
         local=self.root/"results"/str(eid); job=self.root/"jobs"/f"{eid}.json"
