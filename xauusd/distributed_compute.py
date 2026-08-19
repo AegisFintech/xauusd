@@ -122,7 +122,7 @@ class RemoteComputeBridge:
         self.host=os.environ["COMPUTE_HOST"]; self.user=os.getenv("COMPUTE_USER","root")
         self.port=os.getenv("COMPUTE_PORT","22"); self.key=os.getenv("COMPUTE_SSH_KEY","/root/.ssh/xauusd_compute")
         self.remote_root=os.getenv("COMPUTE_ROOT","/opt/xauusd")
-        self.workers=max(1,int(os.getenv("COMPUTE_WORKERS","12")))
+        self.workers=max(1,int(os.getenv("COMPUTE_WORKERS","16")))
         self.control_path=os.getenv("COMPUTE_SSH_CONTROL_PATH","/tmp/xauusd-ssh-%r@%h:%p")
         self.worker_states={}; self.state_lock=threading.Lock(); self.durations=deque(maxlen=500)
         self.telemetry={}; self.telemetry_at=0.; self.history=deque(maxlen=360)
