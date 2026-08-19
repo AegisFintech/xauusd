@@ -92,7 +92,7 @@ def generate_signal(features: pd.DataFrame, spec: StrategySpec) -> pd.Series:
         return directional((f.direction.where(active, 0)).astype(int))
     if spec.name == "session_momentum":
         active = (f.hour_utc >= int(p["start_hour"])) & (f.hour_utc < int(p["end_hour"]))
-        period=int(p.get("return_period",15)); returns=f.close.pct_change(period)
+        period=int(p.get("return_period",15)); returns=f.close.pct_change(period).fillna(0)
         return directional(pd.Series(np.where(active, np.sign(returns), 0), index=f.index, dtype=int))
     if spec.name == "regime_switch":
         trending = f.trend_strength >= float(p["trend_threshold"])

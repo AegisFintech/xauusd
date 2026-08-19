@@ -39,6 +39,13 @@ def test_quantitative_families_are_causal_and_generate_scenarios():
   assert signal.index.equals(features.index) and set(signal.dropna().unique()) <= {-1,0,1}
 
 
+def test_session_momentum_warmup_is_flat_not_an_integer_cast_error():
+ features=build_features(synthetic_bars(1000,seed=72))
+ signal=generate_signal(features,StrategySpec("session_momentum",
+  {"start_hour":0,"end_hour":20,"return_period":30,"direction":"both"}))
+ assert signal.iloc[:30].eq(0).all()
+
+
 def test_replenishment_scans_past_existing_prefix(tmp_path):
  registry=ExperimentRegistry(tmp_path/"x.db"); seed_catalog(registry,DATASET,limit=10)
  result=replenish_catalog(registry,DATASET,target_new=5)
