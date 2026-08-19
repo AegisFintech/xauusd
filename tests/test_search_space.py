@@ -9,7 +9,7 @@ DATASET={"version":"v1","fingerprint":"abc","engine_version":"e1","cost_model_ve
 
 def test_catalog_is_deterministic_and_valid():
  first=list(candidate_specs()); second=list(candidate_specs())
- assert first==second and len(first)==catalog_size() and len(first)>1000
+ assert first==second and len(first)==catalog_size() and 45_000 < len(first) < 55_000
  assert all(s.parameters.get("fast",0)<s.parameters.get("slow",10**9) for s,_ in first)
 
 
@@ -24,6 +24,19 @@ def test_dynamic_parameters_change_signal():
  a=generate_signal(features,StrategySpec("momentum",{"fast":5,"slow":20,"threshold_atr":.1}))
  b=generate_signal(features,StrategySpec("momentum",{"fast":12,"slow":50,"threshold_atr":.5}))
  assert not a.equals(b)
+
+
+def test_quantitative_families_are_causal_and_generate_scenarios():
+ features=build_features(synthetic_bars(2000,seed=71))
+ scenarios=(
+  StrategySpec("autocorrelation_regime",{"corr_window":20,"lag":1,"threshold":.05,"return_period":1}),
+  StrategySpec("multi_horizon_momentum",{"fast_period":3,"slow_period":15,"threshold_atr":.05}),
+  StrategySpec("quantile_reversion",{"window":20,"entry_quantile":.1,"exit_quantile":.5}),
+  StrategySpec("volatility_adjusted_trend",{"return_period":5,"vol_window":30,"threshold":.5}),
+ )
+ for spec in scenarios:
+  signal=generate_signal(features,spec)
+  assert signal.index.equals(features.index) and set(signal.dropna().unique()) <= {-1,0,1}
 
 
 def test_replenishment_scans_past_existing_prefix(tmp_path):

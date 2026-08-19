@@ -22,7 +22,7 @@ from .tournament_runner import TournamentRunner, _finite
 from .adaptive_search import AdaptiveSearch
 from .codex_workflow import CodexImprovementWorkflow
 from .portfolio_research import PortfolioResearch
-from .search_space import replenish_catalog
+from .search_space import catalog_size,replenish_catalog
 from .strategy_proposals import ProposalEngine
 
 
@@ -246,6 +246,7 @@ class RemoteComputeBridge:
 
     def maintain_control_plane(self) -> dict:
         completed=self.registry.count("completed"); queued=self.registry.count("queued")
+        low_queue_threshold=max(100,int(catalog_size()*.10))
         adaptive_path=Path("reports/tournament/adaptive.json")
         try: previous=json.loads(adaptive_path.read_text()) if adaptive_path.exists() else {}
         except (OSError,json.JSONDecodeError): previous={}
@@ -258,15 +259,24 @@ class RemoteComputeBridge:
         if completed>=150 and not portfolio_path.exists():
             portfolio=PortfolioResearch(self.registry,self.dataset).run()
         catalog=None
-        if queued<100:
-            catalog=replenish_catalog(self.registry,self.dataset.active(),500)
+        if queued<low_queue_threshold:
+            catalog=replenish_catalog(self.registry,self.dataset.active(),low_queue_threshold-queued)
+            catalog["low_queue_threshold"]=low_queue_threshold
             if catalog["exhausted"]:
-                catalog["novelty"]=ProposalEngine(self.registry).generate(self.dataset.active(),500)
+                catalog["novelty"]=ProposalEngine(self.registry).generate(
+                    self.dataset.active(),low_queue_threshold-queued)
                 if catalog["novelty"]["exhausted"]:
                     latest=Path("reports/tournament/codex/latest.json")
-                    if not latest.exists():
+                    latest_state={}
+                    try: latest_state=json.loads(latest.read_text()) if latest.exists() else {}
+                    except (OSError,json.JSONDecodeError): pass
+                    terminal=latest_state.get("status") in {"review_ready","rejected","failed"}
+                    finished=latest_state.get("finished_at")
+                    old_enough=not finished or datetime.fromisoformat(finished).astimezone(timezone.utc) <= datetime.now(timezone.utc)-timedelta(days=1)
+                    if not latest.exists() or (terminal and old_enough):
                         catalog["codex"]=CodexImprovementWorkflow(self.registry).run(self.dataset.active())
-        return {"adaptive":adaptive,"portfolio":portfolio,"catalog":catalog}
+        return {"adaptive":adaptive,"portfolio":portfolio,"catalog":catalog,
+                "low_queue_threshold":low_queue_threshold,"low_queue_percent":10}
 
     def run_forever(self,idle_seconds: float=10) -> None:
         worker_prefix=f"remote-master-{os.getpid()}"

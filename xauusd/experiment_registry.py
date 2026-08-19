@@ -316,6 +316,10 @@ def from_strategy(spec: StrategySpec, dataset_manifest: dict, code_commit: str |
         "volatility_expansion": "direction if range_ratio>=threshold and body_fraction>=threshold else flat",
         "session_momentum": "sign(return_15) within UTC session",
         "regime_switch": "trend signal when strength>=threshold else zscore reversion",
+        "autocorrelation_regime": "follow returns in positive rolling autocorrelation; fade in negative autocorrelation",
+        "multi_horizon_momentum": "trade only when fast and slow ATR-normalized returns agree",
+        "quantile_reversion": "fade causal rolling return-tail quantiles and exit near the median",
+        "volatility_adjusted_trend": "sign(return_period / rolling_return_volatility, threshold)",
     }.get(spec.name, spec.name)
     return ExperimentSpec(spec.name, formula, dict(spec.parameters), dataset_manifest["version"],
                           dataset_manifest["fingerprint"], dataset_manifest["engine_version"],

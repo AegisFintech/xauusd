@@ -100,6 +100,31 @@ def generate_signal(features: pd.DataFrame, spec: StrategySpec) -> pd.Series:
         revert_signal = np.where(f.zscore_20 < -float(p["entry_z"]), 1,
                                  np.where(f.zscore_20 > float(p["entry_z"]), -1, 0))
         return pd.Series(np.where(trending, trend_signal, revert_signal), index=f.index, dtype=int)
+    if spec.name == "autocorrelation_regime":
+        period=int(p["return_period"]); returns=f.close.pct_change(period); lag=int(p["lag"])
+        correlation=returns.rolling(int(p["corr_window"])).corr(returns.shift(lag))
+        direction=np.sign(returns)
+        signal=pd.Series(np.where(correlation > float(p["threshold"]),direction,
+                         np.where(correlation < -float(p["threshold"]),-direction,0)),index=f.index,dtype=int)
+        return directional(signal)
+    if spec.name == "multi_horizon_momentum":
+        fast=f.close.diff(int(p["fast_period"]))/f.atr_14
+        slow=f.close.diff(int(p["slow_period"]))/f.atr_14
+        threshold=float(p["threshold_atr"])
+        signal=pd.Series(np.where((fast>threshold)&(slow>threshold),1,
+                         np.where((fast < -threshold)&(slow < -threshold),-1,0)),index=f.index,dtype=int)
+        return directional(signal)
+    if spec.name == "quantile_reversion":
+        returns=f.close.pct_change(); window=int(p["window"])
+        low=returns.rolling(window).quantile(float(p["entry_quantile"])).shift(1)
+        high=returns.rolling(window).quantile(1-float(p["entry_quantile"])).shift(1)
+        exit_band=returns.rolling(window).quantile(float(p["exit_quantile"])).abs().shift(1)
+        return directional(_hold_until_exit(returns<low,returns>high,returns.abs()<exit_band))
+    if spec.name == "volatility_adjusted_trend":
+        returns=f.close.pct_change(); window=int(p["vol_window"])
+        edge=f.close.pct_change(int(p["return_period"]))/returns.rolling(window).std().replace(0,np.nan)
+        threshold=float(p["threshold"])
+        return directional(pd.Series(np.where(edge>threshold,1,np.where(edge < -threshold,-1,0)),index=f.index,dtype=int))
     if spec.name == "trend_pullback":
         trend=(ema(p["fast"])-ema(p["slow"]))/f.atr_14
         strength=float(p["min_strength"]); pullback=float(p["pullback_z"])

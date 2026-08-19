@@ -4,6 +4,7 @@ from xauusd.core import synthetic_bars
 from xauusd.distributed_compute import PROTOCOL_VERSION,RemoteComputeBridge,compute_job,job_payload
 from xauusd.experiment_registry import ExperimentRegistry,ExperimentSpec,canonical_json
 from xauusd.tournament_data import TournamentDataConfig,TournamentDataset
+from xauusd.search_space import catalog_size
 
 
 def setup(tmp_path):
@@ -53,3 +54,16 @@ def test_remote_telemetry_has_bpytop_capacity_fields(tmp_path,monkeypatch):
  monkeypatch.setattr(bridge,"_ssh",lambda *a,**k:Result())
  sample=bridge.sample_remote()
  assert sample["connected"] and sample["cpu"]["per_core"]==[40,60] and sample["ssh_latency_ms"]>=0
+
+
+def test_control_plane_refills_at_ten_percent(tmp_path,monkeypatch):
+ dataset,experiment=setup(tmp_path); registry=ExperimentRegistry(tmp_path/"registry.sqlite3")
+ monkeypatch.setenv("COMPUTE_HOST","example")
+ bridge=RemoteComputeBridge(registry,dataset,tmp_path/"reports")
+ calls=[]
+ monkeypatch.setattr("xauusd.distributed_compute.replenish_catalog",
+  lambda registry,dataset,target_new:{"exhausted":False,"created":target_new})
+ monkeypatch.setattr("xauusd.distributed_compute.PortfolioResearch.run",lambda self:None)
+ result=bridge.maintain_control_plane()
+ assert result["low_queue_threshold"]==int(catalog_size()*.10)
+ assert result["catalog"]["created"]==result["low_queue_threshold"]
