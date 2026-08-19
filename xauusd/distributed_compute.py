@@ -93,16 +93,33 @@ class RemoteComputeBridge:
         self.port=os.getenv("COMPUTE_PORT","22"); self.key=os.getenv("COMPUTE_SSH_KEY","/root/.ssh/xauusd_compute")
         self.remote_root=os.getenv("COMPUTE_ROOT","/opt/xauusd")
         self.workers=max(1,int(os.getenv("COMPUTE_WORKERS","12")))
+        self.control_path=os.getenv("COMPUTE_SSH_CONTROL_PATH","/tmp/xauusd-ssh-%r@%h:%p")
+
+    def _ssh_options(self) -> list[str]:
+        return ["-i",self.key,"-p",self.port,"-o","BatchMode=yes","-o","ConnectTimeout=15",
+                "-o","ServerAliveInterval=15","-o","ServerAliveCountMax=4","-o","ControlMaster=auto",
+                "-o","ControlPersist=300","-o",f"ControlPath={self.control_path}"]
+
+    @staticmethod
+    def _retry(command: list[str],timeout: int=7200,attempts: int=4):
+        last=None
+        for attempt in range(attempts):
+            try: return subprocess.run(command,check=True,text=True,timeout=timeout)
+            except subprocess.CalledProcessError as error:
+                last=error
+                if attempt+1<attempts: time.sleep(2**attempt)
+        raise last
 
     def _ssh(self,*remote: str,check=True,capture=False):
-        command=["ssh","-i",self.key,"-p",self.port,"-o","BatchMode=yes","-o","ConnectTimeout=15",
-                 f"{self.user}@{self.host}",*remote]
+        command=["ssh",*self._ssh_options(),f"{self.user}@{self.host}",*remote]
+        if check and not capture: return self._retry(command)
         return subprocess.run(command,check=check,text=True,capture_output=capture,timeout=7200)
 
     def _scp(self,source: str,target: str,recursive=False):
-        command=["scp","-i",self.key,"-P",self.port,"-q"]
+        command=["scp","-i",self.key,"-P",self.port,"-q","-o","ControlMaster=auto",
+                 "-o","ControlPersist=300","-o",f"ControlPath={self.control_path}"]
         if recursive: command.append("-r")
-        command.extend([source,target]); subprocess.run(command,check=True,timeout=7200)
+        command.extend([source,target]); self._retry(command)
 
     def status(self,**extra) -> dict:
         path=self.root/"status.json"; previous={}
@@ -169,6 +186,7 @@ class RemoteComputeBridge:
     def run_forever(self,idle_seconds: float=10) -> None:
         worker_prefix=f"remote-master-{os.getpid()}"
         self.registry.recover_stale(datetime.now(timezone.utc)-timedelta(minutes=120))
+        self._ssh("true")
         try: code_commit=subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip()
         except (OSError,subprocess.CalledProcessError): code_commit="unknown"
         with ThreadPoolExecutor(max_workers=self.workers) as pool:
