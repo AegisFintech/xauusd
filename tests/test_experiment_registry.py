@@ -61,6 +61,13 @@ def test_replaced_worker_is_recovered_immediately(tmp_path):
  assert registry.recover_other_workers("new")==1 and registry.get(row["id"])["status"]=="queued"
 
 
+def test_remote_error_can_requeue_owned_experiment(tmp_path):
+ registry=ExperimentRegistry(tmp_path/"registry.db"); row,_=registry.register(spec()); claimed=registry.claim_next("remote")
+ result=registry.requeue(claimed["id"],"remote","connection lost")
+ assert result["status"]=="queued" and result["worker_id"] is None
+ assert registry.events(row["id"])[-1]["event"]=="requeued_remote_error"
+
+
 def test_champion_history_is_atomic_and_requires_improvement(tmp_path):
  registry=ExperimentRegistry(tmp_path/"registry.db")
  rows=[]

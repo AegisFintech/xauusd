@@ -150,6 +150,15 @@ class ExperimentRegistry:
     def fail(self, experiment_id: int, worker_id: str, error: str, artifacts: dict | None = None) -> dict:
         return self._finish(experiment_id, worker_id, "failed", None, None, artifacts, error, False)
 
+    def requeue(self,experiment_id: int,worker_id: str,error: str) -> dict:
+        with self.connect() as db:
+            cursor=db.execute("""UPDATE experiments SET status='queued',worker_id=NULL,started_at=NULL,
+                heartbeat_at=NULL,error=? WHERE id=? AND status='running' AND worker_id=?""",
+                (error,experiment_id,worker_id))
+            if cursor.rowcount!=1: raise ValueError("experiment is not owned by this worker or is no longer running")
+            self._event(db,experiment_id,"requeued_remote_error",{"worker_id":worker_id,"error":error})
+            return self.get(experiment_id,db)
+
     def _finish(self, experiment_id: int, worker_id: str, status: ExperimentStatus, metrics, validation,
                 artifacts, error, promoted: bool) -> dict:
         now = self._now()

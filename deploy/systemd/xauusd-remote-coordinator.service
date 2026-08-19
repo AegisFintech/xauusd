@@ -1,0 +1,19 @@
+[Unit]
+Description=Dispatch XAUUSD backtests to remote compute server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/xauusd
+EnvironmentFile=/root/xauusd/.env
+ExecStart=/root/xauusd/.venv/bin/python -m xauusd.cli remote-coordinator
+Restart=always
+RestartSec=10
+TimeoutStopSec=180
+Nice=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
