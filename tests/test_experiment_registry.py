@@ -68,6 +68,14 @@ def test_remote_error_can_requeue_owned_experiment(tmp_path):
  assert registry.events(row["id"])[-1]["event"]=="requeued_remote_error"
 
 
+def test_replaced_remote_pool_is_recovered_without_touching_current_pool(tmp_path):
+ registry=ExperimentRegistry(tmp_path/"registry.db")
+ old,_=registry.register(spec(x=1)); current,_=registry.register(spec(x=2))
+ registry.claim_next("remote-master-old-1"); registry.claim_next("remote-master-new-1")
+ assert registry.recover_worker_prefix("remote-master-","remote-master-new")==1
+ assert registry.get(old["id"])["status"]=="queued" and registry.get(current["id"])["status"]=="running"
+
+
 def test_champion_history_is_atomic_and_requires_improvement(tmp_path):
  registry=ExperimentRegistry(tmp_path/"registry.db")
  rows=[]

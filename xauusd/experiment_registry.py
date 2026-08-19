@@ -198,6 +198,21 @@ class ExperimentRegistry:
                 self._event(db,row["id"],"requeued_replaced_worker",{"previous_worker":row["worker_id"]})
             return len(rows)
 
+    def recover_worker_prefix(self,prefix: str,active_prefix: str | None=None) -> int:
+        """Requeue leases from replaced instances of a named worker pool."""
+        now=self._now(); pattern=f"{prefix}%"
+        with self.connect() as db:
+            if active_prefix:
+                rows=db.execute("SELECT id,worker_id FROM experiments WHERE status='running' AND worker_id LIKE ? AND worker_id NOT LIKE ?",
+                                (pattern,f"{active_prefix}%")).fetchall()
+            else:
+                rows=db.execute("SELECT id,worker_id FROM experiments WHERE status='running' AND worker_id LIKE ?",(pattern,)).fetchall()
+            for row in rows:
+                db.execute("UPDATE experiments SET status='queued',worker_id=NULL,started_at=NULL,heartbeat_at=NULL,error=? WHERE id=?",
+                           (f"recovered replaced pool worker {row['worker_id']} at {now}",row["id"]))
+                self._event(db,row["id"],"requeued_replaced_pool_worker",{"previous_worker":row["worker_id"]})
+            return len(rows)
+
     def get(self, experiment_id: int, db: sqlite3.Connection | None = None) -> dict:
         if db is not None:
             row = db.execute("SELECT * FROM experiments WHERE id=?", (experiment_id,)).fetchone()

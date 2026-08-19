@@ -185,6 +185,7 @@ class RemoteComputeBridge:
 
     def run_forever(self,idle_seconds: float=10) -> None:
         worker_prefix=f"remote-master-{os.getpid()}"
+        recovered_replaced=self.registry.recover_worker_prefix("remote-master-",worker_prefix)
         self.registry.recover_stale(datetime.now(timezone.utc)-timedelta(minutes=120))
         self._ssh("true")
         try: code_commit=subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip()
