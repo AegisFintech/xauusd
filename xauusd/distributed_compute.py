@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import subprocess
+import tarfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
@@ -121,6 +122,30 @@ class RemoteComputeBridge:
         if recursive: command.append("-r")
         command.extend([source,target]); self._retry(command)
 
+    def _upload_job(self,source: Path,remote: str) -> None:
+        command=["ssh",*self._ssh_options(),f"{self.user}@{self.host}",f"cat > {remote}"]
+        last=None
+        for attempt in range(4):
+            try:
+                subprocess.run(command,input=source.read_bytes(),check=True,timeout=60)
+                return
+            except subprocess.CalledProcessError as error:
+                last=error; time.sleep(2**attempt)
+        raise last
+
+    def _download_result(self,remote: str,local: Path) -> None:
+        archive=local.parent/f".{local.name}.tar.gz"
+        command=["ssh",*self._ssh_options(),f"{self.user}@{self.host}",f"tar -C {remote} -czf - ."]
+        with archive.open("wb") as output:
+            subprocess.run(command,stdout=output,check=True,timeout=300)
+        local.mkdir(parents=True,exist_ok=True)
+        with tarfile.open(archive,"r:gz") as bundle:
+            for member in bundle.getmembers():
+                if member.islnk() or member.issym() or ".." in Path(member.name).parts:
+                    raise ValueError("unsafe remote result archive")
+            bundle.extractall(local,filter="data")
+        archive.unlink()
+
     def status(self,**extra) -> dict:
         path=self.root/"status.json"; previous={}
         try: previous=json.loads(path.read_text())
@@ -134,11 +159,10 @@ class RemoteComputeBridge:
         _atomic_json(job,job_payload(experiment,self.dataset.active(),code_commit))
         remote_job=f"/tmp/xauusd-job-{eid}.json"; remote_result=f"/tmp/xauusd-result-{eid}"
         try:
-            self._scp(str(job),f"{self.user}@{self.host}:{remote_job}")
+            self._upload_job(job,remote_job)
             self._ssh(f"cd {self.remote_root} && .venv/bin/python -m xauusd.cli compute-job {remote_job} {remote_result} >/dev/null")
             if local.exists(): shutil.rmtree(local)
-            local.mkdir(parents=True)
-            self._scp(f"{self.user}@{self.host}:{remote_result}/.",str(local),recursive=True)
+            self._download_result(remote_result,local)
             bundle=json.loads((local/"result.json").read_text())
             digest=bundle.pop("result_digest"); actual=hashlib.sha256(canonical_json(bundle).encode()).hexdigest()
             if digest!=actual or bundle["experiment_fingerprint"]!=experiment["fingerprint"]:
