@@ -160,10 +160,9 @@ class RemoteComputeBridge:
         remote_job=f"/tmp/xauusd-job-{eid}.json"; remote_result=f"/tmp/xauusd-result-{eid}"
         try:
             self._upload_job(job,remote_job)
-            self._ssh(f"cd {self.remote_root} && .venv/bin/python -m xauusd.cli compute-job {remote_job} {remote_result} >/dev/null")
-            if local.exists(): shutil.rmtree(local)
-            self._download_result(remote_result,local)
-            bundle=json.loads((local/"result.json").read_text())
+            execution=self._ssh(f"cd {self.remote_root} && .venv/bin/python -m xauusd.cli compute-job {remote_job} {remote_result}",capture=True)
+            if execution.returncode: raise subprocess.CalledProcessError(execution.returncode,execution.args,execution.stdout,execution.stderr)
+            bundle=json.loads(execution.stdout)
             digest=bundle.pop("result_digest"); actual=hashlib.sha256(canonical_json(bundle).encode()).hexdigest()
             if digest!=actual or bundle["experiment_fingerprint"]!=experiment["fingerprint"]:
                 raise ValueError("remote result verification failed")
@@ -174,14 +173,15 @@ class RemoteComputeBridge:
                 experiment,strategy,execution,validation,local)
             validation["finalist"]=finalist; metrics=bundle["metrics"]
             if holdout: metrics["holdout"]=_finite(holdout["metrics"])
-            artifacts={"directory":str(local),"summary":str(local/"result.json"),
-                       "trades":str(local/"trades.csv.gz"),"equity":str(local/"equity.parquet")}
+            local.mkdir(parents=True,exist_ok=True); _atomic_json(local/"result.json",{**bundle,"result_digest":digest})
+            artifacts={"directory":str(local),"summary":str(local/"result.json"),"remote_host":self.host,
+                       "remote_directory":remote_result,"storage":"remote","fetch_policy":"on_demand"}
             return self.registry.complete(eid,worker,metrics,validation,artifacts,promoted)
         except Exception as error:
             self.registry.requeue(eid,worker,f"remote retry: {type(error).__name__}: {error}")
             raise
         finally:
-            self._ssh(f"rm -rf {remote_job} {remote_result}",check=False)
+            self._ssh(f"rm -f {remote_job}",check=False)
 
     def maintain_control_plane(self) -> dict:
         completed=self.registry.count("completed"); queued=self.registry.count("queued")
