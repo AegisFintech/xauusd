@@ -43,3 +43,13 @@ def test_remote_artifact_fetch_restricts_path_and_name(tmp_path,monkeypatch):
   try: bridge.fetch_artifact(path,name,tmp_path/"out")
   except ValueError: pass
   else: raise AssertionError("unsafe artifact accepted")
+
+
+def test_remote_telemetry_has_bpytop_capacity_fields(tmp_path,monkeypatch):
+ monkeypatch.setenv("COMPUTE_HOST","example"); bridge=RemoteComputeBridge(root=tmp_path)
+ class Result:
+  returncode=0
+  stdout='{"cpu":{"total_percent":50,"per_core":[40,60],"cores":2,"load":[1,2,3]},"memory":{"percent":25},"disk":{"percent":10},"network":{},"tunnel":{"active":true}}'
+ monkeypatch.setattr(bridge,"_ssh",lambda *a,**k:Result())
+ sample=bridge.sample_remote()
+ assert sample["connected"] and sample["cpu"]["per_core"]==[40,60] and sample["ssh_latency_ms"]>=0

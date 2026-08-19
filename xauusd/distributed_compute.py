@@ -10,6 +10,9 @@ import shutil
 import subprocess
 import tarfile
 import time
+import base64
+import threading
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 
@@ -24,6 +27,32 @@ from .strategy_proposals import ProposalEngine
 
 
 PROTOCOL_VERSION="distributed-v1"
+REMOTE_TELEMETRY_SCRIPT=r'''import json,os,shutil,time
+def cpu():
+ rows=[]
+ for line in open('/proc/stat'):
+  if not line.startswith('cpu'): break
+  p=line.split(); values=list(map(int,p[1:])); rows.append((sum(values),values[3]+(values[4] if len(values)>4 else 0)))
+ return rows
+def net():
+ rx=tx=0
+ for line in open('/proc/net/dev').read().splitlines()[2:]:
+  p=line.replace(':',' ').split(); rx+=int(p[1]); tx+=int(p[9])
+ return rx,tx
+c1=cpu(); n1=net(); started=time.monotonic(); time.sleep(.25); seconds=time.monotonic()-started; c2=cpu(); n2=net()
+usage=[]
+for a,b in zip(c1,c2):
+ total=b[0]-a[0]; idle=b[1]-a[1]; usage.append(round(100*(total-idle)/total,1) if total else 0)
+mem={}
+for line in open('/proc/meminfo'):
+ k,v,*_=line.replace(':','').split(); mem[k]=int(v)*1024
+disk=shutil.disk_usage('/')
+load=os.getloadavg(); tunnel=os.system('systemctl is-active --quiet sg-tunnel.service')==0
+print(json.dumps({'sampled_at':time.time(),'cpu':{'total_percent':usage[0],'per_core':usage[1:],'cores':len(usage)-1,'load':load},
+'memory':{'total':mem['MemTotal'],'available':mem['MemAvailable'],'used':mem['MemTotal']-mem['MemAvailable'],'percent':round(100*(mem['MemTotal']-mem['MemAvailable'])/mem['MemTotal'],1),'swap_total':mem['SwapTotal'],'swap_used':mem['SwapTotal']-mem['SwapFree']},
+'disk':{'total':disk.total,'used':disk.used,'free':disk.free,'percent':round(100*disk.used/disk.total,1)},
+'network':{'rx_bytes':n2[0],'tx_bytes':n2[1],'rx_bytes_per_second':round((n2[0]-n1[0])/seconds),'tx_bytes_per_second':round((n2[1]-n1[1])/seconds)},
+'tunnel':{'active':tunnel},'uptime_seconds':float(open('/proc/uptime').read().split()[0])}))'''
 
 
 def _atomic_json(path: Path,payload: dict) -> None:
@@ -95,6 +124,8 @@ class RemoteComputeBridge:
         self.remote_root=os.getenv("COMPUTE_ROOT","/opt/xauusd")
         self.workers=max(1,int(os.getenv("COMPUTE_WORKERS","12")))
         self.control_path=os.getenv("COMPUTE_SSH_CONTROL_PATH","/tmp/xauusd-ssh-%r@%h:%p")
+        self.worker_states={}; self.state_lock=threading.Lock(); self.durations=deque(maxlen=500)
+        self.telemetry={}; self.telemetry_at=0.; self.history=deque(maxlen=360)
 
     def _ssh_options(self) -> list[str]:
         return ["-i",self.key,"-p",self.port,"-o","BatchMode=yes","-o","ConnectTimeout=15",
@@ -153,6 +184,21 @@ class RemoteComputeBridge:
         payload={**previous,"protocol":PROTOCOL_VERSION,"updated_at":datetime.now(timezone.utc).isoformat(),**extra}
         _atomic_json(path,payload); return payload
 
+    def sample_remote(self) -> dict:
+        started=time.monotonic(); encoded=base64.b64encode(REMOTE_TELEMETRY_SCRIPT.encode()).decode()
+        result=self._ssh(f"python3 -c \"import base64;exec(base64.b64decode('{encoded}'))\"",capture=True)
+        if result.returncode: raise subprocess.CalledProcessError(result.returncode,result.args)
+        sample=json.loads(result.stdout); sample["ssh_latency_ms"]=round((time.monotonic()-started)*1000,1)
+        sample["connected"]=True; sample["contact_at"]=datetime.now(timezone.utc).isoformat()
+        return sample
+
+    def _stage(self,worker: str,experiment: dict,stage: str) -> None:
+        with self.state_lock:
+            previous=self.worker_states.get(worker,{})
+            self.worker_states[worker]={"worker":worker.rsplit("-",1)[-1],"experiment_id":experiment["id"],
+                "family":experiment["strategy_family"],"stage":stage,"started_at":previous.get("started_at",datetime.now(timezone.utc).isoformat()),
+                "started_monotonic":previous.get("started_monotonic",time.monotonic())}
+
     def fetch_artifact(self,remote_directory: str,name: str,destination: Path) -> Path:
         if name not in {"equity.parquet","trades.csv.gz"}: raise ValueError("unsupported artifact")
         if not remote_directory.startswith("/tmp/xauusd-result-"): raise ValueError("invalid remote artifact path")
@@ -168,10 +214,13 @@ class RemoteComputeBridge:
         _atomic_json(job,job_payload(experiment,self.dataset.active(),code_commit))
         remote_job=f"/tmp/xauusd-job-{eid}.json"; remote_result=f"/tmp/xauusd-result-{eid}"
         try:
+            self._stage(worker,experiment,"dispatching")
             self._upload_job(job,remote_job)
+            self._stage(worker,experiment,"computing")
             execution=self._ssh(f"cd {self.remote_root} && .venv/bin/python -m xauusd.cli compute-job {remote_job} {remote_result}",capture=True)
             if execution.returncode: raise subprocess.CalledProcessError(execution.returncode,execution.args,execution.stdout,execution.stderr)
             bundle=json.loads(execution.stdout)
+            self._stage(worker,experiment,"importing")
             digest=bundle.pop("result_digest"); actual=hashlib.sha256(canonical_json(bundle).encode()).hexdigest()
             if digest!=actual or bundle["experiment_fingerprint"]!=experiment["fingerprint"]:
                 raise ValueError("remote result verification failed")
@@ -185,7 +234,10 @@ class RemoteComputeBridge:
             local.mkdir(parents=True,exist_ok=True); _atomic_json(local/"result.json",{**bundle,"result_digest":digest})
             artifacts={"directory":str(local),"summary":str(local/"result.json"),"remote_host":self.host,
                        "remote_directory":remote_result,"storage":"remote","fetch_policy":"on_demand"}
-            return self.registry.complete(eid,worker,metrics,validation,artifacts,promoted)
+            completed=self.registry.complete(eid,worker,metrics,validation,artifacts,promoted)
+            with self.state_lock:
+                state=self.worker_states.pop(worker,{}); self.durations.append(time.monotonic()-state.get("started_monotonic",time.monotonic()))
+            return completed
         except Exception as error:
             self.registry.requeue(eid,worker,f"remote retry: {type(error).__name__}: {error}")
             raise
@@ -239,11 +291,27 @@ class RemoteComputeBridge:
                         try: future.result(); completed_total+=1
                         except Exception: failed_total+=1
                     summary=self.registry.summary(); elapsed=max(1,time.monotonic()-started)
+                    if time.monotonic()-self.telemetry_at>=10:
+                        try: self.telemetry=self.sample_remote(); self.telemetry_at=time.monotonic()
+                        except Exception as error:
+                            self.telemetry={**self.telemetry,"connected":False,"telemetry_error":f"{type(error).__name__}: {error}"}
+                    with self.state_lock:
+                        workers=[]
+                        for state in self.worker_states.values():
+                            workers.append({k:v for k,v in state.items() if k!="started_monotonic"}|
+                                           {"elapsed_seconds":round(time.monotonic()-state["started_monotonic"],1)})
+                        durations=sorted(self.durations)
+                    rate=completed_total*3600/elapsed; eta=summary["by_status"].get("queued",0)/rate*3600 if rate else None
+                    duration_stats={"median_seconds":durations[len(durations)//2] if durations else None,
+                                    "p95_seconds":durations[min(len(durations)-1,int(len(durations)*.95))] if durations else None}
+                    self.history.append({"time":datetime.now(timezone.utc).isoformat(),"throughput_per_hour":round(rate,2),
+                                         "queue":summary["by_status"].get("queued",0),"cpu_percent":self.telemetry.get("cpu",{}).get("total_percent")})
                     self.status(state="running" if active else "idle",host=self.host,workers=self.workers,
                                 active=len(active),active_experiment_ids=[x["id"] for x in active.values()],
                                 completed_session=completed_total,failed_session=failed_total,
-                                throughput_per_hour=round(completed_total*3600/elapsed,2),recovered_stale=recovered,
-                                queue=summary["by_status"].get("queued",0),control=control,last_error=None)
+                                throughput_per_hour=round(rate,2),eta_seconds=round(eta) if eta else None,
+                                duration=duration_stats,worker_details=workers,telemetry=self.telemetry,history=list(self.history),
+                                recovered_stale=recovered,queue=summary["by_status"].get("queued",0),control=control,last_error=None)
                     time.sleep(1 if active else idle_seconds)
                 except KeyboardInterrupt:
                     self.status(state="stopped",active=len(active)); return

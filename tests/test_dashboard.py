@@ -98,6 +98,8 @@ def test_dashboard_uses_event_stream_not_interval_polling():
     assert "logs.scrollTop=logs.scrollHeight" in dashboard.DASHBOARD_HTML
     assert "await asyncio.sleep(5)" in __import__("inspect").getsource(dashboard.live)
     assert "portfolioLoaded" in dashboard.DASHBOARD_HTML
+    assert "Mainland compute server" in dashboard.DASHBOARD_HTML
+    assert "remoteCores" in dashboard.DASHBOARD_HTML and "throughputChart" in dashboard.DASHBOARD_HTML
 
 
 def test_favicon_is_intentionally_empty():
