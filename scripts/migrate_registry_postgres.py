@@ -3,9 +3,11 @@ from __future__ import annotations
 import os
 import sqlite3
 import psycopg
+from dotenv import load_dotenv
 
 
 def main() -> None:
+    load_dotenv(".env")
     url=os.environ["DATABASE_URL"]
     source=sqlite3.connect(os.getenv("SQLITE_REGISTRY","data/experiments/registry.sqlite3")); source.row_factory=sqlite3.Row
     with psycopg.connect(url) as target:
