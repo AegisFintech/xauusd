@@ -145,6 +145,7 @@ class RemoteComputeBridge:
         self.circuit_cooldown_seconds=max(1,int(os.getenv("COMPUTE_CIRCUIT_COOLDOWN_SECONDS","60")))
         self.control_path=os.getenv("COMPUTE_SSH_CONTROL_PATH","/tmp/xauusd-ssh-%r@%h:%p")
         self.worker_states={}; self.state_lock=threading.Lock(); self.durations=deque(maxlen=500)
+        self.stage_durations={name:deque(maxlen=500) for name in ("dispatching","computing","importing","total")}
         self.telemetry={}; self.telemetry_at=0.; self.history=deque(maxlen=360)
 
     def _ssh_options(self) -> list[str]:
@@ -215,9 +216,21 @@ class RemoteComputeBridge:
     def _stage(self,worker: str,experiment: dict,stage: str) -> None:
         with self.state_lock:
             previous=self.worker_states.get(worker,{})
+            now=time.monotonic(); previous_stage=previous.get("stage")
+            if previous_stage in self.stage_durations and previous.get("stage_started_monotonic") is not None:
+                self.stage_durations[previous_stage].append(now-previous["stage_started_monotonic"])
             self.worker_states[worker]={"worker":worker.rsplit("-",1)[-1],"experiment_id":experiment["id"],
                 "family":experiment["strategy_family"],"stage":stage,"started_at":previous.get("started_at",datetime.now(timezone.utc).isoformat()),
-                "started_monotonic":previous.get("started_monotonic",time.monotonic())}
+                "started_monotonic":previous.get("started_monotonic",now),"stage_started_monotonic":now}
+
+    def readiness(self) -> dict:
+        mounts=self.telemetry.get("mounts",{})
+        maximum=max((float(item.get("percent",0)) for item in mounts.values()),default=0.)
+        critical=float(os.getenv("COMPUTE_DISK_CRITICAL_PERCENT","90"))
+        warning=float(os.getenv("COMPUTE_DISK_WARNING_PERCENT","80"))
+        state="RESOURCE_EXHAUSTED" if maximum>=critical else "DEGRADED" if maximum>=warning else "CONNECTED"
+        return {"state":state,"ready":state!="RESOURCE_EXHAUSTED","maximum_mount_percent":maximum,
+                "warning_percent":warning,"critical_percent":critical}
 
     def fetch_artifact(self,remote_directory: str,name: str,destination: Path) -> Path:
         if name not in {"equity.parquet","trades.csv.gz"}: raise ValueError("unsupported artifact")
@@ -259,7 +272,10 @@ class RemoteComputeBridge:
                        "remote_directory":remote_result,"storage":"remote","fetch_policy":"on_demand"}
             completed=self.registry.complete(eid,worker,metrics,validation,artifacts,promoted)
             with self.state_lock:
-                state=self.worker_states.pop(worker,{}); self.durations.append(time.monotonic()-state.get("started_monotonic",time.monotonic()))
+                state=self.worker_states.pop(worker,{}); now=time.monotonic()
+                if state.get("stage") in self.stage_durations:
+                    self.stage_durations[state["stage"]].append(now-state.get("stage_started_monotonic",now))
+                total=now-state.get("started_monotonic",now); self.durations.append(total); self.stage_durations["total"].append(total)
             return completed
         except Exception as error:
             code=failure_code(error)
@@ -317,7 +333,7 @@ class RemoteComputeBridge:
                 try:
                     recovered=self.registry.recover_stale(datetime.now(timezone.utc)-timedelta(minutes=120))
                     control=self.maintain_control_plane()
-                    circuit_open=time.monotonic()<circuit_open_until
+                    ready=self.readiness(); circuit_open=time.monotonic()<circuit_open_until or not ready["ready"]
                     while not circuit_open and len(active)<self.workers:
                         experiment=self.registry.claim_next(f"{worker_prefix}-{len(active)+1}")
                         if experiment is None: break
@@ -339,9 +355,14 @@ class RemoteComputeBridge:
                     with self.state_lock:
                         workers=[]
                         for state in self.worker_states.values():
-                            workers.append({k:v for k,v in state.items() if k!="started_monotonic"}|
+                            workers.append({k:v for k,v in state.items() if not k.endswith("_monotonic")}|
                                            {"elapsed_seconds":round(time.monotonic()-state["started_monotonic"],1)})
                         durations=sorted(self.durations)
+                        stage_stats={}
+                        for name,values in self.stage_durations.items():
+                            ordered=sorted(values); stage_stats[name]={"samples":len(ordered),
+                                "median_seconds":ordered[len(ordered)//2] if ordered else None,
+                                "p95_seconds":ordered[min(len(ordered)-1,int(len(ordered)*.95))] if ordered else None}
                     rate=completed_total*3600/elapsed; eta=summary["by_status"].get("queued",0)/rate*3600 if rate else None
                     duration_stats={"median_seconds":durations[len(durations)//2] if durations else None,
                                     "p95_seconds":durations[min(len(durations)-1,int(len(durations)*.95))] if durations else None}
@@ -351,7 +372,8 @@ class RemoteComputeBridge:
                                 active=len(active),active_experiment_ids=[x["id"] for x in active.values()],
                                 completed_session=completed_total,failed_session=failed_total,
                                 throughput_per_hour=round(rate,2),eta_seconds=round(eta) if eta else None,
-                                duration=duration_stats,worker_details=workers,telemetry=self.telemetry,history=list(self.history),
+                                duration=duration_stats,stage_duration=stage_stats,worker_details=workers,telemetry=self.telemetry,
+                                readiness=ready,history=list(self.history),
                                 recovered_stale=recovered,queue=summary["by_status"].get("queued",0),control=control,
                                 circuit={"state":"OPEN" if time.monotonic()<circuit_open_until else "CLOSED",
                                     "consecutive_failures":consecutive_failures,"last_failure_code":last_failure_code,

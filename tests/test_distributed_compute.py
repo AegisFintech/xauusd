@@ -83,3 +83,11 @@ def test_remote_failure_codes_are_structured():
  assert failure_code(OSError("No space left on device"))=="RESOURCE_EXHAUSTED"
  assert failure_code(TimeoutError("timed out"))=="TIMEOUT"
  assert failure_code(ValueError("remote result verification failed"))=="PROTOCOL_MISMATCH"
+
+
+def test_readiness_uses_most_constrained_mount(tmp_path,monkeypatch):
+ monkeypatch.setenv("COMPUTE_HOST","example"); bridge=RemoteComputeBridge(root=tmp_path)
+ bridge.telemetry={"mounts":{"root":{"percent":40},"tmp":{"percent":91}}}
+ assert bridge.readiness()["state"]=="RESOURCE_EXHAUSTED" and not bridge.readiness()["ready"]
+ bridge.telemetry={"mounts":{"root":{"percent":40},"tmp":{"percent":81}}}
+ assert bridge.readiness()["state"]=="DEGRADED" and bridge.readiness()["ready"]
