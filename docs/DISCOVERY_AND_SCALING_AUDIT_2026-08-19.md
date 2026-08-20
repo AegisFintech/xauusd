@@ -260,3 +260,9 @@ Commit `2a59f22 compact artifacts for development rejects` is deployed. New seco
 ## Local/remote golden parity — 2026-08-20
 
 Using completed experiment `78390` and the active dataset, the same fingerprinted job was run locally and on the deployed secondary without changing registry state. Development and validation metric dictionaries had zero differing fields; dataset and protocol metadata matched; both selected validation-candidate detailed retention. The 578-row trade ledgers were exactly equal, all numeric trade fields had zero absolute difference, and the 70,620-row equity series was exactly equal with maximum absolute difference `0.0`. This validates the current local/secondary execution contract for one fixture; repeated seeds, another strategy family, Docker, and a separately provisioned staging host remain **not yet verified**.
+
+## Dispatch and retention corrections — 2026-08-20
+
+Commit `497a2e2` moved persistent result-root creation from every scenario to coordinator startup. At 16 workers, post-deployment dispatch median/p95 fell to 0.62/0.82 seconds, compared with the prior clean p95 of 7.55 seconds; a later sample measured 0.31/0.37 seconds. Compute remained dominant at approximately 11.77 seconds median.
+
+Storage inspection found the initial compact policy ineffective: 13,922 of 13,929 new result directories retained full artifacts because reaching validation was treated as candidate status while the development gate required only minimum trade count. Commit `e8378c0` corrected retention to validation-pass candidates, one-gate near passes, and deterministic audit samples. The first clean post-deployment sample contained 41 compact rejects and one detailed deterministic audit, with zero failures. Root storage was 54.7% and `/tmp` 3%; historical artifact compaction remains pending a registry-aware dry run and explicit apply operation.
