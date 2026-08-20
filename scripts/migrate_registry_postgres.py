@@ -1,0 +1,30 @@
+from __future__ import annotations
+
+import os
+import sqlite3
+import psycopg
+
+
+def main() -> None:
+    url=os.environ["DATABASE_URL"]
+    source=sqlite3.connect(os.getenv("SQLITE_REGISTRY","data/experiments/registry.sqlite3")); source.row_factory=sqlite3.Row
+    with psycopg.connect(url) as target:
+        target.execute("""CREATE TABLE IF NOT EXISTS experiments (id BIGSERIAL PRIMARY KEY,fingerprint TEXT NOT NULL UNIQUE,
+          strategy_family TEXT NOT NULL,formula TEXT NOT NULL,parameters_json TEXT NOT NULL,dataset_version TEXT NOT NULL,
+          dataset_fingerprint TEXT NOT NULL,engine_version TEXT NOT NULL,cost_model_version TEXT NOT NULL,code_commit TEXT,
+          status TEXT NOT NULL CHECK(status IN ('queued','running','completed','failed','cancelled')),priority INTEGER NOT NULL DEFAULT 0,
+          worker_id TEXT,created_at TEXT NOT NULL,started_at TEXT,finished_at TEXT,heartbeat_at TEXT,metrics_json TEXT,validation_json TEXT,
+          artifacts_json TEXT,error TEXT,promoted INTEGER NOT NULL DEFAULT 0 CHECK(promoted IN (0,1)),retry_count INTEGER NOT NULL DEFAULT 0,failure_code TEXT)""")
+        target.execute("""CREATE TABLE IF NOT EXISTS experiment_events (id BIGSERIAL PRIMARY KEY,experiment_id BIGINT NOT NULL REFERENCES experiments(id),occurred_at TEXT NOT NULL,event TEXT NOT NULL,payload_json TEXT)""")
+        target.execute("""CREATE TABLE IF NOT EXISTS champion_history (id BIGSERIAL PRIMARY KEY,dataset_version TEXT NOT NULL,experiment_id BIGINT NOT NULL REFERENCES experiments(id),previous_experiment_id BIGINT REFERENCES experiments(id),promoted_at TEXT NOT NULL,validation_score DOUBLE PRECISION NOT NULL,holdout_score DOUBLE PRECISION NOT NULL,holdout_metrics_json TEXT NOT NULL)""")
+        schemas={"experiments":["id","fingerprint","strategy_family","formula","parameters_json","dataset_version","dataset_fingerprint","engine_version","cost_model_version","code_commit","status","priority","worker_id","created_at","started_at","finished_at","heartbeat_at","metrics_json","validation_json","artifacts_json","error","promoted","retry_count","failure_code"],"experiment_events":["id","experiment_id","occurred_at","event","payload_json"],"champion_history":["id","dataset_version","experiment_id","previous_experiment_id","promoted_at","validation_score","holdout_score","holdout_metrics_json"]}
+        for table,columns in schemas.items():
+            rows=source.execute(f"SELECT {','.join(columns)} FROM {table}").fetchall(); placeholders=','.join(['%s']*len(columns))
+            if rows: target.executemany(f"INSERT INTO {table} ({','.join(columns)}) VALUES ({placeholders}) ON CONFLICT DO NOTHING",[tuple(row[c] for c in columns) for row in rows])
+            print(table,len(rows))
+        for table in schemas: target.execute(f"SELECT setval(pg_get_serial_sequence('{table}','id'),COALESCE((SELECT max(id) FROM {table}),1),true)")
+        target.commit()
+        for table in schemas: print("postgres",table,target.execute(f"SELECT count(*) FROM {table}").fetchone()[0])
+
+
+if __name__=="__main__": main()

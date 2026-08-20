@@ -6,6 +6,7 @@ from pathlib import Path
 import hashlib
 import json
 import sqlite3
+import os
 from typing import Any, Literal
 
 from .research import StrategySpec
@@ -38,14 +39,27 @@ class ExperimentSpec:
         return hashlib.sha256(canonical_json(self.identity()).encode()).hexdigest()
 
 
+class PostgresConnection:
+    def __init__(self,url: str):
+        import psycopg
+        from psycopg.rows import dict_row
+        self.connection=psycopg.connect(url,row_factory=dict_row)
+    def execute(self,query,params=()): return self.connection.execute(query.replace("?","%s"),params)
+    def __enter__(self): return self
+    def __exit__(self,*args): return self.connection.__exit__(*args)
+
+
 class ExperimentRegistry:
-    def __init__(self, path: Path = Path("data/experiments/registry.sqlite3"), initialize: bool = True):
-        self.path = path
+    def __init__(self, path: Path | None = None, initialize: bool = True):
+        self.database_url=os.getenv("DATABASE_URL") if path is None else None
+        self.backend="postgresql" if self.database_url else "sqlite"
+        self.path = Path(path or "data/experiments/registry.sqlite3")
         if initialize:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self.initialize()
 
-    def connect(self) -> sqlite3.Connection:
+    def connect(self):
+        if self.backend=="postgresql": return PostgresConnection(self.database_url)
         connection = sqlite3.connect(self.path, timeout=30)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA journal_mode=WAL")
@@ -54,6 +68,26 @@ class ExperimentRegistry:
         return connection
 
     def initialize(self) -> None:
+        if self.backend=="postgresql":
+            with self.connect() as db:
+                db.execute("""CREATE TABLE IF NOT EXISTS experiments (id BIGSERIAL PRIMARY KEY,
+                  fingerprint TEXT NOT NULL UNIQUE,strategy_family TEXT NOT NULL,formula TEXT NOT NULL,parameters_json TEXT NOT NULL,
+                  dataset_version TEXT NOT NULL,dataset_fingerprint TEXT NOT NULL,engine_version TEXT NOT NULL,cost_model_version TEXT NOT NULL,
+                  code_commit TEXT,status TEXT NOT NULL CHECK(status IN ('queued','running','completed','failed','cancelled')),
+                  priority INTEGER NOT NULL DEFAULT 0,worker_id TEXT,created_at TEXT NOT NULL,started_at TEXT,finished_at TEXT,heartbeat_at TEXT,
+                  metrics_json TEXT,validation_json TEXT,artifacts_json TEXT,error TEXT,promoted INTEGER NOT NULL DEFAULT 0 CHECK(promoted IN (0,1)),
+                  retry_count INTEGER NOT NULL DEFAULT 0,failure_code TEXT)""")
+                db.execute("CREATE INDEX IF NOT EXISTS idx_experiments_queue ON experiments(status,priority DESC,id)")
+                db.execute("CREATE INDEX IF NOT EXISTS idx_experiments_family ON experiments(strategy_family,status)")
+                db.execute("""CREATE TABLE IF NOT EXISTS experiment_events (id BIGSERIAL PRIMARY KEY,
+                  experiment_id BIGINT NOT NULL REFERENCES experiments(id),occurred_at TEXT NOT NULL,event TEXT NOT NULL,payload_json TEXT)""")
+                db.execute("CREATE INDEX IF NOT EXISTS idx_events_experiment ON experiment_events(experiment_id,id)")
+                db.execute("""CREATE TABLE IF NOT EXISTS champion_history (id BIGSERIAL PRIMARY KEY,dataset_version TEXT NOT NULL,
+                  experiment_id BIGINT NOT NULL REFERENCES experiments(id),previous_experiment_id BIGINT REFERENCES experiments(id),
+                  promoted_at TEXT NOT NULL,validation_score DOUBLE PRECISION NOT NULL,holdout_score DOUBLE PRECISION NOT NULL,
+                  holdout_metrics_json TEXT NOT NULL)""")
+                db.execute("CREATE INDEX IF NOT EXISTS idx_champion_dataset ON champion_history(dataset_version,id)")
+            return
         with self.connect() as db:
             db.executescript("""
             CREATE TABLE IF NOT EXISTS experiments (
@@ -115,10 +149,13 @@ class ExperimentRegistry:
     def register(self, spec: ExperimentSpec, priority: int = 0) -> tuple[dict, bool]:
         now = self._now()
         with self.connect() as db:
-            cursor = db.execute("""INSERT OR IGNORE INTO experiments
+            insert="""INSERT INTO experiments
                 (fingerprint,strategy_family,formula,parameters_json,dataset_version,dataset_fingerprint,
                  engine_version,cost_model_version,code_commit,status,priority,created_at)
-                VALUES (?,?,?,?,?,?,?,?,?,'queued',?,?)""",
+                VALUES (?,?,?,?,?,?,?,?,?,'queued',?,?)"""
+            insert += " ON CONFLICT (fingerprint) DO NOTHING" if self.backend=="postgresql" else ""
+            if self.backend=="sqlite": insert=insert.replace("INSERT INTO","INSERT OR IGNORE INTO",1)
+            cursor = db.execute(insert,
                 (spec.fingerprint, spec.strategy_family, spec.formula, canonical_json(spec.parameters),
                  spec.dataset_version, spec.dataset_fingerprint, spec.engine_version,
                  spec.cost_model_version, spec.code_commit, priority, now))
@@ -131,8 +168,10 @@ class ExperimentRegistry:
     def claim_next(self, worker_id: str) -> dict | None:
         now = self._now()
         with self.connect() as db:
-            db.execute("BEGIN IMMEDIATE")
-            row = db.execute("SELECT id FROM experiments WHERE status='queued' ORDER BY priority DESC,id LIMIT 1").fetchone()
+            if self.backend=="sqlite": db.execute("BEGIN IMMEDIATE")
+            query="SELECT id FROM experiments WHERE status='queued' ORDER BY priority DESC,id LIMIT 1"
+            if self.backend=="postgresql": query+=" FOR UPDATE SKIP LOCKED"
+            row = db.execute(query).fetchone()
             if row is None:
                 return None
             db.execute("UPDATE experiments SET status='running',worker_id=?,started_at=?,heartbeat_at=? WHERE id=? AND status='queued'",
@@ -264,8 +303,9 @@ class ExperimentRegistry:
 
     def leaderboard(self, limit: int = 25) -> list[dict]:
         with self.connect() as db:
-            rows=db.execute("""SELECT * FROM experiments WHERE status='completed' AND validation_json IS NOT NULL
-                ORDER BY json_extract(validation_json,'$.score') DESC LIMIT ?""",(limit,)).fetchall()
+            score="CAST(validation_json AS jsonb)->>'score'" if self.backend=="postgresql" else "json_extract(validation_json,'$.score')"
+            rows=db.execute(f"""SELECT * FROM experiments WHERE status='completed' AND validation_json IS NOT NULL
+                ORDER BY CAST({score} AS DOUBLE PRECISION) DESC LIMIT ?""",(limit,)).fetchall()
             return [self._decode(row) for row in rows]
 
     def champion(self, dataset_version: str) -> dict | None:
