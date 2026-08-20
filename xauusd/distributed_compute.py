@@ -46,11 +46,13 @@ for a,b in zip(c1,c2):
 mem={}
 for line in open('/proc/meminfo'):
  k,v,*_=line.replace(':','').split(); mem[k]=int(v)*1024
-disk=shutil.disk_usage('/')
+def disk(path):
+ d=shutil.disk_usage(path); return {'path':path,'total':d.total,'used':d.used,'free':d.free,'percent':round(100*d.used/d.total,1)}
+root_disk=disk('/'); tmp_disk=disk('/tmp')
 load=os.getloadavg(); tunnel=os.system('systemctl is-active --quiet sg-tunnel.service')==0
 print(json.dumps({'sampled_at':time.time(),'cpu':{'total_percent':usage[0],'per_core':usage[1:],'cores':len(usage)-1,'load':load},
 'memory':{'total':mem['MemTotal'],'available':mem['MemAvailable'],'used':mem['MemTotal']-mem['MemAvailable'],'percent':round(100*(mem['MemTotal']-mem['MemAvailable'])/mem['MemTotal'],1),'swap_total':mem['SwapTotal'],'swap_used':mem['SwapTotal']-mem['SwapFree']},
-'disk':{'total':disk.total,'used':disk.used,'free':disk.free,'percent':round(100*disk.used/disk.total,1)},
+'disk':root_disk,'mounts':{'root':root_disk,'tmp':tmp_disk},
 'network':{'rx_bytes':n2[0],'tx_bytes':n2[1],'rx_bytes_per_second':round((n2[0]-n1[0])/seconds),'tx_bytes_per_second':round((n2[1]-n1[1])/seconds)},
 'tunnel':{'active':tunnel},'uptime_seconds':float(open('/proc/uptime').read().split()[0])}))'''
 
@@ -122,6 +124,9 @@ class RemoteComputeBridge:
         self.host=os.environ["COMPUTE_HOST"]; self.user=os.getenv("COMPUTE_USER","root")
         self.port=os.getenv("COMPUTE_PORT","22"); self.key=os.getenv("COMPUTE_SSH_KEY","/root/.ssh/xauusd_compute")
         self.remote_root=os.getenv("COMPUTE_ROOT","/opt/xauusd")
+        self.remote_result_root=os.getenv("COMPUTE_RESULT_ROOT",f"{self.remote_root}/var/results")
+        if not self.remote_result_root.startswith(f"{self.remote_root}/"):
+            raise ValueError("COMPUTE_RESULT_ROOT must be below COMPUTE_ROOT")
         self.workers=max(1,int(os.getenv("COMPUTE_WORKERS","16")))
         self.control_path=os.getenv("COMPUTE_SSH_CONTROL_PATH","/tmp/xauusd-ssh-%r@%h:%p")
         self.worker_states={}; self.state_lock=threading.Lock(); self.durations=deque(maxlen=500)
@@ -201,7 +206,8 @@ class RemoteComputeBridge:
 
     def fetch_artifact(self,remote_directory: str,name: str,destination: Path) -> Path:
         if name not in {"equity.parquet","trades.csv.gz"}: raise ValueError("unsupported artifact")
-        if not remote_directory.startswith("/tmp/xauusd-result-"): raise ValueError("invalid remote artifact path")
+        allowed=(f"{self.remote_result_root}/xauusd-result-","/tmp/xauusd-result-")
+        if not remote_directory.startswith(allowed): raise ValueError("invalid remote artifact path")
         destination.parent.mkdir(parents=True,exist_ok=True)
         temporary=destination.with_suffix(destination.suffix+".tmp")
         command=["ssh",*self._ssh_options(),f"{self.user}@{self.host}",f"cat {remote_directory}/{name}"]
@@ -212,9 +218,11 @@ class RemoteComputeBridge:
         eid=experiment["id"]; worker=experiment["worker_id"]
         local=self.root/"results"/str(eid); job=self.root/"jobs"/f"{eid}.json"
         _atomic_json(job,job_payload(experiment,self.dataset.active(),code_commit))
-        remote_job=f"/tmp/xauusd-job-{eid}.json"; remote_result=f"/tmp/xauusd-result-{eid}"
+        remote_job=f"/tmp/xauusd-job-{eid}.json"
+        remote_result=f"{self.remote_result_root}/xauusd-result-{eid}"
         try:
             self._stage(worker,experiment,"dispatching")
+            self._ssh(f"mkdir -p {self.remote_result_root}")
             self._upload_job(job,remote_job)
             self._stage(worker,experiment,"computing")
             execution=self._ssh(f"cd {self.remote_root} && .venv/bin/python -m xauusd.cli compute-job {remote_job} {remote_result}",capture=True)

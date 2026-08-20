@@ -46,6 +46,16 @@ def test_remote_artifact_fetch_restricts_path_and_name(tmp_path,monkeypatch):
   else: raise AssertionError("unsafe artifact accepted")
 
 
+def test_remote_result_root_is_persistent_and_below_compute_root(tmp_path,monkeypatch):
+ monkeypatch.setenv("COMPUTE_HOST","example")
+ bridge=RemoteComputeBridge(root=tmp_path)
+ assert bridge.remote_result_root=="/opt/xauusd/var/results"
+ monkeypatch.setenv("COMPUTE_RESULT_ROOT","/tmp/results")
+ try: RemoteComputeBridge(root=tmp_path)
+ except ValueError: pass
+ else: raise AssertionError("unsafe result root accepted")
+
+
 def test_remote_telemetry_has_bpytop_capacity_fields(tmp_path,monkeypatch):
  monkeypatch.setenv("COMPUTE_HOST","example"); bridge=RemoteComputeBridge(root=tmp_path)
  class Result:
