@@ -4,6 +4,7 @@ import os
 import sqlite3
 import csv
 import io
+import uuid
 import psycopg
 from dotenv import load_dotenv
 
@@ -23,7 +24,7 @@ def main() -> None:
         target.execute("""CREATE TABLE IF NOT EXISTS champion_history (id BIGSERIAL PRIMARY KEY,dataset_version TEXT NOT NULL,experiment_id BIGINT NOT NULL REFERENCES experiments(id),previous_experiment_id BIGINT REFERENCES experiments(id),promoted_at TEXT NOT NULL,validation_score DOUBLE PRECISION NOT NULL,holdout_score DOUBLE PRECISION NOT NULL,holdout_metrics_json TEXT NOT NULL)""")
         schemas={"experiments":["id","fingerprint","strategy_family","formula","parameters_json","dataset_version","dataset_fingerprint","engine_version","cost_model_version","code_commit","status","priority","worker_id","created_at","started_at","finished_at","heartbeat_at","metrics_json","validation_json","artifacts_json","error","promoted","retry_count","failure_code"],"experiment_events":["id","experiment_id","occurred_at","event","payload_json"],"champion_history":["id","dataset_version","experiment_id","previous_experiment_id","promoted_at","validation_score","holdout_score","holdout_metrics_json"]}
         for table,columns in schemas.items():
-            staging=f"migration_{table}"
+            staging=f"migration_{table}_{uuid.uuid4().hex[:12]}"
             target.execute(f"CREATE TEMP TABLE {staging} (LIKE {table} INCLUDING DEFAULTS) ON COMMIT PRESERVE ROWS")
             target.commit()
             rows=source.execute(f"SELECT {','.join(columns)} FROM {table}")
@@ -48,6 +49,8 @@ def main() -> None:
                 count += len(batch)
                 print(table,count,flush=True)
             print(table,count,flush=True)
+            target.execute(f"DROP TABLE {staging}")
+            target.commit()
         for table in schemas: target.execute(f"SELECT setval(pg_get_serial_sequence('{table}','id'),COALESCE((SELECT max(id) FROM {table}),1),true)")
         target.commit()
         for table in schemas: print("postgres",table,target.execute(f"SELECT count(*) FROM {table}").fetchone()[0],flush=True)
