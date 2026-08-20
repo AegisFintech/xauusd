@@ -21,14 +21,23 @@ def main() -> None:
         target.execute("""CREATE TABLE IF NOT EXISTS champion_history (id BIGSERIAL PRIMARY KEY,dataset_version TEXT NOT NULL,experiment_id BIGINT NOT NULL REFERENCES experiments(id),previous_experiment_id BIGINT REFERENCES experiments(id),promoted_at TEXT NOT NULL,validation_score DOUBLE PRECISION NOT NULL,holdout_score DOUBLE PRECISION NOT NULL,holdout_metrics_json TEXT NOT NULL)""")
         schemas={"experiments":["id","fingerprint","strategy_family","formula","parameters_json","dataset_version","dataset_fingerprint","engine_version","cost_model_version","code_commit","status","priority","worker_id","created_at","started_at","finished_at","heartbeat_at","metrics_json","validation_json","artifacts_json","error","promoted","retry_count","failure_code"],"experiment_events":["id","experiment_id","occurred_at","event","payload_json"],"champion_history":["id","dataset_version","experiment_id","previous_experiment_id","promoted_at","validation_score","holdout_score","holdout_metrics_json"]}
         for table,columns in schemas.items():
-            rows=source.execute(f"SELECT {','.join(columns)} FROM {table}").fetchall(); placeholders=','.join(['%s']*len(columns))
-            if rows:
-                with target.cursor() as cursor:
-                    cursor.executemany(f"INSERT INTO {table} ({','.join(columns)}) VALUES ({placeholders}) ON CONFLICT DO NOTHING",[tuple(row[c] for c in columns) for row in rows])
-            print(table,len(rows))
+            staging=f"migration_{table}"
+            target.execute(f"CREATE TEMP TABLE {staging} (LIKE {table} INCLUDING DEFAULTS) ON COMMIT DROP")
+            rows=source.execute(f"SELECT {','.join(columns)} FROM {table}")
+            count=0
+            with target.cursor() as cursor:
+                with cursor.copy(f"COPY {staging} ({','.join(columns)}) FROM STDIN") as copy:
+                    for row in rows:
+                        copy.write_row(tuple(row[column] for column in columns))
+                        count += 1
+                cursor.execute(
+                    f"INSERT INTO {table} ({','.join(columns)}) "
+                    f"SELECT {','.join(columns)} FROM {staging} ON CONFLICT DO NOTHING"
+                )
+            print(table,count,flush=True)
         for table in schemas: target.execute(f"SELECT setval(pg_get_serial_sequence('{table}','id'),COALESCE((SELECT max(id) FROM {table}),1),true)")
         target.commit()
-        for table in schemas: print("postgres",table,target.execute(f"SELECT count(*) FROM {table}").fetchone()[0])
+        for table in schemas: print("postgres",table,target.execute(f"SELECT count(*) FROM {table}").fetchone()[0],flush=True)
 
 
 if __name__=="__main__": main()
