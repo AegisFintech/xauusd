@@ -280,7 +280,6 @@ class RemoteComputeBridge:
         remote_result=f"{self.remote_result_root}/xauusd-result-{eid}"
         try:
             self._stage(worker,experiment,"dispatching")
-            self._ssh(f"mkdir -p {self.remote_result_root}")
             self._upload_job(job,remote_job)
             self._stage(worker,experiment,"computing")
             execution=self._ssh(f"cd {self.remote_root} && .venv/bin/python -m xauusd.cli compute-job {remote_job} {remote_result}",capture=True)
@@ -354,6 +353,7 @@ class RemoteComputeBridge:
         recovered_replaced=self.registry.recover_worker_prefix("remote-master-",worker_prefix)
         self.registry.recover_stale(datetime.now(timezone.utc)-timedelta(minutes=120))
         self._ssh("true")
+        self._ssh(f"mkdir -p {self.remote_result_root}")
         try: code_commit=subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip()
         except (OSError,subprocess.CalledProcessError): code_commit="unknown"
         with ThreadPoolExecutor(max_workers=self.workers) as pool:

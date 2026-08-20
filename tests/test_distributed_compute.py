@@ -57,6 +57,11 @@ def test_remote_result_root_is_persistent_and_below_compute_root(tmp_path,monkey
  else: raise AssertionError("unsafe result root accepted")
 
 
+def test_result_root_is_not_created_per_scenario(tmp_path):
+ source=__import__('inspect').getsource(RemoteComputeBridge.process_claimed)
+ assert "mkdir -p" not in source
+
+
 def test_remote_telemetry_has_bpytop_capacity_fields(tmp_path,monkeypatch):
  monkeypatch.setenv("COMPUTE_HOST","example"); bridge=RemoteComputeBridge(root=tmp_path)
  class Result:
