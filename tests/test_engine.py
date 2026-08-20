@@ -1,5 +1,6 @@
 import pandas as pd
 import pytest
+import numpy as np
 
 from xauusd.engine import EventDrivenBacktester, ExecutionConfig
 
@@ -50,3 +51,17 @@ def test_time_exit():
     trade = EventDrivenBacktester(config).run(frame, signal)["trades"].iloc[0]
     assert trade.exit_reason == "time"
     assert trade.bars_held == 2
+
+
+def test_array_loop_is_deterministic_on_randomized_path():
+ rng=np.random.default_rng(91); rows=5000; close=2000+np.cumsum(rng.normal(0,.8,rows))
+ frame=pd.DataFrame({"open":close+rng.normal(0,.1,rows),"high":close+rng.uniform(.1,2,rows),
+                     "low":close-rng.uniform(.1,2,rows),"close":close},
+                    index=pd.date_range("2025-01-01",periods=rows,freq="min",tz="UTC"))
+ signal=pd.Series(rng.integers(-1,2,rows),index=frame.index)
+ config=ExecutionConfig(quantity_oz=3,spread=.23,slippage=.04,commission_per_lot_side=3.7,
+                        stop_distance=1.7,target_distance=2.4,max_holding_bars=17)
+ first=EventDrivenBacktester(config).run(frame,signal); second=EventDrivenBacktester(config).run(frame,signal)
+ pd.testing.assert_frame_equal(first["trades"],second["trades"],check_exact=True)
+ pd.testing.assert_series_equal(first["equity"],second["equity"],check_exact=True)
+ assert first["metrics"]==second["metrics"]

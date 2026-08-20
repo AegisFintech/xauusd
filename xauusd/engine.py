@@ -67,6 +67,12 @@ class EventDrivenBacktester:
         frame = bars.sort_index().copy()
         signal = signals.reindex(frame.index).fillna(0).clip(-1, 1)
         signal = np.sign(signal).astype(int)
+        timestamps=frame.index
+        opens=frame["open"].to_numpy(dtype=float,copy=False)
+        highs=frame["high"].to_numpy(dtype=float,copy=False)
+        lows=frame["low"].to_numpy(dtype=float,copy=False)
+        closes=frame["close"].to_numpy(dtype=float,copy=False)
+        signal_values=signal.to_numpy(dtype=int,copy=False)
         cash = self.config.initial_cash
         position: dict | None = None
         trades: list[Trade] = []
@@ -91,14 +97,14 @@ class EventDrivenBacktester:
                                 exit_price, self.config.quantity_oz, gross, fees, net, bars_held, reason))
             position = None
 
-        for i, (timestamp, bar) in enumerate(frame.iterrows()):
-            desired = int(signal.iloc[i - 1]) if i else 0
+        for i,timestamp in enumerate(timestamps):
+            desired = int(signal_values[i - 1]) if i else 0
             if position is not None and desired != position["side"]:
-                close(timestamp, float(bar.open), "signal", i - position["entry_i"])
+                close(timestamp, opens[i], "signal", i - position["entry_i"])
             if position is None and desired:
                 fee = commission()
                 position = {"side": desired, "entry_time": timestamp, "entry_i": i,
-                            "entry_price": fill_price(float(bar.open), desired, True), "entry_commission": fee}
+                            "entry_price": fill_price(opens[i], desired, True), "entry_commission": fee}
                 cash -= fee
 
             if position is not None:
@@ -106,8 +112,8 @@ class EventDrivenBacktester:
                 entry = position["entry_price"]
                 stop = entry - side * self.config.stop_distance if self.config.stop_distance is not None else None
                 target = entry + side * self.config.target_distance if self.config.target_distance is not None else None
-                stop_hit = stop is not None and (float(bar.low) <= stop if side > 0 else float(bar.high) >= stop)
-                target_hit = target is not None and (float(bar.high) >= target if side > 0 else float(bar.low) <= target)
+                stop_hit = stop is not None and (lows[i] <= stop if side > 0 else highs[i] >= stop)
+                target_hit = target is not None and (highs[i] >= target if side > 0 else lows[i] <= target)
                 if stop_hit and target_hit:
                     reason = self.config.intrabar_priority
                     close(timestamp, stop if reason == "stop" else target, reason, i - position["entry_i"] + 1)
@@ -116,19 +122,19 @@ class EventDrivenBacktester:
                 elif target_hit:
                     close(timestamp, target, "target", i - position["entry_i"] + 1)
                 elif self.config.max_holding_bars and i - position["entry_i"] + 1 >= self.config.max_holding_bars:
-                    close(timestamp, float(bar.close), "time", i - position["entry_i"] + 1)
+                    close(timestamp, closes[i], "time", i - position["entry_i"] + 1)
 
             marked = cash
             if position is not None:
-                liquidation = fill_price(float(bar.close), position["side"], False)
+                liquidation = fill_price(closes[i], position["side"], False)
                 marked += position["side"] * (liquidation - position["entry_price"]) * self.config.quantity_oz - commission()
             equity_rows.append((timestamp, marked))
 
         if position is not None:
-            close(frame.index[-1], float(frame.close.iloc[-1]), "end", len(frame) - position["entry_i"])
+            close(timestamps[-1], closes[-1], "end", len(frame) - position["entry_i"])
             equity_rows[-1] = (frame.index[-1], cash)
 
-        equity = pd.Series(dict(equity_rows), name="equity", dtype=float)
+        equity = pd.Series((value for _,value in equity_rows),index=timestamps,name="equity",dtype=float)
         ledger = pd.DataFrame([asdict(trade) for trade in trades])
         return {"metrics": self._metrics(equity, ledger, frame), "trades": ledger, "equity": equity}
 
