@@ -39,6 +39,14 @@ def failure_code(error: Exception) -> str:
     if "result verification" in message or "fingerprint mismatch" in message: return "PROTOCOL_MISMATCH"
     if isinstance(error,subprocess.CalledProcessError): return "REMOTE_COMMAND_FAILURE"
     return "REMOTE_ERROR"
+
+
+def retain_detailed_artifacts(experiment: dict,validation: dict) -> tuple[bool,str]:
+    if validation.get("stage")=="validation": return True,"validation_candidate"
+    sample_rate=max(0,min(100,int(os.getenv("COMPUTE_ARTIFACT_AUDIT_PERCENT","1"))))
+    bucket=int(experiment["fingerprint"][:8],16)%100
+    if bucket<sample_rate: return True,"deterministic_audit_sample"
+    return False,"compact_development_reject"
 REMOTE_TELEMETRY_SCRIPT=r'''import json,os,shutil,time
 def cpu():
  rows=[]
@@ -111,8 +119,12 @@ def compute_job(job_path: Path,output_directory: Path,dataset: TournamentDataset
                     features,strategy,execution)}
     result=validation_result or development
     output_directory.mkdir(parents=True,exist_ok=True)
-    result["trades"].to_csv(output_directory/"trades.csv.gz",index=False,compression="gzip")
-    result["equity"].to_frame().to_parquet(output_directory/"equity.parquet")
+    retain_detail,retention_reason=retain_detailed_artifacts(experiment,validation)
+    files={}
+    if retain_detail:
+        result["trades"].to_csv(output_directory/"trades.csv.gz",index=False,compression="gzip")
+        result["equity"].to_frame().to_parquet(output_directory/"equity.parquet")
+        files={"trades":"trades.csv.gz","equity":"equity.parquet"}
     metrics={"development":_finite(development["metrics"]),
              "validation":_finite(validation_result["metrics"]) if validation_result else None,"holdout":None}
     bundle={"protocol":PROTOCOL_VERSION,"experiment_id":experiment["id"],
@@ -120,7 +132,7 @@ def compute_job(job_path: Path,output_directory: Path,dataset: TournamentDataset
             "code_commit":job["code_commit"],"worker_id":os.getenv("HOSTNAME","remote"),
             "finished_at":datetime.now(timezone.utc).isoformat(),"metrics":metrics,"validation":validation,
             "strategy":asdict(strategy),"execution":asdict(execution),
-            "files":{"trades":"trades.csv.gz","equity":"equity.parquet"}}
+            "files":files,"artifact_retention":{"detailed":retain_detail,"reason":retention_reason}}
     bundle["result_digest"]=hashlib.sha256(canonical_json(bundle).encode()).hexdigest()
     _atomic_json(output_directory/"result.json",bundle)
     try: (output_directory/"unused.sqlite3").unlink()

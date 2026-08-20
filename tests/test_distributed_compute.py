@@ -1,7 +1,7 @@
 import hashlib,json
 
 from xauusd.core import synthetic_bars
-from xauusd.distributed_compute import PROTOCOL_VERSION,RemoteComputeBridge,compute_job,job_payload,failure_code
+from xauusd.distributed_compute import PROTOCOL_VERSION,RemoteComputeBridge,compute_job,job_payload,failure_code,retain_detailed_artifacts
 from xauusd.experiment_registry import ExperimentRegistry,ExperimentSpec,canonical_json
 from xauusd.tournament_data import TournamentDataConfig,TournamentDataset
 from xauusd.search_space import catalog_size
@@ -27,7 +27,8 @@ def test_compute_job_is_fingerprinted_and_never_reads_holdout(tmp_path,monkeypat
  assert result["protocol"]==PROTOCOL_VERSION and set(reads)<={"train","validation"}
  digest=result.pop("result_digest")
  assert digest==hashlib.sha256(canonical_json(result).encode()).hexdigest()
- assert (tmp_path/"result"/"trades.csv.gz").exists()
+ assert result["artifact_retention"]["reason"] in {"validation_candidate","deterministic_audit_sample","compact_development_reject"}
+ assert (tmp_path/"result"/"trades.csv.gz").exists()==result["artifact_retention"]["detailed"]
 
 
 def test_compute_job_rejects_wrong_dataset(tmp_path):
@@ -101,3 +102,12 @@ def test_coordinator_drain_flag_is_reversible(tmp_path,monkeypatch):
  assert bridge.drain()["draining"] and bridge.drain_path.exists()
  assert bridge.drain_status()["requested_at"]
  assert not bridge.resume()["draining"] and not bridge.drain_path.exists()
+
+
+def test_artifact_retention_keeps_candidates_and_deterministic_audits(monkeypatch):
+ experiment={"fingerprint":"00000000"+"a"*56}
+ assert retain_detailed_artifacts(experiment,{"stage":"validation"})==(True,"validation_candidate")
+ monkeypatch.setenv("COMPUTE_ARTIFACT_AUDIT_PERCENT","1")
+ assert retain_detailed_artifacts(experiment,{"stage":"development"})==(True,"deterministic_audit_sample")
+ experiment["fingerprint"]="ffffffff"+"a"*56
+ assert retain_detailed_artifacts(experiment,{"stage":"development"})==(False,"compact_development_reject")
