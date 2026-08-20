@@ -24,25 +24,29 @@ def main() -> None:
         schemas={"experiments":["id","fingerprint","strategy_family","formula","parameters_json","dataset_version","dataset_fingerprint","engine_version","cost_model_version","code_commit","status","priority","worker_id","created_at","started_at","finished_at","heartbeat_at","metrics_json","validation_json","artifacts_json","error","promoted","retry_count","failure_code"],"experiment_events":["id","experiment_id","occurred_at","event","payload_json"],"champion_history":["id","dataset_version","experiment_id","previous_experiment_id","promoted_at","validation_score","holdout_score","holdout_metrics_json"]}
         for table,columns in schemas.items():
             staging=f"migration_{table}"
-            target.execute(f"CREATE TEMP TABLE {staging} (LIKE {table} INCLUDING DEFAULTS) ON COMMIT DROP")
+            target.execute(f"CREATE TEMP TABLE {staging} (LIKE {table} INCLUDING DEFAULTS) ON COMMIT PRESERVE ROWS")
+            target.commit()
             rows=source.execute(f"SELECT {','.join(columns)} FROM {table}")
             count=0
-            with target.cursor() as cursor:
-                with cursor.copy(f"COPY {staging} ({','.join(columns)}) FROM STDIN WITH (FORMAT CSV)") as copy:
-                    buffer=io.StringIO()
-                    writer=csv.writer(buffer,lineterminator="\n")
-                    for row in rows:
-                        writer.writerow(tuple(row[column] for column in columns))
-                        count += 1
-                        if count % 2_000 == 0:
-                            copy.write(buffer.getvalue())
-                            buffer.seek(0); buffer.truncate(0)
-                    if buffer.tell():
+            while batch := rows.fetchmany(2_000):
+                buffer=io.StringIO()
+                writer=csv.writer(buffer,lineterminator="\n")
+                for row in batch:
+                    writer.writerow(tuple("\\N" if row[column] is None else row[column] for column in columns))
+                with target.cursor() as cursor:
+                    with cursor.copy(
+                        f"COPY {staging} ({','.join(columns)}) FROM STDIN "
+                        "WITH (FORMAT CSV, NULL '\\N')"
+                    ) as copy:
                         copy.write(buffer.getvalue())
-                cursor.execute(
-                    f"INSERT INTO {table} ({','.join(columns)}) "
-                    f"SELECT {','.join(columns)} FROM {staging} ON CONFLICT DO NOTHING"
-                )
+                    cursor.execute(
+                        f"INSERT INTO {table} ({','.join(columns)}) "
+                        f"SELECT {','.join(columns)} FROM {staging} ON CONFLICT DO NOTHING"
+                    )
+                    cursor.execute(f"TRUNCATE {staging}")
+                target.commit()
+                count += len(batch)
+                print(table,count,flush=True)
             print(table,count,flush=True)
         for table in schemas: target.execute(f"SELECT setval(pg_get_serial_sequence('{table}','id'),COALESCE((SELECT max(id) FROM {table}),1),true)")
         target.commit()
