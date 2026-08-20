@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import csv
+import io
 import psycopg
 from dotenv import load_dotenv
 
@@ -26,10 +28,17 @@ def main() -> None:
             rows=source.execute(f"SELECT {','.join(columns)} FROM {table}")
             count=0
             with target.cursor() as cursor:
-                with cursor.copy(f"COPY {staging} ({','.join(columns)}) FROM STDIN") as copy:
+                with cursor.copy(f"COPY {staging} ({','.join(columns)}) FROM STDIN WITH (FORMAT CSV)") as copy:
+                    buffer=io.StringIO()
+                    writer=csv.writer(buffer,lineterminator="\n")
                     for row in rows:
-                        copy.write_row(tuple(row[column] for column in columns))
+                        writer.writerow(tuple(row[column] for column in columns))
                         count += 1
+                        if count % 2_000 == 0:
+                            copy.write(buffer.getvalue())
+                            buffer.seek(0); buffer.truncate(0)
+                    if buffer.tell():
+                        copy.write(buffer.getvalue())
                 cursor.execute(
                     f"INSERT INTO {table} ({','.join(columns)}) "
                     f"SELECT {','.join(columns)} FROM {staging} ON CONFLICT DO NOTHING"
