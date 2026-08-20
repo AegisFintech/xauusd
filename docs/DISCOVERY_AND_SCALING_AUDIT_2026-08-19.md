@@ -252,3 +252,7 @@ Graceful draining was deployed in commit `98383c1`. A two-minute measurement win
 | 16 | 96 | 102 | 0 | 3,060 | 12.52 / 20.46 s | 99.0%; load 13.93 | 42.9% / 2.9% |
 
 The measured curve is near-linear through 12 workers and begins to flatten at 16 while CPU reaches saturation. Keep production at 16 workers; do not increase concurrency on this host without a longer benchmark and evidence of lower per-worker CPU cost. At 3,060/hour, 500,000 scenarios require approximately 163.4 hours (6.8 days), before retries, adaptive replenishment, and queue effects. A one-day target requires approximately 20,833/hour, so batching, feature reuse, event-loop optimization, or horizontal capacity remains necessary.
+
+## Compact artifact retention — 2026-08-20
+
+Commit `2a59f22 compact artifacts for development rejects` is deployed. New secondary jobs retain full `trades.csv.gz` and `equity.parquet` only for validation-stage candidates or a deterministic audit sample controlled by `COMPUTE_ARTIFACT_AUDIT_PERCENT` (default 1%). Ordinary development rejects retain compact metrics and an explicit retention reason. Existing artifacts were not deleted, and validation/gate behavior is unchanged. The first post-deployment window observed 424 completed result summaries with 118 validation candidates; no terminal failures, `/tmp` 3%, and readiness `CONNECTED`. A follow-up measurement must compare bytes/scenario by retention class after all pre-deployment jobs drain, because legacy summaries do not contain the new retention field.
