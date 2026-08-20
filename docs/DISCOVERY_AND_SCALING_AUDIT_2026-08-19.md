@@ -215,3 +215,12 @@ P0 recovery was executed after explicit authorization:
 - Focused tests: 28 passed. Full primary suite: 95 passed in 26.04 seconds. Secondary code import and live job execution passed; its minimal virtual environment does not include pytest/pip entry points.
 
 Rollback: stop the primary coordinator, restore the previous compute module, point `COMPUTE_RESULT_ROOT` back to a persistent reviewed location (never the capacity-limited tmpfs), restart, and retain both persistent artifact trees until registry reconciliation completes.
+
+## P0/P1 implementation updates — 2026-08-20
+
+Two separately committed and pushed slices are now deployed:
+
+- `758bbf0 bound remote retries and circuit failures`: additive registry migration adds durable `retry_count` and `failure_code`; remote failures classify into structured codes; retries terminate after `COMPUTE_MAX_RETRIES`; consecutive infrastructure failures open a cooldown circuit and stop new claims. Defaults are 3 retries, threshold 8, cooldown 60 seconds.
+- `1756cd8 add stage timing and mount readiness telemetry`: remote telemetry reports root and `/tmp` mounts; coordinator readiness is `CONNECTED`, `DEGRADED`, or `RESOURCE_EXHAUSTED`; critical storage suppresses claims; dispatch/compute/import/total median and p95 timing samples are published in status.
+
+Verification after deployment: coordinator active, 16 workers, `/tmp` 3%, persistent result storage healthy, 99 primary tests passing, no new terminal failures during the canary observations. Existing restart-related pool-worker recovery events are expected; they are not remote compute errors.
