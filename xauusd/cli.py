@@ -95,7 +95,7 @@ def main():
  td=sub.add_parser("tournament-data"); td.add_argument("action",choices=["create","status","verify"]); td.add_argument("--partition",choices=["train","validation","test"])
  er=sub.add_parser("experiments"); er.add_argument("action",choices=["seed","seed-catalog","catalog","summary","list"]); er.add_argument("--status",choices=["queued","running","completed","failed","cancelled"]); er.add_argument("--limit",type=int,default=100)
  worker=sub.add_parser("tournament-worker"); worker.add_argument("--count",type=int,default=1); worker.add_argument("--continuous",action="store_true"); worker.add_argument("--idle-seconds",type=float,default=30)
- remote=sub.add_parser("remote-coordinator"); remote.add_argument("--idle-seconds",type=float,default=10)
+ remote=sub.add_parser("remote-coordinator"); remote.add_argument("action",nargs="?",choices=["run","drain","resume","status"],default="run"); remote.add_argument("--idle-seconds",type=float,default=10)
  compute=sub.add_parser("compute-job"); compute.add_argument("job"); compute.add_argument("output")
  codex=sub.add_parser("codex-improve"); codex.add_argument("action",choices=["prepare","run","status"])
  ops=sub.add_parser("operations"); ops.add_argument("action",choices=["health","backup","compact-artifacts"])
@@ -152,7 +152,10 @@ def main():
    if a.count < 1: p.error("--count must be positive")
    result=TournamentRunner().run(a.count)
    print(json.dumps({"processed":len(result),"experiments":result},indent=2,allow_nan=False,default=str))
- if a.cmd=="remote-coordinator": RemoteComputeBridge().run_forever(a.idle_seconds)
+ if a.cmd=="remote-coordinator":
+  bridge=RemoteComputeBridge()
+  if a.action=="run": bridge.run_forever(a.idle_seconds)
+  else: print(json.dumps(bridge.drain() if a.action=="drain" else bridge.resume() if a.action=="resume" else bridge.drain_status(),indent=2))
  if a.cmd=="compute-job": print(json.dumps(compute_job(Path(a.job),Path(a.output)),indent=2,default=str))
  if a.cmd=="codex-improve":
   workflow=CodexImprovementWorkflow()

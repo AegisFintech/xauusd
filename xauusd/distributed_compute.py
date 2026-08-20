@@ -144,6 +144,7 @@ class RemoteComputeBridge:
         self.circuit_failure_threshold=max(1,int(os.getenv("COMPUTE_CIRCUIT_FAILURE_THRESHOLD","8")))
         self.circuit_cooldown_seconds=max(1,int(os.getenv("COMPUTE_CIRCUIT_COOLDOWN_SECONDS","60")))
         self.control_path=os.getenv("COMPUTE_SSH_CONTROL_PATH","/tmp/xauusd-ssh-%r@%h:%p")
+        self.drain_path=Path(os.getenv("COMPUTE_DRAIN_PATH","reports/tournament/distributed/DRAIN"))
         self.worker_states={}; self.state_lock=threading.Lock(); self.durations=deque(maxlen=500)
         self.stage_durations={name:deque(maxlen=500) for name in ("dispatching","computing","importing","total")}
         self.telemetry={}; self.telemetry_at=0.; self.history=deque(maxlen=360)
@@ -231,6 +232,23 @@ class RemoteComputeBridge:
         state="RESOURCE_EXHAUSTED" if maximum>=critical else "DEGRADED" if maximum>=warning else "CONNECTED"
         return {"state":state,"ready":state!="RESOURCE_EXHAUSTED","maximum_mount_percent":maximum,
                 "warning_percent":warning,"critical_percent":critical}
+
+    def drain(self) -> dict:
+        self.drain_path.parent.mkdir(parents=True,exist_ok=True)
+        _atomic_json(self.drain_path,{"requested_at":datetime.now(timezone.utc).isoformat()})
+        return {"draining":True,"path":str(self.drain_path)}
+
+    def resume(self) -> dict:
+        self.drain_path.unlink(missing_ok=True)
+        return {"draining":False,"path":str(self.drain_path)}
+
+    def drain_status(self) -> dict:
+        draining=self.drain_path.exists(); status={"draining":draining,"path":str(self.drain_path)}
+        try:
+            payload=json.loads(self.drain_path.read_text()) if draining else {}
+            status.update(payload)
+        except (OSError,json.JSONDecodeError): pass
+        return status
 
     def fetch_artifact(self,remote_directory: str,name: str,destination: Path) -> Path:
         if name not in {"equity.parquet","trades.csv.gz"}: raise ValueError("unsupported artifact")
@@ -333,8 +351,9 @@ class RemoteComputeBridge:
                 try:
                     recovered=self.registry.recover_stale(datetime.now(timezone.utc)-timedelta(minutes=120))
                     control=self.maintain_control_plane()
-                    ready=self.readiness(); circuit_open=time.monotonic()<circuit_open_until or not ready["ready"]
-                    while not circuit_open and len(active)<self.workers:
+                    ready=self.readiness(); draining=self.drain_path.exists()
+                    circuit_open=time.monotonic()<circuit_open_until or not ready["ready"]
+                    while not draining and not circuit_open and len(active)<self.workers:
                         experiment=self.registry.claim_next(f"{worker_prefix}-{len(active)+1}")
                         if experiment is None: break
                         future=pool.submit(self.process_claimed,experiment,code_commit)
@@ -368,12 +387,13 @@ class RemoteComputeBridge:
                                     "p95_seconds":durations[min(len(durations)-1,int(len(durations)*.95))] if durations else None}
                     self.history.append({"time":datetime.now(timezone.utc).isoformat(),"throughput_per_hour":round(rate,2),
                                          "queue":summary["by_status"].get("queued",0),"cpu_percent":self.telemetry.get("cpu",{}).get("total_percent")})
-                    self.status(state="running" if active else "idle",host=self.host,workers=self.workers,
+                    coordinator_state="draining" if draining and active else "drained" if draining else "running" if active else "idle"
+                    self.status(state=coordinator_state,host=self.host,workers=self.workers,
                                 active=len(active),active_experiment_ids=[x["id"] for x in active.values()],
                                 completed_session=completed_total,failed_session=failed_total,
                                 throughput_per_hour=round(rate,2),eta_seconds=round(eta) if eta else None,
                                 duration=duration_stats,stage_duration=stage_stats,worker_details=workers,telemetry=self.telemetry,
-                                readiness=ready,history=list(self.history),
+                                readiness=ready,drain={"requested":draining,"drained":draining and not active},history=list(self.history),
                                 recovered_stale=recovered,queue=summary["by_status"].get("queued",0),control=control,
                                 circuit={"state":"OPEN" if time.monotonic()<circuit_open_until else "CLOSED",
                                     "consecutive_failures":consecutive_failures,"last_failure_code":last_failure_code,

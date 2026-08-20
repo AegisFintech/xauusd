@@ -91,3 +91,13 @@ def test_readiness_uses_most_constrained_mount(tmp_path,monkeypatch):
  assert bridge.readiness()["state"]=="RESOURCE_EXHAUSTED" and not bridge.readiness()["ready"]
  bridge.telemetry={"mounts":{"root":{"percent":40},"tmp":{"percent":81}}}
  assert bridge.readiness()["state"]=="DEGRADED" and bridge.readiness()["ready"]
+
+
+def test_coordinator_drain_flag_is_reversible(tmp_path,monkeypatch):
+ monkeypatch.setenv("COMPUTE_HOST","example")
+ monkeypatch.setenv("COMPUTE_DRAIN_PATH",str(tmp_path/"DRAIN"))
+ bridge=RemoteComputeBridge(root=tmp_path)
+ assert not bridge.drain_status()["draining"]
+ assert bridge.drain()["draining"] and bridge.drain_path.exists()
+ assert bridge.drain_status()["requested_at"]
+ assert not bridge.resume()["draining"] and not bridge.drain_path.exists()
