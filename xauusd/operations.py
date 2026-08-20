@@ -7,6 +7,7 @@ import shutil
 import sqlite3
 import gzip
 import hashlib
+import os
 
 
 class OperationsManager:
@@ -93,3 +94,60 @@ class OperationsManager:
   temporary=output.with_suffix(output.suffix+".tmp"); temporary.write_text(json.dumps(payload,indent=2)); temporary.replace(output)
   return {"output":str(output),"plan_digest":payload["plan_digest"],"candidate_count":len(candidates),
           "protected_count":len(protected),"audit_percent":audit_percent}
+
+ @staticmethod
+ def apply_remote_artifacts_plan(plan_path: Path,digest: str,journal_path: Path,
+                                 allowed_root="/opt/xauusd/var/results") -> dict:
+  plan=json.loads(Path(plan_path).read_text()); stored=plan.pop("plan_digest",None)
+  actual=hashlib.sha256(json.dumps(plan,sort_keys=True,separators=(",",":")).encode()).hexdigest()
+  if stored!=digest or actual!=digest: raise ValueError("compaction plan digest mismatch")
+  completed={}
+  journal_path=Path(journal_path); journal_path.parent.mkdir(parents=True,exist_ok=True)
+  if journal_path.exists():
+   for line in journal_path.read_text().splitlines():
+    row=json.loads(line); completed[int(row["experiment_id"])]=row
+  removed_files=removed_bytes=missing_paths=0
+  with journal_path.open("a") as journal:
+   for item in plan["candidates"]:
+    eid=int(item["experiment_id"])
+    if eid in completed: continue
+    directory=Path(item["remote_directory"])
+    valid=str(directory).startswith(f"{allowed_root}/xauusd-result-") or str(directory).startswith("/tmp/xauusd-result-")
+    if not valid or directory.name!=f"xauusd-result-{eid}": raise ValueError(f"unsafe compaction path for {eid}")
+    files=bytes_=0
+    if directory.is_dir():
+     for name in ("trades.csv.gz","equity.parquet"):
+      target=directory/name
+      if target.is_file(): bytes_+=target.stat().st_size; target.unlink(); files+=1
+    else: missing_paths+=1
+    row={"experiment_id":eid,"fingerprint":item["fingerprint"],"remote_directory":str(directory),
+         "removed_files":files,"removed_bytes":bytes_,"completed_at":datetime.now(timezone.utc).isoformat()}
+    journal.write(json.dumps(row,sort_keys=True)+"\n"); journal.flush(); os.fsync(journal.fileno())
+    removed_files+=files; removed_bytes+=bytes_
+  return {"plan_digest":digest,"planned":len(plan["candidates"]),"previously_completed":len(completed),
+          "removed_files":removed_files,"removed_bytes":removed_bytes,"missing_paths":missing_paths,
+          "journal":str(journal_path)}
+
+ def reconcile_remote_artifacts(self,plan_path: Path,digest: str,journal_path: Path) -> dict:
+  plan=json.loads(Path(plan_path).read_text()); stored=plan.pop("plan_digest",None)
+  actual=hashlib.sha256(json.dumps(plan,sort_keys=True,separators=(",",":")).encode()).hexdigest()
+  if stored!=digest or actual!=digest: raise ValueError("compaction plan digest mismatch")
+  candidates={int(x["experiment_id"]):x for x in plan["candidates"]}; rows={}
+  for line in Path(journal_path).read_text().splitlines():
+   row=json.loads(line); eid=int(row["experiment_id"])
+   if eid not in candidates or row["fingerprint"]!=candidates[eid]["fingerprint"]: raise ValueError("journal does not match plan")
+   rows[eid]=row
+  now=datetime.now(timezone.utc).isoformat(); updated=0
+  with sqlite3.connect(self.registry_path) as db:
+   for eid,row in rows.items():
+    current=db.execute("SELECT artifacts_json FROM experiments WHERE id=? AND status='completed'",(eid,)).fetchone()
+    if not current: raise ValueError(f"experiment {eid} is not completed")
+    artifacts=json.loads(current[0] or "{}"); artifacts["detail_retention"]={"detailed":False,
+     "reason":"historical_ordinary_reject_compacted","plan_digest":digest,"compacted_at":row["completed_at"],
+     "removed_files":row["removed_files"],"removed_bytes":row["removed_bytes"]}
+    db.execute("UPDATE experiments SET artifacts_json=? WHERE id=?",(json.dumps(artifacts,sort_keys=True,separators=(",",":")),eid))
+    db.execute("INSERT INTO experiment_events(experiment_id,occurred_at,event,payload_json) VALUES(?,?,?,?)",
+     (eid,now,"remote_artifacts_compacted",json.dumps({"plan_digest":digest,"removed_files":row["removed_files"],"removed_bytes":row["removed_bytes"]},sort_keys=True,separators=(",",":"))))
+    updated+=1
+  return {"plan_digest":digest,"journal_rows":len(rows),"updated":updated,
+          "removed_files":sum(x["removed_files"] for x in rows.values()),"removed_bytes":sum(x["removed_bytes"] for x in rows.values())}

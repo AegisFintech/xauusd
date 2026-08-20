@@ -98,7 +98,7 @@ def main():
  remote=sub.add_parser("remote-coordinator"); remote.add_argument("action",nargs="?",choices=["run","drain","resume","status"],default="run"); remote.add_argument("--idle-seconds",type=float,default=10)
  compute=sub.add_parser("compute-job"); compute.add_argument("job"); compute.add_argument("output")
  codex=sub.add_parser("codex-improve"); codex.add_argument("action",choices=["prepare","run","status"])
- ops=sub.add_parser("operations"); ops.add_argument("action",choices=["health","backup","compact-artifacts","remote-artifacts-plan"])
+ ops=sub.add_parser("operations"); ops.add_argument("action",choices=["health","backup","compact-artifacts","remote-artifacts-plan","remote-artifacts-apply","remote-artifacts-reconcile"]); ops.add_argument("--plan"); ops.add_argument("--digest"); ops.add_argument("--journal")
  sub.add_parser("tournament-weekly-report")
  shadow=sub.add_parser("shadow"); shadow.add_argument("action",choices=["status","stop"]); shadow.add_argument("--reason",default="manual emergency stop")
  d=sub.add_parser("data"); ds=d.add_subparsers(dest="data_cmd"); i=ds.add_parser("import"); i.add_argument("csv"); v=ds.add_parser("validate")
@@ -164,7 +164,9 @@ def main():
   else: result=workflow.run(TournamentDataset().active())
   print(json.dumps(result,indent=2,default=str))
  if a.cmd=="operations":
-  manager=OperationsManager(); result=manager.health() if a.action=="health" else manager.backup() if a.action=="backup" else manager.remote_artifacts_plan() if a.action=="remote-artifacts-plan" else manager.compact_artifacts()
+  manager=OperationsManager()
+  if a.action in {"remote-artifacts-apply","remote-artifacts-reconcile"} and not all((a.plan,a.digest,a.journal)): p.error("--plan, --digest, and --journal are required")
+  result=manager.health() if a.action=="health" else manager.backup() if a.action=="backup" else manager.remote_artifacts_plan() if a.action=="remote-artifacts-plan" else OperationsManager.apply_remote_artifacts_plan(Path(a.plan),a.digest,Path(a.journal)) if a.action=="remote-artifacts-apply" else manager.reconcile_remote_artifacts(Path(a.plan),a.digest,Path(a.journal)) if a.action=="remote-artifacts-reconcile" else manager.compact_artifacts()
   print(json.dumps(result,indent=2,default=str))
  if a.cmd=="tournament-weekly-report": print(json.dumps(WeeklyTournamentReport().build(),indent=2,default=str))
  if a.cmd=="shadow":

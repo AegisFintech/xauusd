@@ -48,3 +48,23 @@ def test_remote_artifact_plan_is_deterministic_and_protects_candidates(tmp_path)
  OperationsManager(database,tmp_path/"b",tmp_path/"r").remote_artifacts_plan(output,0)
  repeated=json.loads(output.read_text())
  assert repeated["candidates"]==plan["candidates"] and repeated["protected"]==plan["protected"]
+
+
+def test_remote_artifact_apply_is_resumable_and_reconciles(tmp_path):
+ database=tmp_path/"registry.db"; remote=tmp_path/"results"/"xauusd-result-1"; remote.mkdir(parents=True)
+ (remote/"result.json").write_text("{}"); (remote/"trades.csv.gz").write_bytes(b"trade"); (remote/"equity.parquet").write_bytes(b"equity")
+ validation={"passed":False,"gates":{"a":False,"b":False}}
+ with sqlite3.connect(database) as db:
+  db.execute("CREATE TABLE experiments(id INTEGER,fingerprint TEXT,status TEXT,promoted INTEGER,validation_json TEXT,artifacts_json TEXT)")
+  db.execute("CREATE TABLE experiment_events(experiment_id INTEGER,occurred_at TEXT,event TEXT,payload_json TEXT)")
+  db.execute("INSERT INTO experiments VALUES(1,?,'completed',0,?,?)",("f"*64,json.dumps(validation),json.dumps({"remote_directory":str(remote)})))
+ manager=OperationsManager(database,tmp_path/"b",tmp_path/"r"); plan_path=tmp_path/"plan.json"
+ manager.remote_artifacts_plan(plan_path,0); plan=json.loads(plan_path.read_text()); journal=tmp_path/"journal.jsonl"
+ result=manager.apply_remote_artifacts_plan(plan_path,plan["plan_digest"],journal,allowed_root=str(tmp_path/"results"))
+ assert result["removed_files"]==2 and (remote/"result.json").exists() and not (remote/"equity.parquet").exists()
+ assert manager.apply_remote_artifacts_plan(plan_path,plan["plan_digest"],journal,allowed_root=str(tmp_path/"results"))["previously_completed"]==1
+ reconciled=manager.reconcile_remote_artifacts(plan_path,plan["plan_digest"],journal)
+ assert reconciled["updated"]==1
+ with sqlite3.connect(database) as db:
+  artifacts=json.loads(db.execute("SELECT artifacts_json FROM experiments").fetchone()[0]); event=db.execute("SELECT event FROM experiment_events").fetchone()[0]
+ assert not artifacts["detail_retention"]["detailed"] and event=="remote_artifacts_compacted"
