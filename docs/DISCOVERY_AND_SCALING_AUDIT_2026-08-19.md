@@ -226,3 +226,16 @@ Two separately committed and pushed slices are now deployed:
 Verification after deployment: coordinator active, 16 workers, `/tmp` 3%, persistent result storage healthy, 99 primary tests passing, no new terminal failures during the canary observations. Existing restart-related pool-worker recovery events are expected; they are not remote compute errors.
 
 Initial 16-worker stage sample (64 post-deployment scenarios): 2,428 scenarios/hour cumulative session throughput; median/p95 dispatch 2.09/8.19 seconds, compute 11.42/15.06 seconds, import 0.008/0.086 seconds, and total 14.48/22.45 seconds. The independent registry window contained 1,333 completions over ten minutes with median 12.98 and p95 18.36 seconds. Compute is the dominant stage; primary result import is negligible. CPU telemetry's instantaneous 1% sample conflicted with load average 16.7 because its 250 ms sample landed between process waves; saturation analysis must aggregate samples rather than use one point.
+
+## Controlled worker smoke test — 2026-08-20
+
+A maintenance-window smoke test ran 45 seconds at each configured worker count and restored `COMPUTE_WORKERS=16` afterward. It is **not valid for SLA selection** because each restart requeued leases from the previous pool; those recovery events contaminated the claim/completion windows. It is retained as an operational signal only:
+
+| Workers | Claims | Completions | Requeues | Approx. completions/hour | Runtime median / p95 | CPU sample | Readiness |
+|---:|---:|---:|---:|---:|---:|---:|---|
+| 4 | 13 | 8 | 12 | 640 | 11.11 / 13.93 s | 50.5% | CONNECTED |
+| 8 | 24 | 16 | 4 | 1,280 | 10.16 / 10.71 s | 0% sample; load 7.1 | CONNECTED |
+| 12 | 24 | 24 | 8 | 1,920 | 14.12 / 17.68 s | 0% sample; load 9.3 | CONNECTED |
+| 16 | 33 | 18 | 0 | 1,440 | 22.11 / 23.05 s | 93.7% | CONNECTED |
+
+All points had zero terminal failures and storage stayed healthy (root 42.0–42.1%, `/tmp` 2.9%). The 16-worker point reached CPU saturation, but its throughput was distorted by restart backlog and is not evidence that 12 workers is optimal. Next benchmark must use a dedicated benchmark queue/registry or a lease-drain protocol, at least 10–15 minutes per point, aggregate CPU/load samples, and exclude recovery events.
