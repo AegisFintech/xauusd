@@ -111,7 +111,9 @@ def test_coordinator_drain_flag_is_reversible(tmp_path,monkeypatch):
 
 def test_artifact_retention_keeps_candidates_and_deterministic_audits(monkeypatch):
  experiment={"fingerprint":"00000000"+"a"*56}
- assert retain_detailed_artifacts(experiment,{"stage":"validation"})==(True,"validation_candidate")
+ assert retain_detailed_artifacts(experiment,{"stage":"validation","passed":True})==(True,"validation_passed")
+ near={"stage":"validation","passed":False,"gates":{"profit":True,"drawdown":False}}
+ assert retain_detailed_artifacts(experiment,near)==(True,"validation_near_pass")
  monkeypatch.setenv("COMPUTE_ARTIFACT_AUDIT_PERCENT","1")
  assert retain_detailed_artifacts(experiment,{"stage":"development"})==(True,"deterministic_audit_sample")
  experiment["fingerprint"]="ffffffff"+"a"*56

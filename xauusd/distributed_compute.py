@@ -42,7 +42,10 @@ def failure_code(error: Exception) -> str:
 
 
 def retain_detailed_artifacts(experiment: dict,validation: dict) -> tuple[bool,str]:
-    if validation.get("stage")=="validation": return True,"validation_candidate"
+    if validation.get("stage")=="validation":
+        if validation.get("passed"): return True,"validation_passed"
+        gates=validation.get("gates") or {}; failed=sum(not bool(value) for value in gates.values())
+        if gates and failed<=1: return True,"validation_near_pass"
     sample_rate=max(0,min(100,int(os.getenv("COMPUTE_ARTIFACT_AUDIT_PERCENT","1"))))
     bucket=int(experiment["fingerprint"][:8],16)%100
     if bucket<sample_rate: return True,"deterministic_audit_sample"
