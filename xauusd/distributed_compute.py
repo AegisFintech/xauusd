@@ -27,6 +27,18 @@ from .strategy_proposals import ProposalEngine
 
 
 PROTOCOL_VERSION="distributed-v1"
+
+
+def failure_code(error: Exception) -> str:
+    message=str(error).lower()
+    if "no space left" in message: return "RESOURCE_EXHAUSTED"
+    if "timed out" in message or isinstance(error,subprocess.TimeoutExpired): return "TIMEOUT"
+    if "permission denied" in message or "publickey" in message: return "AUTH_FAILURE"
+    if "name or service not known" in message or "could not resolve" in message: return "DNS_FAILURE"
+    if "connection refused" in message or "no route to host" in message: return "TCP_UNREACHABLE"
+    if "result verification" in message or "fingerprint mismatch" in message: return "PROTOCOL_MISMATCH"
+    if isinstance(error,subprocess.CalledProcessError): return "REMOTE_COMMAND_FAILURE"
+    return "REMOTE_ERROR"
 REMOTE_TELEMETRY_SCRIPT=r'''import json,os,shutil,time
 def cpu():
  rows=[]
@@ -128,6 +140,9 @@ class RemoteComputeBridge:
         if not self.remote_result_root.startswith(f"{self.remote_root}/"):
             raise ValueError("COMPUTE_RESULT_ROOT must be below COMPUTE_ROOT")
         self.workers=max(1,int(os.getenv("COMPUTE_WORKERS","16")))
+        self.max_retries=max(1,int(os.getenv("COMPUTE_MAX_RETRIES","3")))
+        self.circuit_failure_threshold=max(1,int(os.getenv("COMPUTE_CIRCUIT_FAILURE_THRESHOLD","8")))
+        self.circuit_cooldown_seconds=max(1,int(os.getenv("COMPUTE_CIRCUIT_COOLDOWN_SECONDS","60")))
         self.control_path=os.getenv("COMPUTE_SSH_CONTROL_PATH","/tmp/xauusd-ssh-%r@%h:%p")
         self.worker_states={}; self.state_lock=threading.Lock(); self.durations=deque(maxlen=500)
         self.telemetry={}; self.telemetry_at=0.; self.history=deque(maxlen=360)
@@ -247,7 +262,9 @@ class RemoteComputeBridge:
                 state=self.worker_states.pop(worker,{}); self.durations.append(time.monotonic()-state.get("started_monotonic",time.monotonic()))
             return completed
         except Exception as error:
-            self.registry.requeue(eid,worker,f"remote retry: {type(error).__name__}: {error}")
+            code=failure_code(error)
+            self.registry.requeue(eid,worker,f"remote retry: {type(error).__name__}: {error}",
+                                  code,self.max_retries)
             raise
         finally:
             self._ssh(f"rm -f {remote_job}",check=False)
@@ -295,19 +312,25 @@ class RemoteComputeBridge:
         except (OSError,subprocess.CalledProcessError): code_commit="unknown"
         with ThreadPoolExecutor(max_workers=self.workers) as pool:
             active={}; completed_total=0; failed_total=0; started=time.monotonic()
+            consecutive_failures=0; circuit_open_until=0.; last_failure_code=None
             while True:
                 try:
                     recovered=self.registry.recover_stale(datetime.now(timezone.utc)-timedelta(minutes=120))
                     control=self.maintain_control_plane()
-                    while len(active)<self.workers:
+                    circuit_open=time.monotonic()<circuit_open_until
+                    while not circuit_open and len(active)<self.workers:
                         experiment=self.registry.claim_next(f"{worker_prefix}-{len(active)+1}")
                         if experiment is None: break
                         future=pool.submit(self.process_claimed,experiment,code_commit)
                         active[future]=experiment
                     for future in [f for f in active if f.done()]:
                         experiment=active.pop(future)
-                        try: future.result(); completed_total+=1
-                        except Exception: failed_total+=1
+                        try:
+                            future.result(); completed_total+=1; consecutive_failures=0; last_failure_code=None
+                        except Exception as error:
+                            failed_total+=1; consecutive_failures+=1; last_failure_code=failure_code(error)
+                            if consecutive_failures>=self.circuit_failure_threshold:
+                                circuit_open_until=time.monotonic()+self.circuit_cooldown_seconds
                     summary=self.registry.summary(); elapsed=max(1,time.monotonic()-started)
                     if time.monotonic()-self.telemetry_at>=10:
                         try: self.telemetry=self.sample_remote(); self.telemetry_at=time.monotonic()
@@ -329,7 +352,10 @@ class RemoteComputeBridge:
                                 completed_session=completed_total,failed_session=failed_total,
                                 throughput_per_hour=round(rate,2),eta_seconds=round(eta) if eta else None,
                                 duration=duration_stats,worker_details=workers,telemetry=self.telemetry,history=list(self.history),
-                                recovered_stale=recovered,queue=summary["by_status"].get("queued",0),control=control,last_error=None)
+                                recovered_stale=recovered,queue=summary["by_status"].get("queued",0),control=control,
+                                circuit={"state":"OPEN" if time.monotonic()<circuit_open_until else "CLOSED",
+                                    "consecutive_failures":consecutive_failures,"last_failure_code":last_failure_code,
+                                    "retry_after_seconds":max(0,round(circuit_open_until-time.monotonic()))},last_error=None)
                     time.sleep(1 if active else idle_seconds)
                 except KeyboardInterrupt:
                     self.status(state="stopped",active=len(active)); return

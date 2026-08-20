@@ -102,6 +102,11 @@ class ExperimentRegistry:
             );
             CREATE INDEX IF NOT EXISTS idx_champion_dataset ON champion_history(dataset_version,id);
             """)
+            columns={row["name"] for row in db.execute("PRAGMA table_info(experiments)")}
+            if "retry_count" not in columns:
+                db.execute("ALTER TABLE experiments ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0")
+            if "failure_code" not in columns:
+                db.execute("ALTER TABLE experiments ADD COLUMN failure_code TEXT")
 
     @staticmethod
     def _now() -> str:
@@ -150,13 +155,23 @@ class ExperimentRegistry:
     def fail(self, experiment_id: int, worker_id: str, error: str, artifacts: dict | None = None) -> dict:
         return self._finish(experiment_id, worker_id, "failed", None, None, artifacts, error, False)
 
-    def requeue(self,experiment_id: int,worker_id: str,error: str) -> dict:
+    def requeue(self,experiment_id: int,worker_id: str,error: str,
+                failure_code: str="REMOTE_ERROR",max_retries: int | None=None) -> dict:
         with self.connect() as db:
-            cursor=db.execute("""UPDATE experiments SET status='queued',worker_id=NULL,started_at=NULL,
-                heartbeat_at=NULL,error=? WHERE id=? AND status='running' AND worker_id=?""",
-                (error,experiment_id,worker_id))
+            row=db.execute("SELECT retry_count FROM experiments WHERE id=? AND status='running' AND worker_id=?",
+                           (experiment_id,worker_id)).fetchone()
+            if row is None: raise ValueError("experiment is not owned by this worker or is no longer running")
+            retry_count=int(row["retry_count"])+1
+            terminal=max_retries is not None and retry_count>=max_retries
+            status="failed" if terminal else "queued"; now=self._now()
+            cursor=db.execute("""UPDATE experiments SET status=?,worker_id=NULL,started_at=NULL,
+                heartbeat_at=NULL,finished_at=?,error=?,failure_code=?,retry_count=?
+                WHERE id=? AND status='running' AND worker_id=?""",
+                (status,now if terminal else None,error,failure_code,retry_count,experiment_id,worker_id))
             if cursor.rowcount!=1: raise ValueError("experiment is not owned by this worker or is no longer running")
-            self._event(db,experiment_id,"requeued_remote_error",{"worker_id":worker_id,"error":error})
+            event="failed_retry_limit" if terminal else "requeued_remote_error"
+            self._event(db,experiment_id,event,{"worker_id":worker_id,"error":error,
+                "failure_code":failure_code,"retry_count":retry_count,"max_retries":max_retries})
             return self.get(experiment_id,db)
 
     def _finish(self, experiment_id: int, worker_id: str, status: ExperimentStatus, metrics, validation,

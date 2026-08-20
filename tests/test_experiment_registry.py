@@ -68,6 +68,25 @@ def test_remote_error_can_requeue_owned_experiment(tmp_path):
  assert registry.events(row["id"])[-1]["event"]=="requeued_remote_error"
 
 
+def test_remote_retry_count_is_durable_and_limit_is_terminal(tmp_path):
+ registry=ExperimentRegistry(tmp_path/"registry.db"); row,_=registry.register(spec())
+ claimed=registry.claim_next("remote")
+ retried=registry.requeue(claimed["id"],"remote","disk full","RESOURCE_EXHAUSTED",2)
+ assert retried["status"]=="queued" and retried["retry_count"]==1
+ claimed=registry.claim_next("remote")
+ failed=registry.requeue(claimed["id"],"remote","disk full","RESOURCE_EXHAUSTED",2)
+ assert failed["status"]=="failed" and failed["retry_count"]==2
+ assert failed["failure_code"]=="RESOURCE_EXHAUSTED"
+ assert registry.events(row["id"])[-1]["event"]=="failed_retry_limit"
+
+
+def test_registry_migrates_retry_columns(tmp_path):
+ registry=ExperimentRegistry(tmp_path/"registry.db")
+ with registry.connect() as db:
+  columns={row["name"] for row in db.execute("PRAGMA table_info(experiments)")}
+ assert {"retry_count","failure_code"} <= columns
+
+
 def test_replaced_remote_pool_is_recovered_without_touching_current_pool(tmp_path):
  registry=ExperimentRegistry(tmp_path/"registry.db")
  old,_=registry.register(spec(x=1)); current,_=registry.register(spec(x=2))

@@ -1,7 +1,7 @@
 import hashlib,json
 
 from xauusd.core import synthetic_bars
-from xauusd.distributed_compute import PROTOCOL_VERSION,RemoteComputeBridge,compute_job,job_payload
+from xauusd.distributed_compute import PROTOCOL_VERSION,RemoteComputeBridge,compute_job,job_payload,failure_code
 from xauusd.experiment_registry import ExperimentRegistry,ExperimentSpec,canonical_json
 from xauusd.tournament_data import TournamentDataConfig,TournamentDataset
 from xauusd.search_space import catalog_size
@@ -77,3 +77,9 @@ def test_control_plane_refills_at_ten_percent(tmp_path,monkeypatch):
  result=bridge.maintain_control_plane()
  assert result["low_queue_threshold"]==int(catalog_size()*.10)
  assert result["catalog"]["created"]==result["low_queue_threshold"]
+
+
+def test_remote_failure_codes_are_structured():
+ assert failure_code(OSError("No space left on device"))=="RESOURCE_EXHAUSTED"
+ assert failure_code(TimeoutError("timed out"))=="TIMEOUT"
+ assert failure_code(ValueError("remote result verification failed"))=="PROTOCOL_MISMATCH"
