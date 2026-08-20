@@ -6,6 +6,7 @@ import json
 import shutil
 import sqlite3
 import gzip
+import hashlib
 
 
 class OperationsManager:
@@ -65,3 +66,30 @@ class OperationsManager:
      source.unlink(); artifacts[key]=str(target); compressed+=1; changed=True
     if changed: db.execute("UPDATE experiments SET artifacts_json=? WHERE id=?",(json.dumps(artifacts,sort_keys=True,separators=(",",":")),experiment_id))
   return {"compressed":compressed,"skipped":skipped,"bytes_before":before,"bytes_after":after,"bytes_saved":before-after}
+
+ def remote_artifacts_plan(self,output=Path("reports/tournament/remote-artifact-compaction-plan.json"),audit_percent=1) -> dict:
+  candidates=[]; protected=[]
+  with sqlite3.connect(self.registry_path) as db:
+   db.row_factory=sqlite3.Row
+   rows=db.execute("""SELECT id,fingerprint,status,promoted,validation_json,artifacts_json
+                      FROM experiments WHERE status='completed' AND artifacts_json IS NOT NULL ORDER BY id""").fetchall()
+  for row in rows:
+   artifacts=json.loads(row["artifacts_json"] or "{}"); remote=artifacts.get("remote_directory")
+   if not remote: continue
+   validation=json.loads(row["validation_json"] or "{}"); gates=validation.get("gates") or {}
+   reason=None
+   if row["promoted"]: reason="promoted"
+   elif validation.get("passed"): reason="validation_passed"
+   elif gates and sum(not bool(value) for value in gates.values())<=1: reason="validation_near_pass"
+   elif int(row["fingerprint"][:8],16)%100<max(0,min(100,int(audit_percent))): reason="deterministic_audit_sample"
+   item={"experiment_id":row["id"],"fingerprint":row["fingerprint"],"remote_directory":remote}
+   if reason: protected.append({**item,"reason":reason})
+   else: candidates.append({**item,"reason":"ordinary_completed_reject"})
+  payload={"created_at":datetime.now(timezone.utc).isoformat(),"mode":"dry_run",
+           "audit_percent":audit_percent,"candidate_count":len(candidates),"protected_count":len(protected),
+           "candidates":candidates,"protected":protected}
+  payload["plan_digest"]=hashlib.sha256(json.dumps(payload,sort_keys=True,separators=(",",":")).encode()).hexdigest()
+  output=Path(output); output.parent.mkdir(parents=True,exist_ok=True)
+  temporary=output.with_suffix(output.suffix+".tmp"); temporary.write_text(json.dumps(payload,indent=2)); temporary.replace(output)
+  return {"output":str(output),"plan_digest":payload["plan_digest"],"candidate_count":len(candidates),
+          "protected_count":len(protected),"audit_percent":audit_percent}

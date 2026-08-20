@@ -33,3 +33,18 @@ def test_compaction_compresses_trade_ledgers_and_updates_registry(tmp_path):
  with sqlite3.connect(database) as db: updated=json.loads(db.execute("SELECT artifacts_json FROM experiments").fetchone()[0])
  assert result["compressed"]==1 and result["bytes_saved"]>0
  assert not ledger.exists() and updated["trades"].endswith(".gz")
+
+
+def test_remote_artifact_plan_is_deterministic_and_protects_candidates(tmp_path):
+ database=tmp_path/"registry.db"; output=tmp_path/"plan.json"
+ with sqlite3.connect(database) as db:
+  db.execute("CREATE TABLE experiments(id INTEGER,fingerprint TEXT,status TEXT,promoted INTEGER,validation_json TEXT,artifacts_json TEXT)")
+  for i,validation in ((1,{"passed":False,"gates":{"a":False,"b":False}}),(2,{"passed":True,"gates":{"a":True}})):
+   db.execute("INSERT INTO experiments VALUES(?,?,?,?,?,?)",(i,"f"*64,"completed",0,json.dumps(validation),json.dumps({"remote_directory":f"/opt/xauusd/var/results/xauusd-result-{i}"})))
+ result=OperationsManager(database,tmp_path/"b",tmp_path/"r").remote_artifacts_plan(output,audit_percent=0)
+ plan=json.loads(output.read_text())
+ assert result["candidate_count"]==1 and result["protected_count"]==1
+ assert plan["candidates"][0]["experiment_id"]==1 and plan["protected"][0]["reason"]=="validation_passed"
+ OperationsManager(database,tmp_path/"b",tmp_path/"r").remote_artifacts_plan(output,0)
+ repeated=json.loads(output.read_text())
+ assert repeated["candidates"]==plan["candidates"] and repeated["protected"]==plan["protected"]
