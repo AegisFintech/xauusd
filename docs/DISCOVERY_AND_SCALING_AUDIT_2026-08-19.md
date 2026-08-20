@@ -239,3 +239,16 @@ A maintenance-window smoke test ran 45 seconds at each configured worker count a
 | 16 | 33 | 18 | 0 | 1,440 | 22.11 / 23.05 s | 93.7% | CONNECTED |
 
 All points had zero terminal failures and storage stayed healthy (root 42.0–42.1%, `/tmp` 2.9%). The 16-worker point reached CPU saturation, but its throughput was distorted by restart backlog and is not evidence that 12 workers is optimal. Next benchmark must use a dedicated benchmark queue/registry or a lease-drain protocol, at least 10–15 minutes per point, aggregate CPU/load samples, and exclude recovery events.
+
+## Clean lease-drained saturation benchmark — 2026-08-20
+
+Graceful draining was deployed in commit `98383c1`. A two-minute measurement window with a 30-second warm-up was run at each worker count; the coordinator drained to zero active leases before every restart and production was restored to 16 workers afterward. Every point had zero remote retries and zero terminal failures. `completed` may exceed `claimed` where warm-up claims finished inside the measurement window; throughput is based on completed terminal scenarios and remains directional until a dedicated benchmark registry isolates the queue completely.
+
+| Workers | Claimed | Completed | Retries | Approx. throughput/hour | Registry runtime median / p95 | CPU sample | Root / tmp use |
+|---:|---:|---:|---:|---:|---:|---:|---|
+| 4 | 32 | 32 | 0 | 960 | 8.57 / 14.06 s | 0.5% sample; load 2.75 | 42.6% / 2.9% |
+| 8 | 64 | 64 | 0 | 1,920 | 9.34 / 12.22 s | 14.5% sample; load 3.97 | 42.7% / 2.9% |
+| 12 | 111 | 99 | 0 | 2,970 | 10.11 / 14.03 s | 48.3%; load 8.36 | 42.8% / 2.9% |
+| 16 | 96 | 102 | 0 | 3,060 | 12.52 / 20.46 s | 99.0%; load 13.93 | 42.9% / 2.9% |
+
+The measured curve is near-linear through 12 workers and begins to flatten at 16 while CPU reaches saturation. Keep production at 16 workers; do not increase concurrency on this host without a longer benchmark and evidence of lower per-worker CPU cost. At 3,060/hour, 500,000 scenarios require approximately 163.4 hours (6.8 days), before retries, adaptive replenishment, and queue effects. A one-day target requires approximately 20,833/hour, so batching, feature reuse, event-loop optimization, or horizontal capacity remains necessary.
