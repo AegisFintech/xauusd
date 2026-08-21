@@ -11,10 +11,13 @@ from dotenv import load_dotenv
 
 def main() -> None:
     load_dotenv(".env")
-    url=os.environ["DATABASE_URL"]
-    # Neon transaction poolers may move each statement to a different backend;
-    # the rebuild requires one session/transaction, so use the direct endpoint.
-    target_url=url.replace("-pooler.", ".", 1)
+    url=os.environ.get("DATABASE_URL_DIRECT") or os.environ["DATABASE_URL"]
+    # The rebuild requires one stable PostgreSQL session. Prefer the explicitly
+    # supplied direct Neon endpoint; fall back to a non-pooler derivation only
+    # for older deployments that do not define DATABASE_URL_DIRECT.
+    if not os.environ.get("DATABASE_URL_DIRECT"):
+        url=url.replace("-pooler.", ".", 1)
+    target_url=url
     source=sqlite3.connect(os.getenv("SQLITE_REGISTRY","data/experiments/registry.sqlite3")); source.row_factory=sqlite3.Row
     with psycopg.connect(target_url) as target:
         target.execute("""CREATE TABLE IF NOT EXISTS experiments (id BIGSERIAL PRIMARY KEY,fingerprint TEXT NOT NULL UNIQUE,
