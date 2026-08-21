@@ -22,6 +22,10 @@ def main() -> None:
           artifacts_json TEXT,error TEXT,promoted INTEGER NOT NULL DEFAULT 0 CHECK(promoted IN (0,1)),retry_count INTEGER NOT NULL DEFAULT 0,failure_code TEXT)""")
         target.execute("""CREATE TABLE IF NOT EXISTS experiment_events (id BIGSERIAL PRIMARY KEY,experiment_id BIGINT NOT NULL REFERENCES experiments(id),occurred_at TEXT NOT NULL,event TEXT NOT NULL,payload_json TEXT)""")
         target.execute("""CREATE TABLE IF NOT EXISTS champion_history (id BIGSERIAL PRIMARY KEY,dataset_version TEXT NOT NULL,experiment_id BIGINT NOT NULL REFERENCES experiments(id),previous_experiment_id BIGINT REFERENCES experiments(id),promoted_at TEXT NOT NULL,validation_score DOUBLE PRECISION NOT NULL,holdout_score DOUBLE PRECISION NOT NULL,holdout_metrics_json TEXT NOT NULL)""")
+        # Rebuild the target registry from the authoritative SQLite snapshot. This
+        # prevents stale partial migrations from remapping IDs and breaking event FKs.
+        target.execute("TRUNCATE champion_history, experiment_events, experiments RESTART IDENTITY CASCADE")
+        target.commit()
         schemas={"experiments":["id","fingerprint","strategy_family","formula","parameters_json","dataset_version","dataset_fingerprint","engine_version","cost_model_version","code_commit","status","priority","worker_id","created_at","started_at","finished_at","heartbeat_at","metrics_json","validation_json","artifacts_json","error","promoted","retry_count","failure_code"],"experiment_events":["id","experiment_id","occurred_at","event","payload_json"],"champion_history":["id","dataset_version","experiment_id","previous_experiment_id","promoted_at","validation_score","holdout_score","holdout_metrics_json"]}
         for table,columns in schemas.items():
             staging=f"migration_{table}_{uuid.uuid4().hex[:12]}"
