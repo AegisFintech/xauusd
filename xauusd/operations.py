@@ -68,6 +68,31 @@ class OperationsManager:
     if changed: db.execute("UPDATE experiments SET artifacts_json=? WHERE id=?",(json.dumps(artifacts,sort_keys=True,separators=(",",":")),experiment_id))
   return {"compressed":compressed,"skipped":skipped,"bytes_before":before,"bytes_after":after,"bytes_saved":before-after}
 
+ @staticmethod
+ def artifact_retention_inventory(root: Path) -> dict:
+  root=Path(root); groups={}; invalid=directories=without_result=0
+  for directory in root.glob("xauusd-result-*"):
+   if not directory.is_dir(): continue
+   directories+=1; result_path=directory/"result.json"
+   if not result_path.is_file(): without_result+=1; continue
+   try: bundle=json.loads(result_path.read_text())
+   except (OSError,json.JSONDecodeError): invalid+=1; continue
+   retention=bundle.get("artifact_retention") or {}; reason=retention.get("reason","legacy_unclassified")
+   row=groups.setdefault(reason,{"scenarios":0,"total_bytes":0,"detailed_scenarios":0,"detailed_files":0,
+                                  "declared_detailed":0,"missing_declared_detail":0,"unexpected_detail":0})
+   try: files=[path for path in directory.iterdir() if path.is_file()]
+   except OSError: invalid+=1; continue
+   detail=sum(path.name in {"trades.csv.gz","equity.parquet"} for path in files)
+   declared=bool(retention.get("detailed")); row["scenarios"]+=1
+   row["total_bytes"]+=sum(path.stat().st_size for path in files); row["detailed_files"]+=detail
+   row["detailed_scenarios"]+=int(detail>0); row["declared_detailed"]+=int(declared)
+   row["missing_declared_detail"]+=int(declared and detail<2); row["unexpected_detail"]+=int(not declared and detail>0)
+  for row in groups.values(): row["average_bytes_per_scenario"]=round(row["total_bytes"]/row["scenarios"]) if row["scenarios"] else 0
+  usage=shutil.disk_usage(root)
+  return {"root":str(root.resolve()),"directories":directories,"result_bundles":sum(row["scenarios"] for row in groups.values()),
+          "directories_without_result":without_result,"invalid_result_json":invalid,"groups":dict(sorted(groups.items())),
+          "disk":{"total":usage.total,"used":usage.used,"free":usage.free,"percent":round(100*usage.used/usage.total,1)}}
+
  def remote_artifacts_plan(self,output=Path("reports/tournament/remote-artifact-compaction-plan.json"),audit_percent=1) -> dict:
   candidates=[]; protected=[]
   with sqlite3.connect(self.registry_path) as db:

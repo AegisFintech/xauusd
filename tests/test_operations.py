@@ -68,3 +68,17 @@ def test_remote_artifact_apply_is_resumable_and_reconciles(tmp_path):
  with sqlite3.connect(database) as db:
   artifacts=json.loads(db.execute("SELECT artifacts_json FROM experiments").fetchone()[0]); event=db.execute("SELECT event FROM experiment_events").fetchone()[0]
  assert not artifacts["detail_retention"]["detailed"] and event=="remote_artifacts_compacted"
+
+
+def test_artifact_retention_inventory_reports_policy_and_file_mismatches(tmp_path):
+ root=tmp_path/"results"; compact=root/"xauusd-result-1"; detailed=root/"xauusd-result-2"; missing=root/"xauusd-result-3"
+ for directory in (compact,detailed,missing): directory.mkdir(parents=True)
+ (compact/"result.json").write_text(json.dumps({"artifact_retention":{"detailed":False,"reason":"compact"}}))
+ (detailed/"result.json").write_text(json.dumps({"artifact_retention":{"detailed":True,"reason":"audit"}}))
+ (detailed/"trades.csv.gz").write_bytes(b"trades"); (detailed/"equity.parquet").write_bytes(b"equity")
+ (missing/"result.json").write_text(json.dumps({"artifact_retention":{"detailed":True,"reason":"legacy"}}))
+ report=OperationsManager.artifact_retention_inventory(root)
+ assert report["directories"]==3 and report["result_bundles"]==3 and report["invalid_result_json"]==0
+ assert report["groups"]["compact"]["average_bytes_per_scenario"]>0
+ assert report["groups"]["audit"]["detailed_scenarios"]==1 and report["groups"]["audit"]["missing_declared_detail"]==0
+ assert report["groups"]["legacy"]["missing_declared_detail"]==1
