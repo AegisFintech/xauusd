@@ -46,7 +46,7 @@ def main() -> None:
                         copy.write(buffer.getvalue())
                     cursor.execute(
                         f"INSERT INTO {table} ({','.join(columns)}) "
-                        f"SELECT {','.join(columns)} FROM {staging} ON CONFLICT DO NOTHING"
+                        f"SELECT {','.join(columns)} FROM {staging}"
                     )
                     cursor.execute(f"TRUNCATE {staging}")
                 target.commit()
