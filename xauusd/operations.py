@@ -8,7 +8,6 @@ import sqlite3
 import gzip
 import hashlib
 import os
-import statistics
 
 from .experiment_registry import ExperimentRegistry
 

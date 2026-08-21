@@ -105,3 +105,9 @@ def test_dashboard_uses_event_stream_not_interval_polling():
 
 def test_favicon_is_intentionally_empty():
     assert TestClient(dashboard.app).get("/favicon.ico").status_code==204
+
+
+def test_dashboard_exposes_no_mutating_routes():
+ mutating={"POST","PUT","PATCH","DELETE"}
+ assert not [(route.path,route.methods) for route in dashboard.app.routes
+             if mutating.intersection(route.methods or set())]

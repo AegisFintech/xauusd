@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from xauusd.core import synthetic_bars
 from xauusd.experiment_registry import ExperimentRegistry
 from xauusd.shadow_trading import ShadowTradingReadiness
@@ -25,3 +27,8 @@ def test_readiness_never_enables_execution(tmp_path):
  manager=ShadowTradingReadiness(ExperimentRegistry(tmp_path/"registry.db"),Dataset(),tmp_path/"state.json",tmp_path/"STOP")
  status=manager.readiness()
  assert status["gates"]["explicit_activation"] is False and status["ready"] is False
+
+
+def test_research_package_contains_no_broker_order_connector():
+ source="\n".join(path.read_text(errors="ignore") for path in Path("xauusd").glob("*.py"))
+ assert all(term not in source for term in ("submit_order","place_order","broker_order","MetaTrader5","ccxt"))
