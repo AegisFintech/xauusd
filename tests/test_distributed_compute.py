@@ -66,7 +66,7 @@ def test_remote_telemetry_has_bpytop_capacity_fields(tmp_path,monkeypatch):
  monkeypatch.setenv("COMPUTE_HOST","example"); bridge=RemoteComputeBridge(root=tmp_path)
  class Result:
   returncode=0
-  stdout='{"cpu":{"total_percent":50,"per_core":[40,60],"cores":2,"load":[1,2,3]},"memory":{"percent":25},"disk":{"percent":10},"network":{},"tunnel":{"active":true}}'
+  stdout='{"cpu":{"total_percent":50,"per_core":[40,60],"cores":2,"load":[1,2,3]},"memory":{"percent":25},"disk":{"percent":10},"network":{},"tunnel":{"active":true},"clock":{"synchronized":true,"offset_seconds":0.001}}'
  monkeypatch.setattr(bridge,"_ssh",lambda *a,**k:Result())
  sample=bridge.sample_remote()
  assert sample["connected"] and sample["cpu"]["per_core"]==[40,60] and sample["ssh_latency_ms"]>=0
@@ -93,10 +93,21 @@ def test_remote_failure_codes_are_structured():
 
 def test_readiness_uses_most_constrained_mount(tmp_path,monkeypatch):
  monkeypatch.setenv("COMPUTE_HOST","example"); bridge=RemoteComputeBridge(root=tmp_path)
- bridge.telemetry={"mounts":{"root":{"percent":40},"tmp":{"percent":91}}}
+ bridge.telemetry={"mounts":{"root":{"percent":40},"tmp":{"percent":91}},"clock":{"synchronized":True,"offset_seconds":0}}
  assert bridge.readiness()["state"]=="RESOURCE_EXHAUSTED" and not bridge.readiness()["ready"]
- bridge.telemetry={"mounts":{"root":{"percent":40},"tmp":{"percent":81}}}
+ bridge.telemetry={"mounts":{"root":{"percent":40},"tmp":{"percent":81}},"clock":{"synchronized":True,"offset_seconds":0}}
  assert bridge.readiness()["state"]=="DEGRADED" and bridge.readiness()["ready"]
+
+
+def test_readiness_degrades_for_unsynchronized_or_drifted_clock(tmp_path,monkeypatch):
+ monkeypatch.setenv("COMPUTE_HOST","example"); monkeypatch.setenv("COMPUTE_CLOCK_WARNING_SECONDS",".5")
+ bridge=RemoteComputeBridge(root=tmp_path)
+ bridge.telemetry={"mounts":{"root":{"percent":40}},"clock":{"synchronized":False,"offset_seconds":0}}
+ assert bridge.readiness()["state"]=="DEGRADED" and bridge.readiness()["clock_degraded"]
+ bridge.telemetry["clock"]={"synchronized":True,"offset_seconds":.6}
+ assert bridge.readiness()["state"]=="DEGRADED"
+ bridge.telemetry["clock"]={"synchronized":True,"offset_seconds":.01}
+ assert bridge.readiness()["state"]=="CONNECTED" and not bridge.readiness()["clock_degraded"]
 
 
 def test_coordinator_drain_flag_is_reversible(tmp_path,monkeypatch):

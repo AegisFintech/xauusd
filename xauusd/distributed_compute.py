@@ -50,7 +50,7 @@ def retain_detailed_artifacts(experiment: dict,validation: dict) -> tuple[bool,s
     bucket=int(experiment["fingerprint"][:8],16)%100
     if bucket<sample_rate: return True,"deterministic_audit_sample"
     return False,"compact_development_reject"
-REMOTE_TELEMETRY_SCRIPT=r'''import json,os,shutil,time
+REMOTE_TELEMETRY_SCRIPT=r'''import json,os,shutil,subprocess,time
 def cpu():
  rows=[]
  for line in open('/proc/stat'):
@@ -73,11 +73,18 @@ def disk(path):
  d=shutil.disk_usage(path); return {'path':path,'total':d.total,'used':d.used,'free':d.free,'percent':round(100*d.used/d.total,1)}
 root_disk=disk('/'); tmp_disk=disk('/tmp')
 load=os.getloadavg(); tunnel=os.system('systemctl is-active --quiet sg-tunnel.service')==0
+clock={'synchronized':False,'source':None,'stratum':None,'offset_seconds':None,'leap_status':'unknown'}
+try:
+ tracking=subprocess.run(['chronyc','-c','tracking'],capture_output=True,text=True,timeout=3,check=True).stdout.strip().split(',')
+ if len(tracking)>=14:
+  clock={'synchronized':tracking[13].strip().lower()=='normal','source':tracking[1].strip() or None,
+         'stratum':int(tracking[2]),'offset_seconds':float(tracking[4]),'leap_status':tracking[13].strip()}
+except (OSError,ValueError,subprocess.SubprocessError): pass
 print(json.dumps({'sampled_at':time.time(),'cpu':{'total_percent':usage[0],'per_core':usage[1:],'cores':len(usage)-1,'load':load},
 'memory':{'total':mem['MemTotal'],'available':mem['MemAvailable'],'used':mem['MemTotal']-mem['MemAvailable'],'percent':round(100*(mem['MemTotal']-mem['MemAvailable'])/mem['MemTotal'],1),'swap_total':mem['SwapTotal'],'swap_used':mem['SwapTotal']-mem['SwapFree']},
 'disk':root_disk,'mounts':{'root':root_disk,'tmp':tmp_disk},
 'network':{'rx_bytes':n2[0],'tx_bytes':n2[1],'rx_bytes_per_second':round((n2[0]-n1[0])/seconds),'tx_bytes_per_second':round((n2[1]-n1[1])/seconds)},
-'tunnel':{'active':tunnel},'uptime_seconds':float(open('/proc/uptime').read().split()[0])}))'''
+'tunnel':{'active':tunnel},'clock':clock,'uptime_seconds':float(open('/proc/uptime').read().split()[0])}))'''
 
 
 def _atomic_json(path: Path,payload: dict) -> None:
@@ -244,9 +251,13 @@ class RemoteComputeBridge:
         maximum=max((float(item.get("percent",0)) for item in mounts.values()),default=0.)
         critical=float(os.getenv("COMPUTE_DISK_CRITICAL_PERCENT","90"))
         warning=float(os.getenv("COMPUTE_DISK_WARNING_PERCENT","80"))
-        state="RESOURCE_EXHAUSTED" if maximum>=critical else "DEGRADED" if maximum>=warning else "CONNECTED"
+        clock=self.telemetry.get("clock") or {}; maximum_clock_offset=float(os.getenv("COMPUTE_CLOCK_WARNING_SECONDS","1"))
+        clock_offset=clock.get("offset_seconds"); clock_degraded=(not bool(clock.get("synchronized")) or
+            clock_offset is None or abs(float(clock_offset))>maximum_clock_offset)
+        state="RESOURCE_EXHAUSTED" if maximum>=critical else "DEGRADED" if maximum>=warning or clock_degraded else "CONNECTED"
         return {"state":state,"ready":state!="RESOURCE_EXHAUSTED","maximum_mount_percent":maximum,
-                "warning_percent":warning,"critical_percent":critical}
+                "warning_percent":warning,"critical_percent":critical,"clock":clock,
+                "maximum_clock_offset_seconds":maximum_clock_offset,"clock_degraded":clock_degraded}
 
     def drain(self) -> dict:
         self.drain_path.parent.mkdir(parents=True,exist_ok=True)
