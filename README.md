@@ -313,6 +313,7 @@ Drain before coordinator/worker maintenance and wait for `state: drained`, `acti
 .venv/bin/python -m xauusd.cli adaptive-analytics
 .venv/bin/python -m xauusd.cli tournament-weekly-report
 .venv/bin/python -m xauusd.cli operations backup
+.venv/bin/python -m xauusd.cli operations verify-backup --root backups/tournament/RUN_ID
 .venv/bin/python -m xauusd.cli operations scaling-checkpoint
 .venv/bin/python -m xauusd.cli shadow status
 ```

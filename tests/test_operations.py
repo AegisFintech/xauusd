@@ -40,6 +40,21 @@ def test_backup_preserves_scaling_checkpoints_with_integrity_manifest(tmp_path,m
   archived=backup/item["backup"]
   assert item["bytes"]==archived.stat().st_size
   assert item["sha256"]==__import__("hashlib").sha256(archived.read_bytes()).hexdigest()
+ assert OperationsManager.verify_backup(backup)["valid"]
+
+
+def test_backup_verification_fails_closed_on_checkpoint_corruption_and_unsafe_path(tmp_path):
+ backup=tmp_path/"backup"; checkpoints=backup/"scaling-checkpoints"; checkpoints.mkdir(parents=True)
+ with sqlite3.connect(backup/"registry.sqlite3") as db: db.execute("CREATE TABLE test(value TEXT)")
+ checkpoint=checkpoints/"50000.json"; checkpoint.write_text("original")
+ manifest={"run_id":"fixture","registry_bytes":(backup/"registry.sqlite3").stat().st_size,
+  "scaling_checkpoints":[{"backup":"scaling-checkpoints/50000.json","bytes":8,"sha256":"wrong"},
+                         {"backup":"../outside.json","bytes":0,"sha256":"wrong"}]}
+ (backup/"manifest.json").write_text(json.dumps(manifest))
+ result=OperationsManager.verify_backup(backup)
+ assert not result["valid"] and result["registry_integrity"]=="ok"
+ assert "checkpoint integrity mismatch: scaling-checkpoints/50000.json" in result["errors"]
+ assert "unsafe checkpoint path: ../outside.json" in result["errors"]
 
 
 def test_compaction_compresses_trade_ledgers_and_updates_registry(tmp_path):

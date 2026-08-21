@@ -160,6 +160,39 @@ class OperationsManager:
   latest=self.backup_root/"latest.json"; temporary=latest.with_suffix(".json.tmp"); temporary.write_text(json.dumps(state,indent=2)); temporary.replace(latest)
   return state
 
+ @staticmethod
+ def verify_backup(directory: Path) -> dict:
+  directory=Path(directory).resolve(); errors=[]; checkpoints=[]
+  manifest_path=directory/"manifest.json"; registry_path=directory/"registry.sqlite3"
+  try: manifest=json.loads(manifest_path.read_text())
+  except (OSError,json.JSONDecodeError) as exc:
+   return {"valid":False,"directory":str(directory),"registry_integrity":None,
+           "checkpoint_files":0,"errors":[f"manifest unreadable: {type(exc).__name__}"]}
+  integrity=None
+  if not registry_path.is_file(): errors.append("registry.sqlite3 missing")
+  else:
+   expected=manifest.get("registry_bytes")
+   if expected is not None and registry_path.stat().st_size!=expected: errors.append("registry size mismatch")
+   try:
+    with sqlite3.connect(f"file:{registry_path}?mode=ro",uri=True) as db: integrity=db.execute("PRAGMA quick_check").fetchone()[0]
+    if integrity!="ok": errors.append("registry integrity check failed")
+   except sqlite3.Error: errors.append("registry integrity check failed")
+  for item in manifest.get("scaling_checkpoints") or []:
+   relative=Path(item.get("backup") or "")
+   target=(directory/relative).resolve()
+   safe=target.parent==directory/"scaling-checkpoints" and target.suffix==".json"
+   result={"backup":str(relative),"valid":False}
+   if not safe: errors.append(f"unsafe checkpoint path: {relative}")
+   elif not target.is_file(): errors.append(f"checkpoint missing: {relative}")
+   else:
+    size_ok=target.stat().st_size==item.get("bytes")
+    hash_ok=hashlib.sha256(target.read_bytes()).hexdigest()==item.get("sha256")
+    result.update({"size_ok":size_ok,"sha256_ok":hash_ok,"valid":size_ok and hash_ok})
+    if not result["valid"]: errors.append(f"checkpoint integrity mismatch: {relative}")
+   checkpoints.append(result)
+  return {"valid":not errors,"directory":str(directory),"run_id":manifest.get("run_id"),
+          "registry_integrity":integrity,"checkpoint_files":len(checkpoints),"checkpoints":checkpoints,"errors":errors}
+
  def compact_artifacts(self) -> dict:
   compressed=skipped=0; before=after=0
   with sqlite3.connect(self.registry_path) as db:
