@@ -274,6 +274,8 @@ Start a local-only dashboard:
 
 Keep `.env` at mode `0600`; never print, stage, log, or return credentials. Keep database CA files outside Git. Rotate exposed secrets.
 
+Docker Compose parses `$` for variable substitution. Escape literal dollar signs as `$$` in a Compose-specific environment file, or preferably provide sensitive values through a runtime secret mechanism. The production systemd services read `.env` directly and do not use Compose interpolation.
+
 ## Command reference
 
 ### Data and experiments
@@ -345,7 +347,19 @@ git diff --check
 
 Tests cover causal timing, accounting, intrabar ambiguity, deterministic execution, dataset fingerprints, chronology, bootstrap, registry ownership, retries, distributed protocol, artifacts, dashboard authentication/read-only behavior, ML governance, portfolio chronology, scaling, and disabled execution.
 
-Golden checks have shown exact local/secondary metrics for momentum and mean-reversion. The retained momentum fixture also matched all trades and equity values. Docker parity, separate staging parity, and a second-family detailed comparison remain unverified.
+Golden checks have shown exact local/secondary metrics for momentum and mean-reversion. The retained momentum fixture also matched all trades and equity values. A secret-free deterministic engine fixture matches exactly between the local venv and runtime container. Separate staging parity and a second-family detailed comparison remain unverified.
+
+The runtime image is built from `python:3.12.11-slim-bookworm`, copies only declared package/runtime files, runs as an unprivileged user, and excludes secrets, data, reports, logs, certificates, keys, caches, and build metadata from its context. Compose binds the dashboard to loopback by default, allow-lists environment variables, drops all capabilities, enables `no-new-privileges`, and uses a read-only root filesystem. Run the secret-free engine parity fixture with:
+
+```bash
+.venv/bin/python tests/container_parity.py > /tmp/parity-local.json
+docker build -t xauusd-research:parity .
+docker run --rm --network none --read-only --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+  --cap-drop ALL --security-opt no-new-privileges \
+  -v "$PWD/tests/container_parity.py:/tmp/container_parity.py:ro" \
+  xauusd-research:parity python /tmp/container_parity.py > /tmp/parity-container.json
+cmp /tmp/parity-local.json /tmp/parity-container.json
+```
 
 ## Repository map
 
@@ -377,5 +391,5 @@ See [Architecture](docs/ARCHITECTURE.md), the [discovery and scaling audit](docs
 - Swap, partial fills, rejected orders, and tick-level intrabar order are not fully modeled.
 - Correlated trials limit simple multiple-testing interpretations.
 - There is no promoted champion or live authorization.
-- Cloud monetary cost, Docker/staging parity, and provider credential policy remain unverified.
+- Cloud monetary cost, separate staging parity, and provider credential policy remain unverified.
 - This software is research infrastructure, not financial advice.
