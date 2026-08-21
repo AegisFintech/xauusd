@@ -235,6 +235,7 @@ def favicon():
 def api_status(_: str = Depends(authenticate)):
     data = data_status()
     manifest = latest_manifest()
+    local_registry = registry()
     return {"status": "ok" if data.get("fresh") else "degraded", "mode": "research-only",
             "data": data, "latest_run": manifest["run_id"] if manifest else None,
             "champion": tournament_champion() or read_json(REPORTS / "champion.json"), "scheduler": scheduler_status(),
@@ -246,9 +247,10 @@ def api_status(_: str = Depends(authenticate)):
             "system":system_metrics(),
             "portfolio":portfolio_status(),
             "weekly":weekly_report_status(),
-            "shadow":ShadowTradingReadiness().readiness(),
+            "shadow":ShadowTradingReadiness(registry=local_registry).readiness() if local_registry else
+            {"ready":False,"mode":"shadow_only","blocked_reason":"local registry unavailable"},
             "operations":OperationsManager().health(),
-            "tournament": tournament_status(), "experiments": {**(registry().summary() if registry() else
+            "tournament": tournament_status(), "experiments": {**(local_registry.summary() if local_registry else
             {"total":0,"by_status":{},"strategy_families":0,"promoted":0}),"catalog_size":catalog_size()}}
 
 
