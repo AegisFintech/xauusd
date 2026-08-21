@@ -78,6 +78,23 @@ class OperationsManager:
           "limitations":["Projection uses the current coordinator-session throughput and must be refreshed after workload-family changes.",
                          "Cloud database billing and secondary-host price are not available, so monetary cost remains not yet verified."]}
 
+ def capture_scaling_checkpoints(self,registry: ExperimentRegistry | None=None,
+                                 status_path=Path("reports/tournament/distributed/status.json"),
+                                 output_root=Path("reports/tournament/scaling-checkpoints")) -> dict:
+  report=self.scaling_checkpoint(registry,status_path); output_root=Path(output_root); output_root.mkdir(parents=True,exist_ok=True)
+  completed=report["registry"]["completed"]; created=[]; existing=[]
+  for threshold in (50_000,100_000,250_000,500_000):
+   if completed<threshold: continue
+   path=output_root/f"{threshold}.json"
+   if path.exists(): existing.append(str(path)); continue
+   snapshot={**report,"checkpoint_capture":{"threshold":threshold,"first_observed_completed":completed,
+      "exact_threshold_capture":completed==threshold,"note":"Immutable first observation at or after threshold crossing."}}
+   temporary=path.with_suffix(".json.tmp"); temporary.write_text(json.dumps(snapshot,indent=2,allow_nan=False)); temporary.replace(path)
+   created.append(str(path))
+  latest=output_root/"latest.json"; temporary=latest.with_suffix(".json.tmp")
+  temporary.write_text(json.dumps(report,indent=2,allow_nan=False)); temporary.replace(latest)
+  return {"completed":completed,"created":created,"existing":existing,"latest":str(latest),"report":report}
+
  def backup(self) -> dict:
   run_id=datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"); directory=self.backup_root/run_id
   directory.mkdir(parents=True,exist_ok=False)

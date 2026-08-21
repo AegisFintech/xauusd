@@ -1,0 +1,11 @@
+[Unit]
+Description=Capture XAUUSD scaling checkpoint evidence
+After=xauusd-remote-coordinator.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/xauusd
+EnvironmentFile=/root/xauusd/.env
+ExecStart=/root/xauusd/.venv/bin/python -m xauusd.cli operations capture-scaling-checkpoints
+StandardOutput=journal
+StandardError=journal

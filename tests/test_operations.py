@@ -102,3 +102,22 @@ def test_scaling_checkpoint_uses_registry_and_measured_stage_evidence(tmp_path):
  assert report["duplicate_fingerprints"]==0 and report["measured_bottleneck"]=="secondary_compute"
  assert report["checkpoints"]["50000"]["status"]=="pending"
  assert report["projected_hours_to_target"]==.099 and report["workers"]==16
+
+
+def test_checkpoint_capture_is_atomic_and_first_observation_is_immutable(tmp_path,monkeypatch):
+ manager=OperationsManager(); output=tmp_path/"checkpoints"; reports=[
+  {"registry":{"completed":60_000},"checkpoints":{}},
+  {"registry":{"completed":110_000},"checkpoints":{}},
+  {"registry":{"completed":120_000},"checkpoints":{}},
+ ]
+ monkeypatch.setattr(manager,"scaling_checkpoint",lambda *args,**kwargs:reports.pop(0))
+ first=manager.capture_scaling_checkpoints(output_root=output)
+ assert first["created"]==[str(output/"50000.json")]
+ captured=json.loads((output/"50000.json").read_text())
+ assert captured["checkpoint_capture"]=={"threshold":50_000,"first_observed_completed":60_000,
+  "exact_threshold_capture":False,"note":"Immutable first observation at or after threshold crossing."}
+ second=manager.capture_scaling_checkpoints(output_root=output)
+ assert second["created"]==[str(output/"100000.json")] and second["existing"]==[str(output/"50000.json")]
+ original=(output/"50000.json").read_text(); manager.capture_scaling_checkpoints(output_root=output)
+ assert (output/"50000.json").read_text()==original
+ assert json.loads((output/"latest.json").read_text())["registry"]["completed"]==120_000

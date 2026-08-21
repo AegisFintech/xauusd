@@ -225,6 +225,7 @@ The dashboard has read-only GET endpoints. With dashboard credentials configured
 ```bash
 .venv/bin/python -m xauusd.cli operations health
 .venv/bin/python -m xauusd.cli operations scaling-checkpoint
+.venv/bin/python -m xauusd.cli operations capture-scaling-checkpoints
 .venv/bin/python -m xauusd.cli experiments summary
 .venv/bin/python -m xauusd.cli remote-coordinator status
 systemctl status xauusd-remote-coordinator.service --no-pager
@@ -335,6 +336,8 @@ Deployment workflow:
 For disconnections, check operations health/status, key-only SSH, coordinator journal/failure code, remote `sg-tunnel.service`, DNS/TCP/routes, mounts and clock, then protocol/fingerprint/digest and circuit state. Do not change credentials without `AUTH_FAILURE` evidence.
 
 Run scaling checkpoints at 50k, 100k, 250k, and 500k. Compare throughput, duration percentiles, stage time, CPU/memory/disk/network, retries, failures, duplicates, ETA, and storage. The present 16-core secondary is CPU-bound and cannot meet a one-day 500k target without measured horizontal capacity.
+
+`xauusd-scaling-checkpoint.timer` runs hourly. It refreshes `reports/tournament/scaling-checkpoints/latest.json` and creates immutable `50000.json`, `100000.json`, `250000.json`, and `500000.json` files on the first observation at or after each crossing. A late first observation records its actual completed count and never pretends to be an exact-threshold sample.
 
 ## Safety, testing, and parity
 

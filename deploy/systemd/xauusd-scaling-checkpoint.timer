@@ -1,0 +1,11 @@
+[Unit]
+Description=Capture XAUUSD scaling evidence hourly
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=120
+Unit=xauusd-scaling-checkpoint.service
+
+[Install]
+WantedBy=timers.target
