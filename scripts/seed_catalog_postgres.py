@@ -20,8 +20,10 @@ def main() -> None:
     commit = os.popen("git rev-parse HEAD").read().strip() or None
     run = uuid.uuid4().hex[:12]
     with psycopg.connect(url) as db:
+        is_cockroach = "CockroachDB" in db.execute("SELECT version()").fetchone()[0]
         stage = f"catalog_stage_{run}"
-        db.execute(f"CREATE UNLOGGED TABLE {stage} (LIKE experiments INCLUDING DEFAULTS)")
+        table_kind = "TABLE" if is_cockroach else "UNLOGGED TABLE"
+        db.execute(f"CREATE {table_kind} {stage} (LIKE experiments INCLUDING DEFAULTS)")
         now = datetime.now(timezone.utc).isoformat()
         columns = "fingerprint,strategy_family,formula,parameters_json,dataset_version,dataset_fingerprint,engine_version,cost_model_version,code_commit,status,priority,created_at"
         rows = []
@@ -42,13 +44,15 @@ def main() -> None:
             seen += 1
             if len(rows) >= 2000: flush(); print("staged", seen, flush=True)
         flush()
-        db.execute(f"CREATE TEMP TABLE new_catalog_ids (id BIGINT PRIMARY KEY) ON COMMIT DROP")
+        new_ids = f"new_catalog_ids_{run}"
+        db.execute(f"CREATE TABLE {new_ids} (id BIGINT PRIMARY KEY)")
         ids = db.execute(f"INSERT INTO experiments ({columns}) SELECT {columns} FROM {stage} ON CONFLICT (fingerprint) DO NOTHING RETURNING id").fetchall()
         if ids:
             with db.cursor() as cur:
-                cur.executemany("INSERT INTO new_catalog_ids (id) VALUES (%s)", ids)
-            db.execute("INSERT INTO experiment_events (experiment_id,occurred_at,event,payload_json) SELECT id,%s,'registered',%s FROM new_catalog_ids", (now, json.dumps({"priority":0,"source":"bulk_catalog"}, separators=(",",":"))))
+                cur.executemany(f"INSERT INTO {new_ids} (id) VALUES (%s)", ids)
+            db.execute(f"INSERT INTO experiment_events (experiment_id,occurred_at,event,payload_json) SELECT id,%s,'registered',%s FROM {new_ids}", (now, json.dumps({"priority":0,"source":"bulk_catalog"}, separators=(",",":"))))
         created = len(ids)
+        db.execute(f"DROP TABLE {new_ids}")
         db.execute(f"DROP TABLE {stage}")
         db.commit()
         print(json.dumps({"catalog_size": catalog_size(), "considered": seen, "created": created}, indent=2))
