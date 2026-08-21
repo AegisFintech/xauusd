@@ -321,22 +321,25 @@ class ExperimentRegistry:
                 (dataset_version,limit)).fetchall()]
 
     def promote_champion(self, dataset_version: str, experiment_id: int, validation_score: float,
-                         holdout_score: float, holdout_metrics: dict) -> dict:
+        holdout_score: float, holdout_metrics: dict) -> dict:
         with self.connect() as db:
-            db.execute("BEGIN IMMEDIATE")
+            if self.backend=="sqlite": db.execute("BEGIN IMMEDIATE")
             previous=db.execute("SELECT experiment_id,holdout_score FROM champion_history WHERE dataset_version=? ORDER BY id DESC LIMIT 1",
                                 (dataset_version,)).fetchone()
             if previous and float(previous["holdout_score"]) >= holdout_score:
                 raise ValueError("challenger does not beat champion holdout score")
             db.execute("UPDATE experiments SET promoted=0 WHERE dataset_version=? AND promoted=1",(dataset_version,))
             db.execute("UPDATE experiments SET promoted=1 WHERE id=?",(experiment_id,))
-            cursor=db.execute("""INSERT INTO champion_history
+            insert="""INSERT INTO champion_history
                 (dataset_version,experiment_id,previous_experiment_id,promoted_at,validation_score,holdout_score,holdout_metrics_json)
-                VALUES(?,?,?,?,?,?,?)""",(dataset_version,experiment_id,previous["experiment_id"] if previous else None,
+                VALUES(?,?,?,?,?,?,?)"""
+            if self.backend=="postgresql": insert+=" RETURNING id"
+            cursor=db.execute(insert,(dataset_version,experiment_id,previous["experiment_id"] if previous else None,
                 self._now(),validation_score,holdout_score,canonical_json(holdout_metrics)))
+            history_id=cursor.fetchone()["id"] if self.backend=="postgresql" else cursor.lastrowid
             self._event(db,experiment_id,"champion_promoted",{"previous_experiment_id":previous["experiment_id"] if previous else None,
                                                                "holdout_score":holdout_score})
-            row=db.execute("SELECT * FROM champion_history WHERE id=?",(cursor.lastrowid,)).fetchone()
+            row=db.execute("SELECT * FROM champion_history WHERE id=?",(history_id,)).fetchone()
             return self._decode_champion(row)
 
     def events(self, experiment_id: int) -> list[dict]:
