@@ -361,6 +361,12 @@ docker run --rm --network none --read-only --tmpfs /tmp:rw,noexec,nosuid,size=64
 cmp /tmp/parity-local.json /tmp/parity-container.json
 ```
 
+For complete `compute-job` result directories, compare bundle metadata, metrics, decisions, trades, and equity with documented default tolerances (`atol=1e-9`, `rtol=1e-8`):
+
+```bash
+.venv/bin/python scripts/verify_result_parity.py /path/to/reference /path/to/container /path/to/remote
+```
+
 ## Repository map
 
 | Path | Responsibility |
