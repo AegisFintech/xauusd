@@ -1,7 +1,7 @@
 from datetime import datetime,timezone
 
 from xauusd.experiment_registry import ExperimentRegistry,ExperimentSpec
-from xauusd.weekly_report import WeeklyTournamentReport,gate_analytics,selection_bias_analytics
+from xauusd.weekly_report import WeeklyTournamentReport,classify_loss_source,gate_analytics,selection_bias_analytics
 
 
 def test_weekly_report_tracks_throughput_families_and_multiple_testing(tmp_path):
@@ -41,6 +41,16 @@ def test_gate_analytics_handles_development_and_missing_gate_evidence():
  assert report["stages"]=={"development":1,"unknown":1}
  assert report["evaluated_with_gates"]==1 and report["near_pass_count"]==1
  assert report["near_passes"]==[] and report["metric_coverage"]["total_cost"]["missing"]==2
+
+
+def test_loss_source_classification_requires_direct_cost_evidence():
+ assert classify_loss_source(None)["classification"]=="insufficient_evidence"
+ assert classify_loss_source({"net_profit":-2})["classification"]=="insufficient_evidence"
+ assert classify_loss_source({"net_profit":-2,"gross_profit":-1,"total_cost":1})["classification"]=="no_genuine_signal"
+ consumed=classify_loss_source({"net_profit":-2,"gross_profit":3,"total_cost":5})
+ assert consumed["classification"]=="signal_consumed_by_execution_costs"
+ assert consumed["evidence"]["total_cost"]==5
+ assert classify_loss_source({"net_profit":1,"gross_profit":2})["classification"]=="not_losing"
 
 
 def test_selection_bias_reports_score_distribution_and_missing_controls():

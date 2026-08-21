@@ -14,10 +14,26 @@ ATTRIBUTION_METRICS=("net_profit","gross_profit","total_cost","turnover","profit
                      "expected_shortfall","regime_results")
 
 
+def classify_loss_source(metrics: dict | None) -> dict:
+ if not metrics or metrics.get("net_profit") is None:
+  return {"classification":"insufficient_evidence","evidence":{}}
+ evidence={key:metrics.get(key) for key in ATTRIBUTION_METRICS if metrics.get(key) is not None}
+ net=float(metrics["net_profit"]); gross=metrics.get("gross_profit")
+ if net>=0:
+  classification="not_losing"
+ elif gross is None:
+  classification="insufficient_evidence"
+ elif float(gross)<=0:
+  classification="no_genuine_signal"
+ else:
+  classification="signal_consumed_by_execution_costs"
+ return {"classification":classification,"evidence":evidence}
+
+
 def gate_analytics(rows: list[dict],near_pass_limit: int=25) -> dict:
  gate_failures=defaultdict(int); combinations=defaultdict(int); stages=defaultdict(int)
  coverage=defaultdict(int); families=defaultdict(lambda:{"completed":0,"passed":0,"near_passes":0,"gate_failures":defaultdict(int)})
- near_passes=[]; evaluated=passed=0
+ near_passes=[]; evaluated=passed=0; loss_sources=defaultdict(int)
  for row in rows:
   validation=row.get("validation") or {}; gates=validation.get("gates") or {}
   metrics=(row.get("metrics") or {}).get("validation") or {}
@@ -25,6 +41,7 @@ def gate_analytics(rows: list[dict],near_pass_limit: int=25) -> dict:
   stages[validation.get("stage") or ("validation" if metrics else "unknown")]+=1
   for metric in ATTRIBUTION_METRICS:
    coverage[metric]+=int(metrics.get(metric) is not None)
+  loss_sources[classify_loss_source(metrics)["classification"]]+=1
   if not gates: continue
   evaluated+=1; failed=sorted(name for name,value in gates.items() if not bool(value))
   if not failed:
@@ -54,8 +71,9 @@ def gate_analytics(rows: list[dict],near_pass_limit: int=25) -> dict:
          "metric_coverage":{metric:{"available":coverage[metric],"missing":len(rows)-coverage[metric],
                                     "fraction":coverage[metric]/len(rows) if rows else 0}
                             for metric in ATTRIBUTION_METRICS},
+         "loss_source_classifications":dict(sorted(loss_sources.items())),
          "limitations":["Gate failures are observed rejection reasons, not proof of economic loss cause.",
-                        "Cost, turnover, concentration, regime, and tail attribution require their metric coverage before classification."]}
+                        "Regime, sizing, drift, and infrastructure causes remain unavailable without their direct evidence."]}
 
 
 def _quantile(values: list[float],fraction: float) -> float | None:

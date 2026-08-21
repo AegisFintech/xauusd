@@ -29,10 +29,30 @@ def test_spread_slippage_and_commission_are_charged_both_sides():
     signal = pd.Series([1, 0, 0], index=frame.index)
     config = ExecutionConfig(quantity_oz=100, spread=.20, slippage=.05, commission_per_lot_side=3.5,
                              stop_distance=None, target_distance=None)
-    trade = EventDrivenBacktester(config).run(frame, signal)["trades"].iloc[0]
+    result = EventDrivenBacktester(config).run(frame, signal)
+    trade = result["trades"].iloc[0]
     assert trade.gross_pnl == pytest.approx(-30)
     assert trade.commission == 7
     assert trade.net_pnl == pytest.approx(-37)
+    metrics = result["metrics"]
+    assert metrics["gross_profit"] == pytest.approx(0)
+    assert metrics["implicit_execution_cost"] == pytest.approx(30)
+    assert metrics["commission_cost"] == pytest.approx(7)
+    assert metrics["total_cost"] == pytest.approx(37)
+    assert metrics["turnover"] == pytest.approx(20_000)
+    assert metrics["expected_shortfall"] == pytest.approx(-37)
+    assert metrics["profit_concentration"] == 0
+
+
+def test_compact_attribution_metrics_reconcile_and_measure_concentration():
+    frame = bars([(100, 100, 100, 100), (100, 102, 99, 101), (101, 102, 100, 102),
+                  (102, 103, 101, 103), (103, 103, 103, 103)])
+    signal = pd.Series([1, 0, 1, 0, 0], index=frame.index)
+    result = EventDrivenBacktester(no_costs(stop_distance=None, target_distance=None)).run(frame, signal)
+    metrics = result["metrics"]
+    assert metrics["gross_profit"] == pytest.approx(metrics["net_profit"] + metrics["total_cost"])
+    assert metrics["turnover"] > 0
+    assert 0 <= metrics["profit_concentration"] <= 1
 
 
 def test_stop_wins_ambiguous_intrabar_path():

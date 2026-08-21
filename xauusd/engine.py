@@ -146,11 +146,44 @@ class EventDrivenBacktester:
         pnl = trades.net_pnl if not trades.empty else pd.Series(dtype=float)
         profits = pnl[pnl > 0].sum()
         losses = -pnl[pnl < 0].sum()
+        if trades.empty:
+            implicit_costs = pd.Series(dtype=float)
+            pre_cost_pnl = pd.Series(dtype=float)
+            turnover = 0.0
+        else:
+            implicit_cost_per_trade = self.config.quantity_oz * (self.config.spread + 2 * self.config.slippage)
+            implicit_costs = pd.Series(implicit_cost_per_trade, index=trades.index, dtype=float)
+            pre_cost_pnl = trades.gross_pnl + implicit_costs
+            half_spread_slippage = self.config.spread / 2 + self.config.slippage
+            entry_mid = trades.entry_price - trades.side * half_spread_slippage
+            exit_mid = trades.exit_price + trades.side * half_spread_slippage
+            turnover = float((trades.quantity_oz * (entry_mid.abs() + exit_mid.abs())).sum())
+        total_implicit_cost = float(implicit_costs.sum())
+        total_commission = float(trades.commission.sum()) if not trades.empty else 0.0
+        total_cost = total_implicit_cost + total_commission
+        gross_profit = float(pre_cost_pnl.sum())
+        if abs(gross_profit) < 1e-10:
+            gross_profit = 0.0
+        positive_pre_cost = float(pre_cost_pnl[pre_cost_pnl > 0].sum())
+        tail_count = max(1, int(np.ceil(len(pnl) * 0.05))) if len(pnl) else 0
+        expected_shortfall = float(pnl.nsmallest(tail_count).mean()) if tail_count else 0.0
+        positive_pnl = pnl[pnl > 0].sort_values(ascending=False)
+        concentration_count = max(1, int(np.ceil(len(positive_pnl) * 0.10))) if len(positive_pnl) else 0
+        profit_concentration = (float(positive_pnl.iloc[:concentration_count].sum() / positive_pnl.sum())
+                                if concentration_count and positive_pnl.sum() else 0.0)
         scale = np.sqrt(252 * 1440)
         return {
             "initial_cash": self.config.initial_cash,
             "final_equity": float(equity.iloc[-1]),
             "net_profit": float(equity.iloc[-1] - self.config.initial_cash),
+            "gross_profit": gross_profit,
+            "implicit_execution_cost": total_implicit_cost,
+            "commission_cost": total_commission,
+            "total_cost": total_cost,
+            "cost_to_gross_profit_ratio": float(total_cost / positive_pre_cost) if positive_pre_cost else 0.0,
+            "turnover": turnover,
+            "expected_shortfall": expected_shortfall,
+            "profit_concentration": profit_concentration,
             "cagr": float((equity.iloc[-1] / self.config.initial_cash) ** (1 / years) - 1),
             "sharpe": float(scale * returns.mean() / returns.std()) if returns.std() else 0.0,
             "sortino": float(scale * returns.mean() / downside.std()) if len(downside) > 1 and downside.std() else 0.0,
