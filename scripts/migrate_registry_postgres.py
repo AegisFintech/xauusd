@@ -12,8 +12,11 @@ from dotenv import load_dotenv
 def main() -> None:
     load_dotenv(".env")
     url=os.environ["DATABASE_URL"]
+    # Neon transaction poolers may move each statement to a different backend;
+    # the rebuild requires one session/transaction, so use the direct endpoint.
+    target_url=url.replace("-pooler.", ".", 1)
     source=sqlite3.connect(os.getenv("SQLITE_REGISTRY","data/experiments/registry.sqlite3")); source.row_factory=sqlite3.Row
-    with psycopg.connect(url) as target:
+    with psycopg.connect(target_url) as target:
         target.execute("""CREATE TABLE IF NOT EXISTS experiments (id BIGSERIAL PRIMARY KEY,fingerprint TEXT NOT NULL UNIQUE,
           strategy_family TEXT NOT NULL,formula TEXT NOT NULL,parameters_json TEXT NOT NULL,dataset_version TEXT NOT NULL,
           dataset_fingerprint TEXT NOT NULL,engine_version TEXT NOT NULL,cost_model_version TEXT NOT NULL,code_commit TEXT,
