@@ -140,12 +140,17 @@ class OperationsManager:
   directory.mkdir(parents=True,exist_ok=False)
   destination=directory/"registry.sqlite3"
   with sqlite3.connect(self.registry_path) as source,sqlite3.connect(destination) as target: source.backup(target)
-  copied=[]
+  copied=[]; auxiliary_inventory=[]
   for source in (Path("data/tournaments/active.json"),self.reports/"worker-status.json",
                  self.reports/"adaptive.json",self.reports/"proposals.json"):
-   if source.exists(): shutil.copy2(source,directory/source.name); copied.append(str(source))
+   if source.exists():
+    target=directory/source.name; shutil.copy2(source,target); copied.append(str(source))
+    auxiliary_inventory.append({"source":str(source),"backup":target.name,"bytes":target.stat().st_size,
+      "sha256":hashlib.sha256(target.read_bytes()).hexdigest()})
   for source in self.reports.glob("*/champion.json"):
    target=directory/(source.parent.name+"-champion.json"); shutil.copy2(source,target); copied.append(str(source))
+   auxiliary_inventory.append({"source":str(source),"backup":target.name,"bytes":target.stat().st_size,
+     "sha256":hashlib.sha256(target.read_bytes()).hexdigest()})
   checkpoint_inventory=[]; checkpoint_root=self.reports/"scaling-checkpoints"
   if checkpoint_root.is_dir():
    checkpoint_destination=directory/"scaling-checkpoints"; checkpoint_destination.mkdir()
@@ -155,14 +160,15 @@ class OperationsManager:
       "bytes":target.stat().st_size,"sha256":hashlib.sha256(target.read_bytes()).hexdigest()})
     copied.append(str(source))
   state={"run_id":run_id,"created_at":datetime.now(timezone.utc).isoformat(),"directory":str(directory),
-         "registry_bytes":destination.stat().st_size,"copied":copied,"scaling_checkpoints":checkpoint_inventory}
+         "registry_bytes":destination.stat().st_size,"copied":copied,"auxiliary_files":auxiliary_inventory,
+         "scaling_checkpoints":checkpoint_inventory}
   (directory/"manifest.json").write_text(json.dumps(state,indent=2))
   latest=self.backup_root/"latest.json"; temporary=latest.with_suffix(".json.tmp"); temporary.write_text(json.dumps(state,indent=2)); temporary.replace(latest)
   return state
 
  @staticmethod
  def verify_backup(directory: Path) -> dict:
-  directory=Path(directory).resolve(); errors=[]; checkpoints=[]
+  directory=Path(directory).resolve(); errors=[]; checkpoints=[]; auxiliary=[]
   manifest_path=directory/"manifest.json"; registry_path=directory/"registry.sqlite3"
   try: manifest=json.loads(manifest_path.read_text())
   except (OSError,json.JSONDecodeError) as exc:
@@ -190,8 +196,21 @@ class OperationsManager:
     result.update({"size_ok":size_ok,"sha256_ok":hash_ok,"valid":size_ok and hash_ok})
     if not result["valid"]: errors.append(f"checkpoint integrity mismatch: {relative}")
    checkpoints.append(result)
+  for item in manifest.get("auxiliary_files") or []:
+   relative=Path(item.get("backup") or ""); target=(directory/relative).resolve()
+   safe=target.parent==directory and target.name not in {"manifest.json","registry.sqlite3","latest.json"}
+   result={"backup":str(relative),"valid":False}
+   if not safe: errors.append(f"unsafe auxiliary path: {relative}")
+   elif not target.is_file(): errors.append(f"auxiliary file missing: {relative}")
+   else:
+    size_ok=target.stat().st_size==item.get("bytes")
+    hash_ok=hashlib.sha256(target.read_bytes()).hexdigest()==item.get("sha256")
+    result.update({"size_ok":size_ok,"sha256_ok":hash_ok,"valid":size_ok and hash_ok})
+    if not result["valid"]: errors.append(f"auxiliary file integrity mismatch: {relative}")
+   auxiliary.append(result)
   return {"valid":not errors,"directory":str(directory),"run_id":manifest.get("run_id"),
-          "registry_integrity":integrity,"checkpoint_files":len(checkpoints),"checkpoints":checkpoints,"errors":errors}
+          "registry_integrity":integrity,"checkpoint_files":len(checkpoints),"checkpoints":checkpoints,
+          "auxiliary_files":len(auxiliary),"auxiliary":auxiliary,"errors":errors}
 
  def compact_artifacts(self) -> dict:
   compressed=skipped=0; before=after=0

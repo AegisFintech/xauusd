@@ -23,6 +23,8 @@ def test_backup_uses_sqlite_snapshot_and_manifest(tmp_path,monkeypatch):
  with sqlite3.connect(snapshot) as db: assert db.execute("SELECT value FROM test").fetchone()[0]=="safe"
  latest=json.loads((tmp_path/"backups"/"latest.json").read_text())
  assert latest["run_id"]==result["run_id"] and snapshot.exists()
+ assert result["auxiliary_files"][0]["backup"]=="active.json"
+ assert OperationsManager.verify_backup(tmp_path/result["directory"])["valid"]
 
 
 def test_backup_preserves_scaling_checkpoints_with_integrity_manifest(tmp_path,monkeypatch):
@@ -55,6 +57,20 @@ def test_backup_verification_fails_closed_on_checkpoint_corruption_and_unsafe_pa
  assert not result["valid"] and result["registry_integrity"]=="ok"
  assert "checkpoint integrity mismatch: scaling-checkpoints/50000.json" in result["errors"]
  assert "unsafe checkpoint path: ../outside.json" in result["errors"]
+
+
+def test_backup_verification_detects_auxiliary_corruption_and_unsafe_path(tmp_path):
+ backup=tmp_path/"backup"; backup.mkdir()
+ with sqlite3.connect(backup/"registry.sqlite3") as db: db.execute("CREATE TABLE test(value TEXT)")
+ report=backup/"worker-status.json"; report.write_text("status")
+ manifest={"run_id":"fixture","registry_bytes":(backup/"registry.sqlite3").stat().st_size,
+  "auxiliary_files":[{"backup":"worker-status.json","bytes":6,"sha256":"wrong"},
+                     {"backup":"../outside.json","bytes":0,"sha256":"wrong"}]}
+ (backup/"manifest.json").write_text(json.dumps(manifest))
+ result=OperationsManager.verify_backup(backup)
+ assert not result["valid"] and result["auxiliary_files"]==2
+ assert "auxiliary file integrity mismatch: worker-status.json" in result["errors"]
+ assert "unsafe auxiliary path: ../outside.json" in result["errors"]
 
 
 def test_compaction_compresses_trade_ledgers_and_updates_registry(tmp_path):
