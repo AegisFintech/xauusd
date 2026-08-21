@@ -89,11 +89,51 @@ class OperationsManager:
    if path.exists(): existing.append(str(path)); continue
    snapshot={**report,"checkpoint_capture":{"threshold":threshold,"first_observed_completed":completed,
       "exact_threshold_capture":completed==threshold,"note":"Immutable first observation at or after threshold crossing."}}
+   baseline_path=output_root/"50000.json"
+   baseline=json.loads(baseline_path.read_text()) if threshold>50_000 and baseline_path.exists() else None
+   snapshot["acceptance"]=self.evaluate_scaling_checkpoint(snapshot,baseline)
    temporary=path.with_suffix(".json.tmp"); temporary.write_text(json.dumps(snapshot,indent=2,allow_nan=False)); temporary.replace(path)
    created.append(str(path))
   latest=output_root/"latest.json"; temporary=latest.with_suffix(".json.tmp")
   temporary.write_text(json.dumps(report,indent=2,allow_nan=False)); temporary.replace(latest)
   return {"completed":completed,"created":created,"existing":existing,"latest":str(latest),"report":report}
+
+ @staticmethod
+ def evaluate_scaling_checkpoint(report: dict,baseline: dict | None=None) -> dict:
+  """Evaluate an observed checkpoint without changing tournament state."""
+  if baseline is None:
+   return {"status":"baseline","passed":None,"baseline_threshold":None,"checks":{},
+           "note":"The first 50k observation establishes comparison values; it is not a scale acceptance decision."}
+  def value(payload: dict,*keys):
+   for key in keys:
+    if not isinstance(payload,dict): return None
+    payload=payload.get(key)
+   return payload
+  current_throughput=value(report,"throughput_per_hour"); baseline_throughput=value(baseline,"throughput_per_hour")
+  current_p95=value(report,"duration","p95_seconds"); baseline_p95=value(baseline,"duration","p95_seconds")
+  current_memory=value(report,"memory","percent"); baseline_memory=value(baseline,"memory","percent")
+  current_disk=value(report,"disk","percent"); baseline_disk=value(baseline,"disk","percent")
+  specifications={
+   "throughput_retention":{"observed":current_throughput,"baseline":baseline_throughput,"minimum_ratio":.8,
+     "passed":current_throughput is not None and baseline_throughput not in (None,0) and current_throughput/baseline_throughput>=.8},
+   "duration_p95":{"observed_seconds":current_p95,"baseline_seconds":baseline_p95,"maximum_ratio":1.5,
+     "passed":current_p95 is not None and baseline_p95 not in (None,0) and current_p95/baseline_p95<=1.5},
+   "failure_rate":{"observed":report.get("failure_rate"),"maximum":.001,
+     "passed":report.get("failure_rate") is not None and report["failure_rate"]<=.001},
+   "retried_scenario_rate":{"observed":report.get("retried_scenario_rate"),"maximum":.01,
+     "passed":report.get("retried_scenario_rate") is not None and report["retried_scenario_rate"]<=.01},
+   "duplicate_fingerprints":{"observed":report.get("duplicate_fingerprints"),"maximum":0,
+     "passed":report.get("duplicate_fingerprints")==0},
+   "memory":{"observed_percent":current_memory,"baseline_percent":baseline_memory,"maximum_percent":85,"maximum_growth_points":10,
+     "passed":current_memory is not None and baseline_memory is not None and current_memory<=85 and current_memory-baseline_memory<=10},
+   "disk":{"observed_percent":current_disk,"baseline_percent":baseline_disk,"maximum_percent":80,"maximum_growth_points":10,
+     "passed":current_disk is not None and baseline_disk is not None and current_disk<=80 and current_disk-baseline_disk<=10},
+   "measurement_completeness":{"required":["throughput","duration_p95","memory","disk","workers"],
+     "passed":all(item is not None for item in (current_throughput,current_p95,current_memory,current_disk,report.get("workers")))},
+  }
+  passed=all(check["passed"] for check in specifications.values())
+  return {"status":"passed" if passed else "failed","passed":passed,"baseline_threshold":50_000,
+          "checks":specifications,"note":"Operational scale acceptance only; it is not strategy or profitability approval."}
 
  def backup(self) -> dict:
   run_id=datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"); directory=self.backup_root/run_id

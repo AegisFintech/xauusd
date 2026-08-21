@@ -116,8 +116,27 @@ def test_checkpoint_capture_is_atomic_and_first_observation_is_immutable(tmp_pat
  captured=json.loads((output/"50000.json").read_text())
  assert captured["checkpoint_capture"]=={"threshold":50_000,"first_observed_completed":60_000,
   "exact_threshold_capture":False,"note":"Immutable first observation at or after threshold crossing."}
+ assert captured["acceptance"]["status"]=="baseline" and captured["acceptance"]["passed"] is None
  second=manager.capture_scaling_checkpoints(output_root=output)
  assert second["created"]==[str(output/"100000.json")] and second["existing"]==[str(output/"50000.json")]
  original=(output/"50000.json").read_text(); manager.capture_scaling_checkpoints(output_root=output)
  assert (output/"50000.json").read_text()==original
  assert json.loads((output/"latest.json").read_text())["registry"]["completed"]==120_000
+
+
+def test_scaling_acceptance_compares_reliability_resources_and_performance():
+ baseline={"throughput_per_hour":1000,"duration":{"p95_seconds":8},"memory":{"percent":20},"disk":{"percent":30}}
+ report={"throughput_per_hour":850,"duration":{"p95_seconds":10},"memory":{"percent":25},"disk":{"percent":35},
+         "failure_rate":.0005,"retried_scenario_rate":.002,"duplicate_fingerprints":0,"workers":16}
+ accepted=OperationsManager.evaluate_scaling_checkpoint(report,baseline)
+ assert accepted["status"]=="passed" and accepted["passed"]
+ report["throughput_per_hour"]=799
+ rejected=OperationsManager.evaluate_scaling_checkpoint(report,baseline)
+ assert rejected["status"]=="failed" and not rejected["checks"]["throughput_retention"]["passed"]
+
+
+def test_scaling_acceptance_fails_closed_when_measurements_are_missing():
+ baseline={"throughput_per_hour":1000,"duration":{"p95_seconds":8},"memory":{"percent":20},"disk":{"percent":30}}
+ report={"failure_rate":0,"retried_scenario_rate":0,"duplicate_fingerprints":0,"workers":16}
+ result=OperationsManager.evaluate_scaling_checkpoint(report,baseline)
+ assert not result["passed"] and not result["checks"]["measurement_completeness"]["passed"]
