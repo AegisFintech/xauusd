@@ -9,8 +9,9 @@ DATASET={"version":"v1","fingerprint":"abc","engine_version":"e1","cost_model_ve
 
 def test_catalog_is_deterministic_and_valid():
  first=list(candidate_specs()); second=list(candidate_specs())
- assert first==second and len(first)==catalog_size() and 45_000 < len(first) < 55_000
+ assert first==second and len(first)==catalog_size()==540_288
  assert all(s.parameters.get("fast",0)<s.parameters.get("slow",10**9) for s,_ in first)
+ assert {s.name for s,_ in first} >= {"trend_pullback","confirmed_breakout"}
 
 
 def test_catalog_seeding_is_batched_and_duplicate_safe(tmp_path):

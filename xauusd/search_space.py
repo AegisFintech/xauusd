@@ -8,7 +8,11 @@ from .experiment_registry import ExperimentRegistry, ExperimentSpec, from_strate
 from .research import StrategySpec
 
 
-EXECUTION_GRID={"stop_distance":(1.0,1.75,2.5,4.0),"target_distance":(1.5,2.5,4.0,6.0),"max_holding_bars":(5,15,30,60)}
+EXECUTION_GRID={
+ "stop_distance":(.75,1.0,1.25,1.75,2.5,3.25,4.0,5.0),
+ "target_distance":(1.0,1.5,2.0,2.5,3.25,4.0,5.0,6.0),
+ "max_holding_bars":(5,10,15,30,60,120,240),
+}
 STRATEGY_GRIDS={
  "mean_reversion":{"window":(10,20,40),"entry_z":(1.0,1.5,2.0),"exit_z":(.1,.3),"direction":("both","long","short")},
  "momentum":{"fast":(5,8,12),"slow":(20,34,50),"threshold_atr":(.1,.25,.5),"direction":("both","long","short")},
@@ -21,6 +25,8 @@ STRATEGY_GRIDS={
  "multi_horizon_momentum":{"fast_period":(3,5,10),"slow_period":(15,30,60),"threshold_atr":(0,.05,.15),"direction":("both","long","short")},
  "quantile_reversion":{"window":(20,40,80),"entry_quantile":(.05,.1,.2),"exit_quantile":(.4,.5),"direction":("both","long","short")},
  "volatility_adjusted_trend":{"return_period":(3,5,10,20),"vol_window":(15,30,60),"threshold":(.25,.5,1.0,1.5),"direction":("both","long","short")},
+ "trend_pullback":{"fast":(3,5,8),"slow":(20,34,50),"min_strength":(.1,.25,.5),"pullback_z":(.5,.75,1.0,1.5),"direction":("both","long","short")},
+ "confirmed_breakout":{"lookback":(15,30,60,120),"min_strength":(.1,.25,.5),"range_ratio":(1.1,1.5,2.0),"direction":("both","long","short")},
 }
 
 
