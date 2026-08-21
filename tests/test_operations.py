@@ -188,3 +188,22 @@ def test_scaling_acceptance_fails_closed_when_measurements_are_missing():
  report={"failure_rate":0,"retried_scenario_rate":0,"duplicate_fingerprints":0,"workers":16}
  result=OperationsManager.evaluate_scaling_checkpoint(report,baseline)
  assert not result["passed"] and not result["checks"]["measurement_completeness"]["passed"]
+
+
+def test_capacity_plan_rounds_up_with_efficiency_and_optional_cost():
+ report={"target":500_000,"registry":{"completed":100_000},"workers":16,"throughput_per_hour":4_000}
+ plan=OperationsManager.capacity_plan(report,target_hours=24,efficiency=.8,host_hour_cost=1.25)
+ assert plan["required_throughput_per_hour"]==400_000/24
+ assert plan["effective_throughput_per_host"]==3_200
+ assert plan["required_total_hosts"]==6 and plan["additional_hosts"]==5
+ assert plan["projected_completion_hours"]<=24 and plan["projected_compute_cost"]==180
+ assert plan["authorization"]=="planning_only"
+
+
+def test_capacity_plan_fails_closed_without_measurement_and_validates_inputs():
+ import pytest
+ plan=OperationsManager.capacity_plan({"target":500_000,"registry":{"completed":10}})
+ assert plan["status"]=="insufficient_evidence" and plan["required_total_hosts"] is None
+ assert plan["cost_status"]=="not_yet_verified"
+ with pytest.raises(ValueError): OperationsManager.capacity_plan({},target_hours=0)
+ with pytest.raises(ValueError): OperationsManager.capacity_plan({},efficiency=1.1)

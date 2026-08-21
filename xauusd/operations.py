@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime,timezone
 from pathlib import Path
 import json
+import math
 import shutil
 import sqlite3
 import gzip
@@ -77,6 +78,36 @@ class OperationsManager:
           "measured_bottleneck":bottleneck,
           "limitations":["Projection uses the current coordinator-session throughput and must be refreshed after workload-family changes.",
                          "Cloud database billing and secondary-host price are not available, so monetary cost remains not yet verified."]}
+
+ @staticmethod
+ def capacity_plan(report: dict,target_hours: float=24,efficiency: float=.8,
+                   host_hour_cost: float | None=None) -> dict:
+  if target_hours<=0: raise ValueError("target_hours must be positive")
+  if not 0<efficiency<=1: raise ValueError("efficiency must be greater than zero and at most one")
+  if host_hour_cost is not None and host_hour_cost<0: raise ValueError("host_hour_cost must not be negative")
+  registry=report.get("registry") or {}; target=int(report.get("target") or 500_000)
+  completed=int(registry.get("completed") or 0); remaining=max(0,target-completed)
+  measured=float(report.get("throughput_per_hour") or 0); workers=report.get("workers")
+  required=remaining/target_hours
+  effective=measured*efficiency
+  hosts=math.ceil(required/effective) if effective>0 and remaining else 0
+  projected=hosts*effective; hours=remaining/projected if projected else (0 if not remaining else None)
+  cost=hosts*target_hours*host_hour_cost if host_hour_cost is not None else None
+  status="complete" if not remaining else "measured" if measured>0 and workers else "insufficient_evidence"
+  return {"status":status,"target_scenarios":target,"completed":completed,"remaining":remaining,
+          "target_hours":target_hours,"measured_host":{"workers":workers,"throughput_per_hour":measured},
+          "assumptions":{"homogeneous_hosts":True,"parallel_efficiency":efficiency,
+                         "protected_holdout_distributed":False},
+          "required_throughput_per_hour":required,"effective_throughput_per_host":effective,
+          "required_total_hosts":hosts if status!="insufficient_evidence" else None,
+          "additional_hosts":max(0,hosts-1) if status!="insufficient_evidence" else None,
+          "projected_throughput_per_hour":projected if status!="insufficient_evidence" else None,
+          "projected_completion_hours":hours,"host_hour_cost":host_hour_cost,
+          "projected_compute_cost":cost,"cost_status":"estimated" if cost is not None else "not_yet_verified",
+          "authorization":"planning_only",
+          "limitations":["Linear host scaling is an assumption and must be validated with an isolated multi-host benchmark.",
+                         "Database, orchestration, storage, and network saturation at the planned host count are not yet verified.",
+                         "No concurrency, service, queue, dataset, or provider resource is changed by this report."]}
 
  def capture_scaling_checkpoints(self,registry: ExperimentRegistry | None=None,
                                  status_path=Path("reports/tournament/distributed/status.json"),

@@ -315,6 +315,7 @@ Drain before coordinator/worker maintenance and wait for `state: drained`, `acti
 .venv/bin/python -m xauusd.cli operations backup
 .venv/bin/python -m xauusd.cli operations verify-backup --root backups/tournament/RUN_ID
 .venv/bin/python -m xauusd.cli operations scaling-checkpoint
+.venv/bin/python -m xauusd.cli operations capacity-plan --target-hours 24 --efficiency 0.8
 .venv/bin/python -m xauusd.cli shadow status
 ```
 
