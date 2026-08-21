@@ -43,10 +43,10 @@ def main() -> None:
             if len(rows) >= 2000: flush(); print("staged", seen, flush=True)
         flush()
         db.execute(f"CREATE TEMP TABLE new_catalog_ids (id BIGINT PRIMARY KEY) ON COMMIT DROP")
-        db.execute(f"INSERT INTO experiments ({columns}) SELECT {columns} FROM {stage} ON CONFLICT (fingerprint) DO NOTHING RETURNING id")
-        ids = db.fetchall()
+        ids = db.execute(f"INSERT INTO experiments ({columns}) SELECT {columns} FROM {stage} ON CONFLICT (fingerprint) DO NOTHING RETURNING id").fetchall()
         if ids:
-            db.executemany("INSERT INTO new_catalog_ids (id) VALUES (%s)", ids)
+            with db.cursor() as cur:
+                cur.executemany("INSERT INTO new_catalog_ids (id) VALUES (%s)", ids)
             db.execute("INSERT INTO experiment_events (experiment_id,occurred_at,event,payload_json) SELECT id,%s,'registered',%s FROM new_catalog_ids", (now, json.dumps({"priority":0,"source":"bulk_catalog"}, separators=(",",":"))))
         created = len(ids)
         db.execute(f"DROP TABLE {stage}")
