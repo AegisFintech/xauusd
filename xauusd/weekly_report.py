@@ -83,6 +83,71 @@ def _quantile(values: list[float],fraction: float) -> float | None:
  return ordered[low]*(1-weight)+ordered[high]*weight
 
 
+def _flatten_parameters(parameters: dict,prefix: str="") -> dict[str,object]:
+ values={}
+ for key,value in parameters.items():
+  name=f"{prefix}.{key}" if prefix else key
+  if isinstance(value,dict): values.update(_flatten_parameters(value,name))
+  else: values[name]=value
+ return values
+
+
+def parameter_stability_analytics(rows: list[dict],relative_tolerance: float=.10,
+                                  absolute_tolerance: float=.10,limit: int=25) -> dict:
+ scored=[]
+ for row in rows:
+  score=(row.get("validation") or {}).get("score")
+  flattened=_flatten_parameters(row.get("parameters") or {})
+  numeric={key:float(value) for key,value in flattened.items()
+           if isinstance(value,(int,float)) and not isinstance(value,bool)}
+  if score is not None and numeric:
+   scored.append((row,flattened,numeric,float(score)))
+ surfaces=defaultdict(list)
+ for row,flattened,numeric,score in scored:
+  for parameter,value in numeric.items():
+   fixed={key:item for key,item in flattened.items() if key!=parameter}
+   signature=(row.get("dataset_version"),row.get("strategy_family"),row.get("formula"),
+              json.dumps(fixed,sort_keys=True,separators=(",",":")))
+   surfaces[(signature,parameter)].append((value,score,row["id"]))
+ covered=set(); two_sided=set(); comparisons=[]
+ for (_,parameter),points in surfaces.items():
+  by_value=defaultdict(list)
+  for value,score,identifier in points: by_value[value].append((score,identifier))
+  ordered=sorted((value,statistics.median(score for score,_ in entries),entries)
+                 for value,entries in by_value.items())
+  if len(ordered)<2: continue
+  for index,(value,score,entries) in enumerate(ordered):
+   neighbors=[]
+   if index: neighbors.append(ordered[index-1][:2])
+   if index+1<len(ordered): neighbors.append(ordered[index+1][:2])
+   identifiers=[identifier for _,identifier in entries]; covered.update(identifiers)
+   if len(neighbors)==2: two_sided.update(identifiers)
+   neighbor_median=statistics.median(item[1] for item in neighbors)
+   tolerance=max(absolute_tolerance,relative_tolerance*abs(score))
+   degradation=score-neighbor_median
+   for identifier in identifiers:
+    comparisons.append({"experiment_id":identifier,"parameter":parameter,"value":value,
+                        "score":score,"neighbor_values":[item[0] for item in neighbors],
+                        "neighbor_scores":[item[1] for item in neighbors],
+                        "neighbor_median_score":neighbor_median,"score_advantage":degradation,
+                        "stable":all(abs(score-item[1])<=tolerance for item in neighbors),
+                        "isolated_peak":len(neighbors)==2 and all(score-item[1]>tolerance for item in neighbors)})
+ isolated=[item for item in comparisons if item["isolated_peak"]]
+ isolated.sort(key=lambda item:(item["score"],item["score_advantage"]),reverse=True)
+ comparisons_by_experiment=defaultdict(list)
+ for item in comparisons: comparisons_by_experiment[item["experiment_id"]].append(item)
+ stable={identifier for identifier,items in comparisons_by_experiment.items() if all(item["stable"] for item in items)}
+ isolated_experiments={item["experiment_id"] for item in isolated}
+ return {"scored_experiments":len(scored),"comparable_experiments":len(covered),
+         "two_sided_experiments":len(two_sided),"stable_experiments":len(stable),
+         "isolated_peak_experiments":len(isolated_experiments),"isolated_peak_comparisons":len(isolated),
+         "surface_count":sum(len(set(value for value,_,_ in points))>=2 for points in surfaces.values()),
+         "relative_tolerance":relative_tolerance,"absolute_tolerance":absolute_tolerance,
+         "top_isolated_peaks":isolated[:max(0,limit)],
+         "limitations":["Neighbor stability is validation evidence, not locked out-of-sample evidence.",
+                        "Irregular grid spacing and correlated trials are reported without interpolation."]}
+
+
 def selection_bias_analytics(rows: list[dict],alpha: float=.05) -> dict:
  scores=[]; pvalues=[]; holdout=stability=0; families=defaultdict(int); cohorts=defaultdict(list)
  for row in rows:
@@ -165,7 +230,8 @@ class WeeklyTournamentReport:
           "all_time_completed":len(completed),"families":dict(sorted(families.items())),
           "gate_analytics":gate_analytics(current),
           "champion":champion,"champion_tenure_hours":tenure_hours,
-          "multiple_testing":selection_bias_analytics(completed)}
+          "multiple_testing":selection_bias_analytics(completed),
+          "parameter_stability":parameter_stability_analytics(completed)}
   self.output_root.mkdir(parents=True,exist_ok=True); run_id=now.strftime("%Y%m%dT%H%M%SZ")
   (self.output_root/f"{run_id}.json").write_text(json.dumps(report,indent=2,allow_nan=False))
   latest=self.output_root/"latest.json"; temporary=latest.with_suffix(".json.tmp"); temporary.write_text(json.dumps(report,indent=2,allow_nan=False)); temporary.replace(latest)

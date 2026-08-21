@@ -1,7 +1,8 @@
 from datetime import datetime,timezone
 
 from xauusd.experiment_registry import ExperimentRegistry,ExperimentSpec
-from xauusd.weekly_report import WeeklyTournamentReport,classify_loss_source,gate_analytics,selection_bias_analytics
+from xauusd.weekly_report import (WeeklyTournamentReport,classify_loss_source,gate_analytics,
+                                  parameter_stability_analytics,selection_bias_analytics)
 
 
 def test_weekly_report_tracks_throughput_families_and_multiple_testing(tmp_path):
@@ -79,3 +80,23 @@ def test_selection_bias_computes_bh_and_aligned_fold_pbo():
  pbo=report["probability_of_backtest_overfitting"]
  assert pbo["status"]=="available" and pbo["eligible_strategies"]==3 and pbo["splits"]==6
  assert 0<=pbo["probability"]<=1
+
+
+def test_parameter_stability_compares_only_matching_numeric_neighbors():
+ rows=[]
+ for identifier,(window,score) in enumerate(((10,1.0),(20,5.0),(30,1.2)),1):
+  item=row(identifier,"momentum",{"profit":False},score=score,metrics={"net_profit":score})
+  item.update({"dataset_version":"v1","formula":"same","parameters":{"strategy":{"window":window,"long":True},"execution":{"stop":2}}})
+  rows.append(item)
+ other=row(4,"momentum",{"profit":False},score=9,metrics={"net_profit":9})
+ other.update({"dataset_version":"v1","formula":"different","parameters":{"strategy":{"window":20},"execution":{"stop":2}}})
+ rows.append(other)
+ categorical=row(5,"momentum",{"profit":False},score=8,metrics={"net_profit":8})
+ categorical.update({"dataset_version":"v1","formula":"same","parameters":{"strategy":{"window":20,"long":False},"execution":{"stop":2}}})
+ rows.append(categorical)
+ report=parameter_stability_analytics(rows,relative_tolerance=.1,absolute_tolerance=.1)
+ assert report["scored_experiments"]==5 and report["comparable_experiments"]==3
+ assert report["two_sided_experiments"]==1 and report["isolated_peak_comparisons"]==1
+ peak=report["top_isolated_peaks"][0]
+ assert peak["experiment_id"]==2 and peak["parameter"]=="strategy.window"
+ assert peak["neighbor_values"]==[10.,30.]
