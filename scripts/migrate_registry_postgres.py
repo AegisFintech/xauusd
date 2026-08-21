@@ -12,14 +12,15 @@ from dotenv import load_dotenv
 def main() -> None:
     load_dotenv(".env")
     url=os.environ.get("DATABASE_URL_DIRECT") or os.environ["DATABASE_URL"]
-    # The rebuild requires one stable PostgreSQL session. Prefer the explicitly
-    # supplied direct Neon endpoint; fall back to a non-pooler derivation only
-    # for older deployments that do not define DATABASE_URL_DIRECT.
+    # The rebuild requires one stable PostgreSQL-compatible session. Prefer the
+    # explicitly supplied direct endpoint; retain the Neon fallback for older
+    # deployments that do not define DATABASE_URL_DIRECT.
     if not os.environ.get("DATABASE_URL_DIRECT"):
         url=url.replace("-pooler.", ".", 1)
     target_url=url
     source=sqlite3.connect(os.getenv("SQLITE_REGISTRY","data/experiments/registry.sqlite3")); source.row_factory=sqlite3.Row
     with psycopg.connect(target_url) as target:
+        is_cockroach="CockroachDB" in target.execute("SELECT version()").fetchone()[0]
         target.execute("""CREATE TABLE IF NOT EXISTS experiments (id BIGSERIAL PRIMARY KEY,fingerprint TEXT NOT NULL UNIQUE,
           strategy_family TEXT NOT NULL,formula TEXT NOT NULL,parameters_json TEXT NOT NULL,dataset_version TEXT NOT NULL,
           dataset_fingerprint TEXT NOT NULL,engine_version TEXT NOT NULL,cost_model_version TEXT NOT NULL,code_commit TEXT,
@@ -35,7 +36,8 @@ def main() -> None:
         schemas={"experiments":["id","fingerprint","strategy_family","formula","parameters_json","dataset_version","dataset_fingerprint","engine_version","cost_model_version","code_commit","status","priority","worker_id","created_at","started_at","finished_at","heartbeat_at","metrics_json","validation_json","artifacts_json","error","promoted","retry_count","failure_code"],"experiment_events":["id","experiment_id","occurred_at","event","payload_json"],"champion_history":["id","dataset_version","experiment_id","previous_experiment_id","promoted_at","validation_score","holdout_score","holdout_metrics_json"]}
         for table,columns in schemas.items():
             staging=f"migration_{table}_{uuid.uuid4().hex[:12]}"
-            target.execute(f"CREATE UNLOGGED TABLE {staging} (LIKE {table} INCLUDING DEFAULTS)")
+            table_kind="TABLE" if is_cockroach else "UNLOGGED TABLE"
+            target.execute(f"CREATE {table_kind} {staging} (LIKE {table} INCLUDING DEFAULTS)")
             target.commit()
             rows=source.execute(f"SELECT {','.join(columns)} FROM {table}")
             count=0
@@ -61,7 +63,8 @@ def main() -> None:
             print(table,count,flush=True)
             target.execute(f"DROP TABLE {staging}")
             target.commit()
-        for table in schemas: target.execute(f"SELECT setval(pg_get_serial_sequence('{table}','id'),COALESCE((SELECT max(id) FROM {table}),1),true)")
+        if not is_cockroach:
+            for table in schemas: target.execute(f"SELECT setval(pg_get_serial_sequence('{table}','id'),COALESCE((SELECT max(id) FROM {table}),1),true)")
         target.commit()
         for table in schemas: print("postgres",table,target.execute(f"SELECT count(*) FROM {table}").fetchone()[0],flush=True)
 
