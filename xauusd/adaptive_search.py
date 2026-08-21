@@ -4,6 +4,7 @@ from collections import defaultdict
 from pathlib import Path
 import hashlib
 import json
+import statistics
 
 from .experiment_registry import ExperimentRegistry,ExperimentSpec,canonical_json
 
@@ -30,6 +31,46 @@ def _bounded(key,value,multiplier):
  return int(round(adjusted)) if isinstance(value,int) and not isinstance(value,bool) else round(float(adjusted),6)
 
 
+def mutation_analytics(rows: list[dict],generation_reports: list[dict] | None=None) -> dict:
+ reports=generation_reports or []; groups=defaultdict(lambda:{"completed":0,"improved":0,"passed":0,"near_passes":0,"score_deltas":[]})
+ completed=improved=passed=near_passes=missing_scores=0; deltas=[]; generations=defaultdict(lambda:{"completed":0,"improved":0})
+ for row in rows:
+  provenance=(row.get("parameters") or {}).get("provenance") or {}
+  if provenance.get("generator")!=GENERATOR_VERSION or row.get("status")!="completed": continue
+  completed+=1; validation=row.get("validation") or {}; gates=validation.get("gates") or {}
+  child_score=validation.get("score"); parent_score=provenance.get("parent_validation_score")
+  is_passed=bool(validation.get("passed")); is_near=bool(gates) and sum(not bool(value) for value in gates.values())==1
+  passed+=int(is_passed); near_passes+=int(is_near)
+  keys=(f"family:{row['strategy_family']}",f"parameter:{provenance.get('mutated_parameter','unknown')}",
+        f"multiplier:{provenance.get('multiplier','unknown')}")
+  generation=str(provenance.get("generation","unknown")); generations[generation]["completed"]+=1
+  delta=None
+  if child_score is None or parent_score is None: missing_scores+=1
+  else:
+   delta=float(child_score)-float(parent_score); deltas.append(delta)
+   if delta>0: improved+=1; generations[generation]["improved"]+=1
+  for key in keys:
+   group=groups[key]; group["completed"]+=1; group["passed"]+=int(is_passed); group["near_passes"]+=int(is_near)
+   if delta is not None:
+    group["score_deltas"].append(delta); group["improved"]+=int(delta>0)
+ attempted=sum(int(report.get("created",0))+int(report.get("duplicates",0)) for report in reports)
+ created=sum(int(report.get("created",0)) for report in reports); duplicates=sum(int(report.get("duplicates",0)) for report in reports)
+ def summarize(group):
+  values=group.pop("score_deltas")
+  return {**group,"improvement_rate":group["improved"]/len(values) if values else None,
+          "median_score_delta":statistics.median(values) if values else None}
+ return {"generator_version":GENERATOR_VERSION,"attempted":attempted,"created":created,"duplicates":duplicates,
+         "duplicate_fraction":duplicates/attempted if attempted else 0,"completed":completed,
+         "pending":max(0,created-completed),"unmatched_completed":max(0,completed-created),"improved":improved,
+         "improvement_rate":improved/(completed-missing_scores) if completed>missing_scores else None,
+         "passed":passed,"near_passes":near_passes,"missing_score_pairs":missing_scores,
+         "median_score_delta":statistics.median(deltas) if deltas else None,
+         "groups":{key:summarize(value) for key,value in sorted(groups.items())},
+         "generations":dict(sorted(generations.items(),key=lambda item:str(item[0]))),
+         "limitations":["Score improvement is relative to the stored parent score, not proof of out-of-sample benefit.",
+                        "Correlated children and repeated parent lineages are not independent trials."]}
+
+
 class AdaptiveSearch:
  def __init__(self,registry: ExperimentRegistry,output_path: Path=Path("reports/tournament/adaptive.json")):
   self.registry=registry; self.output_path=output_path
@@ -44,6 +85,17 @@ class AdaptiveSearch:
   if not self.output_path.exists(): return {}
   try: return json.loads(self.output_path.read_text())
   except (OSError,json.JSONDecodeError): return {}
+
+ def analyze(self) -> dict:
+  completed=self.registry.list("completed",limit=max(1,self.registry.count("completed")))
+  history=[]
+  for path in sorted((self.output_path.parent/"adaptive").glob("generation-*.json")):
+   try: history.append(json.loads(path.read_text()))
+   except (OSError,json.JSONDecodeError): continue
+  report={**self._previous(),"mutation_analytics":mutation_analytics(completed,history)}
+  self.output_path.parent.mkdir(parents=True,exist_ok=True)
+  temporary=self.output_path.with_suffix(".json.tmp"); temporary.write_text(json.dumps(report,indent=2)); temporary.replace(self.output_path)
+  return report
 
  def generate(self,dataset: dict,limit: int=50,generation: int | None=None,
               trigger_completed: int | None=None) -> dict:

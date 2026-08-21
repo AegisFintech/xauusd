@@ -19,6 +19,7 @@ from .codex_workflow import CodexImprovementWorkflow
 from .operations import OperationsManager
 from .weekly_report import WeeklyTournamentReport
 from .shadow_trading import ShadowTradingReadiness
+from .adaptive_search import AdaptiveSearch
 import subprocess
 def campaign(synthetic: bool=False):
  Path("reports").mkdir(exist_ok=True); bars=synthetic_bars() if synthetic else None
@@ -101,6 +102,7 @@ def main():
  ops=sub.add_parser("operations"); ops.add_argument("action",choices=["health","backup","compact-artifacts","remote-artifacts-plan","remote-artifacts-apply","remote-artifacts-reconcile"]); ops.add_argument("--plan"); ops.add_argument("--digest"); ops.add_argument("--journal")
  sub.add_parser("tournament-weekly-report")
  shadow=sub.add_parser("shadow"); shadow.add_argument("action",choices=["status","stop"]); shadow.add_argument("--reason",default="manual emergency stop")
+ sub.add_parser("adaptive-analytics")
  d=sub.add_parser("data"); ds=d.add_subparsers(dest="data_cmd"); i=ds.add_parser("import"); i.add_argument("csv"); v=ds.add_parser("validate")
  download=ds.add_parser("download"); download.add_argument("--start",required=True,help="UTC start date/time (for example 2026-08-01)"); download.add_argument("--end",help="UTC end date/time; defaults to now"); download.add_argument("--page-size",type=int,default=5000)
  update=ds.add_parser("update"); update.add_argument("--overlap-minutes",type=int,default=10)
@@ -172,6 +174,8 @@ def main():
  if a.cmd=="shadow":
   manager=ShadowTradingReadiness(); result=manager.readiness() if a.action=="status" else manager.emergency_stop(a.reason)
   print(json.dumps(result,indent=2,default=str))
+ if a.cmd=="adaptive-analytics":
+  print(json.dumps(AdaptiveSearch(ExperimentRegistry()).analyze(),indent=2,default=str))
  if a.cmd=="data":
   s=HistoricalDataStore()
   if a.data_cmd=="import": result=CTraderHistoricalAdapter(s).import_csv(Path(a.csv))

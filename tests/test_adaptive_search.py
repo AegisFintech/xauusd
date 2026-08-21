@@ -1,4 +1,4 @@
-from xauusd.adaptive_search import AdaptiveSearch,BOUNDS,semantic_identity
+from xauusd.adaptive_search import AdaptiveSearch,BOUNDS,semantic_identity,mutation_analytics
 from xauusd.experiment_registry import ExperimentRegistry,ExperimentSpec
 
 
@@ -57,3 +57,34 @@ def test_adaptive_generation_walks_past_duplicates(tmp_path):
  assert (tmp_path/"adaptive"/"generation-0002.json").exists()
  rows=[x for x in registry.list(limit=20) if x["parameters"].get("provenance")]
  assert {x["parameters"]["provenance"]["generation"] for x in rows}=={1,2}
+
+
+def test_mutation_analytics_measures_improvement_and_duplicates():
+ rows=[{"id":1,"status":"completed","strategy_family":"momentum",
+        "parameters":{"provenance":{"generator":"adaptive-search-v1","generation":2,"mutated_parameter":"fast",
+        "multiplier":1.15,"parent_validation_score":1.0}},
+        "validation":{"score":1.5,"passed":False,"gates":{"profit":True,"drawdown":False}}},
+       {"id":2,"status":"completed","strategy_family":"momentum",
+        "parameters":{"provenance":{"generator":"adaptive-search-v1","generation":2,"mutated_parameter":"slow",
+        "multiplier":.85,"parent_validation_score":2.0}},
+        "validation":{"score":1.0,"passed":False,"gates":{"profit":False,"drawdown":False}}}]
+ report=mutation_analytics(rows,[{"created":3,"duplicates":2}])
+ assert report["attempted"]==5 and report["duplicate_fraction"]==.4 and report["pending"]==1
+ assert report["unmatched_completed"]==0
+ assert report["completed"]==2 and report["improved"]==1 and report["improvement_rate"]==.5
+ assert report["near_passes"]==1 and report["median_score_delta"]==-.25
+ assert report["groups"]["parameter:fast"]["median_score_delta"]==.5
+
+
+def test_adaptive_analyze_updates_existing_report(tmp_path):
+ registry=ExperimentRegistry(tmp_path/"registry.db"); completed(registry,"momentum",0,2)
+ row=registry.list("completed",1)[0]; parameters=row["parameters"]
+ parameters["provenance"]={"generator":"adaptive-search-v1","generation":1,"mutated_parameter":"fast",
+                           "multiplier":1.15,"parent_validation_score":1.0}
+ with registry.connect() as db:
+  db.execute("UPDATE experiments SET parameters_json=? WHERE id=?",(__import__('json').dumps(parameters),row["id"]))
+ path=tmp_path/"adaptive.json"; path.write_text('{"generation":1}')
+ history=tmp_path/"adaptive"; history.mkdir(); (history/"generation-0001.json").write_text('{"created":1,"duplicates":0}')
+ report=AdaptiveSearch(registry,path).analyze()
+ assert report["generation"]==1 and report["mutation_analytics"]["improved"]==1
+ assert __import__('json').loads(path.read_text())["mutation_analytics"]["completed"]==1
