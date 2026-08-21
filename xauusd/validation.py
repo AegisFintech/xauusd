@@ -23,13 +23,14 @@ class ValidationConfig:
     minimum_stable_neighbors: float = 0.50
     bootstrap_samples: int = 500
     bootstrap_seed: int = 17
+    bootstrap_block_length: int = 5
 
     def __post_init__(self) -> None:
         if not 0 < self.train_fraction < 1 or not 0 < self.validation_fraction < 1:
             raise ValueError("split fractions must be between zero and one")
         if self.train_fraction + self.validation_fraction >= 1:
             raise ValueError("train and validation fractions must leave a test set")
-        if self.walk_forward_folds < 2 or self.bootstrap_samples < 1:
+        if self.walk_forward_folds < 2 or self.bootstrap_samples < 1 or self.bootstrap_block_length < 1:
             raise ValueError("at least two folds and one bootstrap sample are required")
 
 
@@ -70,20 +71,37 @@ def parameter_neighbors(spec: StrategySpec) -> list[StrategySpec]:
     return neighbors
 
 
-def bootstrap_trade_paths(pnl: pd.Series, samples: int = 500, seed: int = 17) -> dict:
+def bootstrap_trade_paths(pnl: pd.Series, samples: int = 500, seed: int = 17,
+                          block_length: int = 5) -> dict:
+    """Moving-block bootstrap preserving short-run trade P&L dependence."""
+    if samples < 1 or block_length < 1:
+        raise ValueError("samples and block length must be positive")
     if pnl.empty:
-        return {"samples": samples, "loss_probability": 1.0, "median_net_pnl": 0.0,
-                "p05_net_pnl": 0.0, "p95_max_drawdown": 0.0}
+        return {"method": "circular_moving_block", "samples": samples, "seed": seed,
+                "block_length": block_length, "units": "account_currency",
+                "loss_probability": 1.0, "median_net_pnl": 0.0, "p05_net_pnl": 0.0,
+                "p05_drawdown_currency": 0.0, "p95_drawdown_loss_currency": 0.0,
+                "p95_max_drawdown": 0.0}
     values = pnl.to_numpy(dtype=float)
     rng = np.random.default_rng(seed)
     totals, drawdowns = [], []
+    effective_block = min(block_length, len(values))
+    blocks_per_path = int(np.ceil(len(values) / effective_block))
+    offsets = np.arange(effective_block)
     for _ in range(samples):
-        path = rng.choice(values, size=len(values), replace=True).cumsum()
+        starts = rng.integers(0, len(values), size=blocks_per_path)
+        indices = ((starts[:, None] + offsets) % len(values)).reshape(-1)[:len(values)]
+        path = values[indices].cumsum()
         totals.append(path[-1])
         drawdowns.append(float((path - np.maximum.accumulate(np.r_[0.0, path])[-len(path):]).min()))
-    return {"samples": samples, "loss_probability": float(np.mean(np.asarray(totals) <= 0)),
+    p05_drawdown = float(np.quantile(drawdowns, .05))
+    return {"method": "circular_moving_block", "samples": samples, "seed": seed,
+            "block_length": effective_block, "units": "account_currency",
+            "loss_probability": float(np.mean(np.asarray(totals) <= 0)),
             "median_net_pnl": float(np.median(totals)), "p05_net_pnl": float(np.quantile(totals, .05)),
-            "p95_max_drawdown": float(np.quantile(drawdowns, .05))}
+            "p05_drawdown_currency": p05_drawdown,
+            "p95_drawdown_loss_currency": -p05_drawdown,
+            "p95_max_drawdown": p05_drawdown}
 
 
 class StrategyValidator:
@@ -110,7 +128,8 @@ class StrategyValidator:
             neighbors.append({"parameters": candidate.parameters, **metrics})
         test_result = split_results["test"]
         bootstrap = bootstrap_trade_paths(test_result["trades"].net_pnl if not test_result["trades"].empty else pd.Series(dtype=float),
-                                          self.config.bootstrap_samples, self.config.bootstrap_seed)
+                                          self.config.bootstrap_samples, self.config.bootstrap_seed,
+                                          self.config.bootstrap_block_length)
         positive_folds = float(np.mean([fold["net_profit"] > 0 for fold in folds]))
         stable_neighbors = float(np.mean([row["net_profit"] > 0 for row in neighbors])) if neighbors else 0.0
         test = test_result["metrics"]

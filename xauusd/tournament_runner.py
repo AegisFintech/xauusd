@@ -34,6 +34,7 @@ class TournamentGates:
     minimum_positive_folds: float = 0.75
     bootstrap_samples: int = 300
     maximum_bootstrap_loss_probability: float = 0.05
+    bootstrap_block_length: int = 5
 
 
 def _finite(value):
@@ -111,7 +112,8 @@ class TournamentRunner:
         positive_fraction=float(np.mean([fold["net_profit"]>0 for fold in folds]))
         trades=result["trades"]
         bootstrap=bootstrap_trade_paths(trades.net_pnl if not trades.empty else pd.Series(dtype=float),
-                                        self.gates.bootstrap_samples,seed=17)
+                                        self.gates.bootstrap_samples,seed=17,
+                                        block_length=self.gates.bootstrap_block_length)
         checks["walk_forward_consistency"]=positive_fraction>=self.gates.minimum_positive_folds
         checks["bootstrap_confidence"]=bootstrap["loss_probability"]<=self.gates.maximum_bootstrap_loss_probability and bootstrap["p05_net_pnl"]>0
         report.update({"passed":all(checks.values()),"walk_forward":{"folds":folds,

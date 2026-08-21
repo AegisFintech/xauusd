@@ -97,3 +97,5 @@ def test_robust_validation_adds_walk_forward_and_bootstrap(tmp_path):
     metrics={**result["metrics"],"net_profit":1,"expectancy":1,"profit_factor":2,"max_drawdown":0}
     report=runner._validation(metrics,result,features,strategy,execution)
     assert len(report["walk_forward"]["folds"])==2 and report["bootstrap"]["samples"]==20
+    assert report["bootstrap"]["method"]=="circular_moving_block"
+    assert report["bootstrap"]["block_length"]==min(5,len(result["trades"]))

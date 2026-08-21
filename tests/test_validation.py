@@ -34,6 +34,23 @@ def test_bootstrap_is_seeded_and_reports_loss_probability():
     first = bootstrap_trade_paths(pnl, 100, 9)
     assert first == bootstrap_trade_paths(pnl, 100, 9)
     assert 0 <= first["loss_probability"] <= 1
+    assert first["method"] == "circular_moving_block" and first["block_length"] == 4
+    assert first["units"] == "account_currency"
+    assert first["p95_drawdown_loss_currency"] == -first["p05_drawdown_currency"]
+    assert first["p95_max_drawdown"] == first["p05_drawdown_currency"]
+
+
+def test_block_bootstrap_preserves_clustered_sequence_effect():
+    clustered = pd.Series([2.] * 10 + [-2.] * 10)
+    iid = bootstrap_trade_paths(clustered, 1000, 11, block_length=1)
+    blocked = bootstrap_trade_paths(clustered, 1000, 11, block_length=5)
+    assert blocked["p95_drawdown_loss_currency"] > iid["p95_drawdown_loss_currency"]
+
+
+def test_bootstrap_rejects_invalid_configuration():
+    import pytest
+    with pytest.raises(ValueError):
+        bootstrap_trade_paths(pd.Series([1.]), block_length=0)
 
 
 def test_validator_writes_report_and_does_not_promote_weak_strategy(tmp_path):
