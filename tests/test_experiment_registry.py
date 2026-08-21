@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from xauusd.experiment_registry import ExperimentRegistry, ExperimentSpec
+from xauusd.experiment_registry import ExperimentRegistry, ExperimentSpec, PostgresConnection
 
 
 def spec(**parameters):
@@ -14,6 +14,22 @@ def test_fingerprint_is_canonical_and_ignores_commit():
     a=spec(a=1,b=2); b=ExperimentSpec(a.strategy_family,a.formula,{"b":2,"a":1},a.dataset_version,
                                       a.dataset_fingerprint,a.engine_version,a.cost_model_version,"other")
     assert a.fingerprint==b.fingerprint
+
+
+def test_postgres_connection_uses_configured_read_committed(monkeypatch):
+    import psycopg
+    class Connection:
+        isolation_level=None
+        closed=False
+        def close(self): self.closed=True
+    connection=Connection()
+    monkeypatch.setattr(psycopg,"connect",lambda *args,**kwargs:connection)
+    monkeypatch.delenv("DATABASE_TRANSACTION_ISOLATION",raising=False)
+    PostgresConnection("postgresql://example")
+    assert connection.isolation_level==psycopg.IsolationLevel.READ_COMMITTED
+    monkeypatch.setenv("DATABASE_TRANSACTION_ISOLATION","invalid")
+    with pytest.raises(ValueError): PostgresConnection("postgresql://example")
+    assert connection.closed
 
 
 def test_registration_rejects_duplicate_identity(tmp_path):

@@ -44,6 +44,13 @@ class PostgresConnection:
         import psycopg
         from psycopg.rows import dict_row
         self.connection=psycopg.connect(url,row_factory=dict_row)
+        isolation=os.getenv("DATABASE_TRANSACTION_ISOLATION","read_committed").lower()
+        levels={"read_committed":psycopg.IsolationLevel.READ_COMMITTED,
+                "serializable":psycopg.IsolationLevel.SERIALIZABLE}
+        if isolation not in levels:
+            self.connection.close()
+            raise ValueError("DATABASE_TRANSACTION_ISOLATION must be read_committed or serializable")
+        self.connection.isolation_level=levels[isolation]
     def execute(self,query,params=()): return self.connection.execute(query.replace("?","%s"),params)
     def __enter__(self): return self
     def __exit__(self,*args): return self.connection.__exit__(*args)
