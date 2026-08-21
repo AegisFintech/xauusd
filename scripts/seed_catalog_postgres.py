@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import random
+import time
 from datetime import datetime, timezone
 
 import psycopg
@@ -25,19 +27,28 @@ def main() -> None:
         def flush() -> None:
             nonlocal created
             if not rows: return
-            ids=[]
-            for row in rows:
-                result=db.execute(
-                    f"INSERT INTO experiments ({columns}) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
-                    "ON CONFLICT (fingerprint) DO NOTHING RETURNING id",row).fetchone()
-                if result: ids.append(result[0])
-            if ids:
-                payload=json.dumps({"priority":0,"source":"bulk_catalog"},separators=(",",":"))
-                with db.cursor() as cur:
-                    cur.executemany(
-                        "INSERT INTO experiment_events (experiment_id,occurred_at,event,payload_json) VALUES (%s,%s,'registered',%s)",
-                        ((experiment_id,now,payload) for experiment_id in ids))
-            db.commit()
+            for attempt in range(5):
+                try:
+                    ids=[]
+                    for row in rows:
+                        result=db.execute(
+                            f"INSERT INTO experiments ({columns}) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                            "ON CONFLICT (fingerprint) DO NOTHING RETURNING id",row).fetchone()
+                        if result: ids.append(result[0])
+                    if ids:
+                        payload=json.dumps({"priority":0,"source":"bulk_catalog"},separators=(",",":"))
+                        with db.cursor() as cur:
+                            cur.executemany(
+                                "INSERT INTO experiment_events (experiment_id,occurred_at,event,payload_json) VALUES (%s,%s,'registered',%s)",
+                                ((experiment_id,now,payload) for experiment_id in ids))
+                    db.commit()
+                    break
+                except psycopg.errors.SerializationFailure:
+                    db.rollback()
+                    if attempt == 4: raise
+                    delay=min(8.0,.5*(2**attempt))+random.uniform(0,.5)
+                    print("serialization_retry",attempt+1,round(delay,2),flush=True)
+                    time.sleep(delay)
             created += len(ids)
             rows.clear()
         for strategy, execution in candidate_specs():
