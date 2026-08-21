@@ -20,6 +20,7 @@ def main() -> None:
     dataset = TournamentDataset().active()
     commit = os.popen("git rev-parse HEAD").read().strip() or None
     with psycopg.connect(url) as db:
+        existing={row[0] for row in db.execute("SELECT fingerprint FROM experiments")}
         now = datetime.now(timezone.utc).isoformat()
         columns = "fingerprint,strategy_family,formula,parameters_json,dataset_version,dataset_fingerprint,engine_version,cost_model_version,code_commit,status,priority,created_at"
         rows = []
@@ -57,8 +58,10 @@ def main() -> None:
                 {"strategy": strategy.parameters, "execution": execution},
                 base.dataset_version, base.dataset_fingerprint, base.engine_version,
                 base.cost_model_version, commit)
-            rows.append((spec.fingerprint,spec.strategy_family,spec.formula,canonical_json(spec.parameters),spec.dataset_version,spec.dataset_fingerprint,spec.engine_version,spec.cost_model_version,spec.code_commit,"queued",0,now))
             seen += 1
+            if spec.fingerprint in existing: continue
+            existing.add(spec.fingerprint)
+            rows.append((spec.fingerprint,spec.strategy_family,spec.formula,canonical_json(spec.parameters),spec.dataset_version,spec.dataset_fingerprint,spec.engine_version,spec.cost_model_version,spec.code_commit,"queued",0,now))
             if len(rows) >= 2000: flush(); print("seeded",seen,created,flush=True)
         flush()
         print(json.dumps({"catalog_size": catalog_size(), "considered": seen, "created": created}, indent=2))
