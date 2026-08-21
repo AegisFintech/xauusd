@@ -8,6 +8,9 @@ import sqlite3
 import gzip
 import hashlib
 import os
+import statistics
+
+from .experiment_registry import ExperimentRegistry
 
 
 class OperationsManager:
@@ -30,6 +33,51 @@ class OperationsManager:
   if backup_age is None or backup_age>30: alerts.append("backup missing or older than 30 hours")
   return {"healthy":not alerts,"database":database,"disk_free_percent":round(free_percent,1),
           "latest_backup":latest,"backup_age_hours":backup_age,"alerts":alerts}
+
+ def scaling_checkpoint(self,registry: ExperimentRegistry | None=None,
+                        status_path=Path("reports/tournament/distributed/status.json"),target: int=500_000) -> dict:
+  registry=registry or ExperimentRegistry(); status_path=Path(status_path)
+  status=json.loads(status_path.read_text()) if status_path.exists() else {}
+  with registry.connect() as db:
+   row=db.execute("""SELECT COUNT(*) total,
+      SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) completed,
+      SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) failed,
+      SUM(CASE WHEN status='queued' THEN 1 ELSE 0 END) queued,
+      SUM(CASE WHEN status='running' THEN 1 ELSE 0 END) running,
+      SUM(CASE WHEN retry_count>0 THEN 1 ELSE 0 END) retried,
+      COALESCE(SUM(retry_count),0) retries,COUNT(DISTINCT fingerprint) distinct_fingerprints
+      FROM experiments""").fetchone()
+  counts={key:int(row[key] or 0) for key in ("total","completed","failed","queued","running","retried","retries")}
+  terminal=counts["completed"]+counts["failed"]
+  duplicates=counts["total"]-int(row["distinct_fingerprints"] or 0)
+  throughput=float(status.get("throughput_per_hour") or 0); remaining=max(0,target-counts["completed"])
+  projected_hours=remaining/throughput if throughput>0 else None
+  history=status.get("history") or []; cpu=[float(item.get("cpu_percent") or 0) for item in history]
+  cpu_p95=None
+  if cpu:
+   ordered=sorted(cpu); cpu_p95=ordered[min(len(ordered)-1,int(.95*(len(ordered)-1)))]
+  stages=status.get("stage_duration") or {}
+  medians={name:(values or {}).get("median_seconds") for name,values in stages.items()}
+  compute=float(medians.get("computing") or 0); overhead=sum(float(medians.get(name) or 0) for name in ("dispatching","importing"))
+  network=((status.get("telemetry") or {}).get("network") or {})
+  bottleneck="not_yet_verified"
+  if compute>overhead and cpu_p95 is not None and cpu_p95>=85: bottleneck="secondary_compute"
+  elif float(medians.get("importing") or 0)>compute: bottleneck="result_persistence"
+  elif float(medians.get("dispatching") or 0)>compute: bottleneck="dispatch_or_network"
+  checkpoints={str(value):{"target":value,"status":"reached" if counts["completed"]>=value else "pending",
+                            "remaining":max(0,value-counts["completed"])} for value in (50_000,100_000,250_000,500_000)}
+  return {"generated_at":datetime.now(timezone.utc).isoformat(),"target":target,"registry":counts,
+          "checkpoints":checkpoints,"workers":status.get("workers"),"throughput_per_hour":throughput,
+          "projected_hours_to_target":projected_hours,
+          "required_throughput_for_24h":remaining/24,"throughput_multiplier_for_24h":remaining/24/throughput if throughput else None,
+          "failure_rate":counts["failed"]/terminal if terminal else 0,"retried_scenario_rate":counts["retried"]/counts["total"] if counts["total"] else 0,
+          "retry_attempts":counts["retries"],"duplicate_fingerprints":duplicates,
+          "duration":status.get("duration"),"stage_duration":stages,
+          "cpu_p95_percent":cpu_p95,"memory":(status.get("telemetry") or {}).get("memory"),
+          "disk":(status.get("telemetry") or {}).get("disk"),"network":network,
+          "measured_bottleneck":bottleneck,
+          "limitations":["Projection uses the current coordinator-session throughput and must be refreshed after workload-family changes.",
+                         "Cloud database billing and secondary-host price are not available, so monetary cost remains not yet verified."]}
 
  def backup(self) -> dict:
   run_id=datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"); directory=self.backup_root/run_id

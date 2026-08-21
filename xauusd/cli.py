@@ -99,7 +99,7 @@ def main():
  remote=sub.add_parser("remote-coordinator"); remote.add_argument("action",nargs="?",choices=["run","drain","resume","status"],default="run"); remote.add_argument("--idle-seconds",type=float,default=10)
  compute=sub.add_parser("compute-job"); compute.add_argument("job"); compute.add_argument("output")
  codex=sub.add_parser("codex-improve"); codex.add_argument("action",choices=["prepare","run","status"])
- ops=sub.add_parser("operations"); ops.add_argument("action",choices=["health","backup","compact-artifacts","artifact-retention-inventory","remote-artifacts-plan","remote-artifacts-apply","remote-artifacts-reconcile"]); ops.add_argument("--plan"); ops.add_argument("--digest"); ops.add_argument("--journal"); ops.add_argument("--root")
+ ops=sub.add_parser("operations"); ops.add_argument("action",choices=["health","backup","compact-artifacts","artifact-retention-inventory","scaling-checkpoint","remote-artifacts-plan","remote-artifacts-apply","remote-artifacts-reconcile"]); ops.add_argument("--plan"); ops.add_argument("--digest"); ops.add_argument("--journal"); ops.add_argument("--root")
  sub.add_parser("tournament-weekly-report")
  shadow=sub.add_parser("shadow"); shadow.add_argument("action",choices=["status","stop"]); shadow.add_argument("--reason",default="manual emergency stop")
  sub.add_parser("adaptive-analytics")
@@ -169,7 +169,7 @@ def main():
   manager=OperationsManager()
   if a.action in {"remote-artifacts-apply","remote-artifacts-reconcile"} and not all((a.plan,a.digest,a.journal)): p.error("--plan, --digest, and --journal are required")
   if a.action=="artifact-retention-inventory" and not a.root: p.error("--root is required")
-  result=manager.health() if a.action=="health" else manager.backup() if a.action=="backup" else manager.remote_artifacts_plan() if a.action=="remote-artifacts-plan" else OperationsManager.apply_remote_artifacts_plan(Path(a.plan),a.digest,Path(a.journal)) if a.action=="remote-artifacts-apply" else manager.reconcile_remote_artifacts(Path(a.plan),a.digest,Path(a.journal)) if a.action=="remote-artifacts-reconcile" else OperationsManager.artifact_retention_inventory(Path(a.root)) if a.action=="artifact-retention-inventory" else manager.compact_artifacts()
+  result=manager.health() if a.action=="health" else manager.backup() if a.action=="backup" else manager.scaling_checkpoint() if a.action=="scaling-checkpoint" else manager.remote_artifacts_plan() if a.action=="remote-artifacts-plan" else OperationsManager.apply_remote_artifacts_plan(Path(a.plan),a.digest,Path(a.journal)) if a.action=="remote-artifacts-apply" else manager.reconcile_remote_artifacts(Path(a.plan),a.digest,Path(a.journal)) if a.action=="remote-artifacts-reconcile" else OperationsManager.artifact_retention_inventory(Path(a.root)) if a.action=="artifact-retention-inventory" else manager.compact_artifacts()
   print(json.dumps(result,indent=2,default=str))
  if a.cmd=="tournament-weekly-report": print(json.dumps(WeeklyTournamentReport().build(),indent=2,default=str))
  if a.cmd=="shadow":

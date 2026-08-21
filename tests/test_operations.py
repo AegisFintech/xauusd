@@ -2,6 +2,7 @@ import json
 import sqlite3
 
 from xauusd.operations import OperationsManager
+from xauusd.experiment_registry import ExperimentRegistry,ExperimentSpec
 
 
 def test_health_detects_database_and_missing_backup(tmp_path,monkeypatch):
@@ -82,3 +83,22 @@ def test_artifact_retention_inventory_reports_policy_and_file_mismatches(tmp_pat
  assert report["groups"]["compact"]["average_bytes_per_scenario"]>0
  assert report["groups"]["audit"]["detailed_scenarios"]==1 and report["groups"]["audit"]["missing_declared_detail"]==0
  assert report["groups"]["legacy"]["missing_declared_detail"]==1
+
+
+def test_scaling_checkpoint_uses_registry_and_measured_stage_evidence(tmp_path):
+ registry=ExperimentRegistry(tmp_path/"registry.db")
+ for number in range(2):
+  spec=ExperimentSpec("momentum",f"formula-{number}",{"window":number+1},"v","d","e","c")
+  registry.register(spec); claimed=registry.claim_next(f"w-{number}")
+  if number==0: registry.complete(claimed["id"],f"w-{number}",{"validation":{"net_profit":1}})
+  else: registry.fail(claimed["id"],f"w-{number}","failed")
+ status=tmp_path/"status.json"
+ status.write_text(json.dumps({"workers":16,"throughput_per_hour":1000,"history":[{"cpu_percent":95}],
+   "duration":{"median_seconds":4,"p95_seconds":7},"stage_duration":{
+    "dispatching":{"median_seconds":.3},"computing":{"median_seconds":3.4},"importing":{"median_seconds":.1}},
+   "telemetry":{"memory":{"percent":20},"disk":{"percent":30},"network":{"rx_bytes_per_second":10}}}))
+ report=OperationsManager().scaling_checkpoint(registry,status,target=100)
+ assert report["registry"]["completed"]==1 and report["failure_rate"]==.5
+ assert report["duplicate_fingerprints"]==0 and report["measured_bottleneck"]=="secondary_compute"
+ assert report["checkpoints"]["50000"]["status"]=="pending"
+ assert report["projected_hours_to_target"]==.099 and report["workers"]==16
