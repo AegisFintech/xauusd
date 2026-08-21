@@ -25,6 +25,23 @@ def test_backup_uses_sqlite_snapshot_and_manifest(tmp_path,monkeypatch):
  assert latest["run_id"]==result["run_id"] and snapshot.exists()
 
 
+def test_backup_preserves_scaling_checkpoints_with_integrity_manifest(tmp_path,monkeypatch):
+ monkeypatch.chdir(tmp_path); database=tmp_path/"data"/"experiments"/"registry.sqlite3"; database.parent.mkdir(parents=True)
+ with sqlite3.connect(database) as db: db.execute("CREATE TABLE test(value TEXT)")
+ checkpoints=tmp_path/"reports"/"tournament"/"scaling-checkpoints"; checkpoints.mkdir(parents=True)
+ (checkpoints/"50000.json").write_text('{"checkpoint":50000}')
+ (checkpoints/"latest.json").write_text('{"checkpoint":"latest"}')
+ manager=OperationsManager(database,tmp_path/"backups",tmp_path/"reports"/"tournament")
+ result=manager.backup(); backup=tmp_path/result["directory"]
+ assert (backup/"scaling-checkpoints"/"50000.json").read_text()=='{"checkpoint":50000}'
+ inventory=result["scaling_checkpoints"]
+ assert [item["backup"] for item in inventory]==["scaling-checkpoints/50000.json","scaling-checkpoints/latest.json"]
+ for item in inventory:
+  archived=backup/item["backup"]
+  assert item["bytes"]==archived.stat().st_size
+  assert item["sha256"]==__import__("hashlib").sha256(archived.read_bytes()).hexdigest()
+
+
 def test_compaction_compresses_trade_ledgers_and_updates_registry(tmp_path):
  database=tmp_path/"registry.db"; ledger=tmp_path/"trades.csv"; ledger.write_text("pnl\n"+("1.25\n"*1000))
  artifacts=json.dumps({"trades":str(ledger)})

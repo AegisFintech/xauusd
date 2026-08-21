@@ -146,8 +146,16 @@ class OperationsManager:
    if source.exists(): shutil.copy2(source,directory/source.name); copied.append(str(source))
   for source in self.reports.glob("*/champion.json"):
    target=directory/(source.parent.name+"-champion.json"); shutil.copy2(source,target); copied.append(str(source))
+  checkpoint_inventory=[]; checkpoint_root=self.reports/"scaling-checkpoints"
+  if checkpoint_root.is_dir():
+   checkpoint_destination=directory/"scaling-checkpoints"; checkpoint_destination.mkdir()
+   for source in sorted(checkpoint_root.glob("*.json")):
+    target=checkpoint_destination/source.name; shutil.copy2(source,target)
+    checkpoint_inventory.append({"source":str(source),"backup":str(target.relative_to(directory)),
+      "bytes":target.stat().st_size,"sha256":hashlib.sha256(target.read_bytes()).hexdigest()})
+    copied.append(str(source))
   state={"run_id":run_id,"created_at":datetime.now(timezone.utc).isoformat(),"directory":str(directory),
-         "registry_bytes":destination.stat().st_size,"copied":copied}
+         "registry_bytes":destination.stat().st_size,"copied":copied,"scaling_checkpoints":checkpoint_inventory}
   (directory/"manifest.json").write_text(json.dumps(state,indent=2))
   latest=self.backup_root/"latest.json"; temporary=latest.with_suffix(".json.tmp"); temporary.write_text(json.dumps(state,indent=2)); temporary.replace(latest)
   return state
