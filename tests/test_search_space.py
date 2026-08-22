@@ -2,6 +2,7 @@ from xauusd.core import synthetic_bars
 from xauusd.experiment_registry import ExperimentRegistry
 from xauusd.research import StrategySpec,build_features,generate_signal
 from xauusd.search_space import candidate_specs,catalog_size,replenish_catalog,seed_catalog
+from tests.memory_registry import MemoryRegistry
 
 
 DATASET={"version":"v1","fingerprint":"abc","engine_version":"e1","cost_model_version":"c1"}
@@ -15,7 +16,7 @@ def test_catalog_is_deterministic_and_valid():
 
 
 def test_catalog_seeding_is_batched_and_duplicate_safe(tmp_path):
- registry=ExperimentRegistry(tmp_path/"x.db")
+ registry=MemoryRegistry()
  one=seed_catalog(registry,DATASET,"commit",limit=25); two=seed_catalog(registry,DATASET,"commit",limit=25)
  assert one["created"]==25 and two["created"]==0 and two["existing"]==25
 
@@ -48,6 +49,6 @@ def test_session_momentum_warmup_is_flat_not_an_integer_cast_error():
 
 
 def test_replenishment_scans_past_existing_prefix(tmp_path):
- registry=ExperimentRegistry(tmp_path/"x.db"); seed_catalog(registry,DATASET,limit=10)
+ registry=MemoryRegistry(); seed_catalog(registry,DATASET,limit=10)
  result=replenish_catalog(registry,DATASET,target_new=5)
  assert result["created"]==5 and registry.count(dataset_version="v1")==15

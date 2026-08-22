@@ -4,6 +4,7 @@ import pandas as pd
 from fastapi.testclient import TestClient
 
 import xauusd.dashboard as dashboard
+from tests.memory_registry import MemoryRegistry
 
 
 def setup_files(tmp_path):
@@ -22,7 +23,7 @@ def setup_files(tmp_path):
 
 def test_health_is_public_but_api_can_require_auth(tmp_path,monkeypatch):
     reports,data=setup_files(tmp_path); monkeypatch.setattr(dashboard,"REPORTS",reports); monkeypatch.setattr(dashboard,"DATA_FILE",data); monkeypatch.setattr(dashboard,"tournament_status",lambda:None)
-    monkeypatch.setenv("DASHBOARD_USERNAME","user"); monkeypatch.setenv("DASHBOARD_PASSWORD","secret"); monkeypatch.setenv("XAUUSD_EXPERIMENT_DB",str(tmp_path/"experiments.db"))
+    monkeypatch.setenv("DASHBOARD_USERNAME","user"); monkeypatch.setenv("DASHBOARD_PASSWORD","secret"); monkeypatch.setattr(dashboard,"registry",MemoryRegistry)
     client=TestClient(dashboard.app)
     assert client.get("/health").status_code==200
     assert client.get("/api/status").status_code==401
@@ -31,7 +32,7 @@ def test_health_is_public_but_api_can_require_auth(tmp_path,monkeypatch):
 
 def test_dashboard_reads_latest_run_and_equity(tmp_path,monkeypatch):
     reports,data=setup_files(tmp_path); monkeypatch.setattr(dashboard,"REPORTS",reports); monkeypatch.setattr(dashboard,"DATA_FILE",data)
-    monkeypatch.delenv("DASHBOARD_USERNAME",raising=False); monkeypatch.delenv("DASHBOARD_PASSWORD",raising=False); monkeypatch.setenv("XAUUSD_EXPERIMENT_DB",str(tmp_path/"experiments.db"))
+    monkeypatch.delenv("DASHBOARD_USERNAME",raising=False); monkeypatch.delenv("DASHBOARD_PASSWORD",raising=False); monkeypatch.setattr(dashboard,"registry",MemoryRegistry)
     client=TestClient(dashboard.app)
     assert client.get("/api/leaderboard").json()[0]["strategy"]=="mean_reversion"
     figure=client.get("/api/equity/mean_reversion").json()
@@ -50,7 +51,7 @@ def test_export_blocks_path_traversal(tmp_path,monkeypatch):
 
 def test_tournament_equity_and_leaderboard(tmp_path,monkeypatch):
  reports,data=setup_files(tmp_path); monkeypatch.setattr(dashboard,"REPORTS",reports); monkeypatch.setattr(dashboard,"DATA_FILE",data)
- database=__import__("xauusd.experiment_registry",fromlist=["ExperimentRegistry"]).ExperimentRegistry(tmp_path/"registry.db")
+ database=MemoryRegistry()
  spec=__import__("xauusd.experiment_registry",fromlist=["ExperimentSpec"]).ExperimentSpec("momentum","f",{},"v","d","e","c")
  row,_=database.register(spec); claimed=database.claim_next("w")
  artifact=reports/"tournament"/"v"/str(row["id"]); artifact.mkdir(parents=True)
@@ -85,9 +86,20 @@ def test_system_metrics_calculate_network_rate(monkeypatch):
 
 def test_live_snapshot_contains_operations_and_experiment_signature(tmp_path,monkeypatch):
  reports,data=setup_files(tmp_path); monkeypatch.setattr(dashboard,"REPORTS",reports); monkeypatch.setattr(dashboard,"DATA_FILE",data)
- monkeypatch.setenv("XAUUSD_EXPERIMENT_DB",str(tmp_path/"missing.db")); monkeypatch.chdir(tmp_path)
+ monkeypatch.setattr(dashboard,"registry",MemoryRegistry); monkeypatch.chdir(tmp_path)
  snapshot=dashboard.live_snapshot(False)
  assert "system" in snapshot and "operations" in snapshot and "experiments" in snapshot
+
+
+def test_dashboard_registry_requires_database_url_and_never_passes_a_path(monkeypatch):
+ monkeypatch.delenv("DATABASE_URL",raising=False)
+ with __import__("pytest").raises(RuntimeError,match="DATABASE_URL is required"):
+  dashboard.registry()
+ calls=[]
+ monkeypatch.setenv("DATABASE_URL","postgresql://configured")
+ monkeypatch.setattr(dashboard,"ExperimentRegistry",lambda *args,**kwargs:calls.append((args,kwargs)) or object())
+ dashboard.registry()
+ assert calls==[((),{"initialize":False})]
 
 
 def test_dashboard_uses_event_stream_not_interval_polling():

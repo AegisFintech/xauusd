@@ -6,12 +6,13 @@ from xauusd.core import synthetic_bars
 from xauusd.experiment_registry import ExperimentRegistry, ExperimentSpec
 from xauusd.tournament_data import TournamentDataConfig, TournamentDataset
 from xauusd.tournament_runner import ContinuousTournamentWorker, TournamentGates, TournamentRunner
+from tests.memory_registry import MemoryRegistry
 
 
 def setup_runner(tmp_path, parameters, gates=None):
     dataset = TournamentDataset(TournamentDataConfig(root=tmp_path/"data", active_path=tmp_path/"active.json", days=30))
     manifest = dataset.create(synthetic_bars(60*24*40, seed=91))
-    registry = ExperimentRegistry(tmp_path/"registry.sqlite3")
+    registry = MemoryRegistry()
     spec = ExperimentSpec("momentum", "formula", parameters, manifest["version"], manifest["fingerprint"],
                           manifest["engine_version"], manifest["cost_model_version"])
     row, _ = registry.register(spec)

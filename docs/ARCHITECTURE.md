@@ -4,7 +4,7 @@
 flowchart LR
  D[cTrader read-only history] --> R[data/raw + processed Parquet]
  R --> T[Immutable snapshot: train / validation / protected test]
- T --> Q[(Primary SQLite registry)]
+ T --> Q[(Primary CockroachDB registry)]
  Q --> C[Remote coordinator]
  C -->|SSH train + validation only| S[Secondary server: 16 workers]
  S -->|metrics + artifacts| C
@@ -27,7 +27,7 @@ flowchart LR
 | `xauusd/engine.py` | event-driven execution, costs, stops/targets, ledger |
 | `xauusd/research.py`, `search_space.py` | causal features, strategy families, catalog |
 | `xauusd/tournament_runner.py` | lifecycle and backtest reconstruction |
-| `xauusd/experiment_registry.py` | SQLite state, events, gates, champions |
+| `xauusd/experiment_registry.py` | CockroachDB state, events, gates, champions |
 | `xauusd/distributed_compute.py` | SSH bridge, workers, telemetry, artifacts |
 | `xauusd/validation.py` | walk-forward, sensitivity, bootstrap gates |
 | `xauusd/adaptive_search.py`, `strategy_proposals.py` | replenishment and novelty |

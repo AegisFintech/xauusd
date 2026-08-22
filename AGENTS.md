@@ -19,7 +19,8 @@ Read `README.md` and `docs/ARCHITECTURE.md`. Inspect service status before chang
 
 ## Boundaries
 
-- Primary SQLite is authoritative for state, events, metrics, and champions.
+- Primary CockroachDB is authoritative for state, events, metrics, and champions.
+- `DATABASE_URL` is mandatory. Do not add a local registry backend or fallback.
 - `TournamentDataset` owns the immutable train/validation/test snapshot.
 - Secondary workers receive only fingerprinted jobs and return result bundles.
 - Protected test/holdout data never leaves the primary server.
@@ -31,7 +32,7 @@ Make small changes with `apply_patch`; run focused tests and then `.venv/bin/pyt
 
 ## Operations
 
-Use the configured SSH key and host variables. For failures, check key-only authentication, coordinator journal, and `sg-tunnel.service` before changing credentials. Keep `COMPUTE_WORKERS=16` unless capacity evidence supports a change. Avoid destructive git/filesystem commands.
+Use the configured SSH key and host variables. For failures, check key-only authentication, coordinator journal, and `sg-tunnel.service` before changing credentials. Validate CockroachDB connectivity before changing registry configuration. Keep `COMPUTE_WORKERS=16` unless capacity evidence supports a change. Avoid destructive git/filesystem commands.
 
 ## Research policy
 

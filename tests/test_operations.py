@@ -1,26 +1,43 @@
 import json
-import sqlite3
+import gzip
+import hashlib
 
 from xauusd.operations import OperationsManager
 from xauusd.experiment_registry import ExperimentRegistry,ExperimentSpec
+from tests.memory_registry import MemoryRegistry
 
 
 def test_health_detects_database_and_missing_backup(tmp_path,monkeypatch):
- database=tmp_path/"registry.db"
- with sqlite3.connect(database) as db: db.execute("CREATE TABLE test(id INTEGER)")
- manager=OperationsManager(database,tmp_path/"backups",tmp_path/"reports")
+ manager=OperationsManager(MemoryRegistry(),tmp_path/"backups",tmp_path/"reports")
  monkeypatch.chdir(tmp_path); health=manager.health()
  assert health["database"]["integrity"]=="ok" and not health["healthy"]
  assert "backup missing or older than 30 hours" in health["alerts"]
 
 
-def test_backup_uses_sqlite_snapshot_and_manifest(tmp_path,monkeypatch):
- monkeypatch.chdir(tmp_path); database=tmp_path/"data"/"experiments"/"registry.sqlite3"; database.parent.mkdir(parents=True)
- with sqlite3.connect(database) as db: db.execute("CREATE TABLE test(value TEXT)"); db.execute("INSERT INTO test VALUES('safe')")
- (tmp_path/"data"/"tournaments").mkdir(); (tmp_path/"data"/"tournaments"/"active.json").write_text("{}")
- manager=OperationsManager(database,tmp_path/"backups",tmp_path/"reports"); result=manager.backup()
- snapshot=tmp_path/result["directory"]/"registry.sqlite3"
- with sqlite3.connect(snapshot) as db: assert db.execute("SELECT value FROM test").fetchone()[0]=="safe"
+def test_health_uses_configured_cockroach_registry(tmp_path,monkeypatch):
+ class Result:
+  def fetchone(self): return {"one":1}
+ class Connection:
+  def __enter__(self): return self
+  def __exit__(self,*args): pass
+  def execute(self,query):
+   assert query=="SELECT 1"
+   return Result()
+ class Registry:
+  def connect(self): return Connection()
+ manager=OperationsManager(Registry(),tmp_path/"backups",tmp_path/"reports")
+ monkeypatch.chdir(tmp_path); health=manager.health(Registry())
+ assert health["database"]=={"available":True,"integrity":"ok","backend":"cockroachdb"}
+
+
+def test_backup_uses_cockroach_logical_snapshot_and_manifest(tmp_path,monkeypatch):
+ monkeypatch.chdir(tmp_path); registry=MemoryRegistry()
+ registry.register(ExperimentSpec("momentum","f",{},"v","d","e","c"))
+ (tmp_path/"data"/"tournaments").mkdir(parents=True); (tmp_path/"data"/"tournaments"/"active.json").write_text("{}")
+ manager=OperationsManager(registry,tmp_path/"backups",tmp_path/"reports"); result=manager.backup()
+ snapshot=tmp_path/result["directory"]/"registry.json.gz"
+ payload=json.loads(gzip.decompress(snapshot.read_bytes()))
+ assert payload["experiments"][0]["strategy_family"]=="momentum"
  latest=json.loads((tmp_path/"backups"/"latest.json").read_text())
  assert latest["run_id"]==result["run_id"] and snapshot.exists()
  assert result["auxiliary_files"][0]["backup"]=="active.json"
@@ -28,12 +45,11 @@ def test_backup_uses_sqlite_snapshot_and_manifest(tmp_path,monkeypatch):
 
 
 def test_backup_preserves_scaling_checkpoints_with_integrity_manifest(tmp_path,monkeypatch):
- monkeypatch.chdir(tmp_path); database=tmp_path/"data"/"experiments"/"registry.sqlite3"; database.parent.mkdir(parents=True)
- with sqlite3.connect(database) as db: db.execute("CREATE TABLE test(value TEXT)")
+ monkeypatch.chdir(tmp_path); registry=MemoryRegistry()
  checkpoints=tmp_path/"reports"/"tournament"/"scaling-checkpoints"; checkpoints.mkdir(parents=True)
  (checkpoints/"50000.json").write_text('{"checkpoint":50000}')
  (checkpoints/"latest.json").write_text('{"checkpoint":"latest"}')
- manager=OperationsManager(database,tmp_path/"backups",tmp_path/"reports"/"tournament")
+ manager=OperationsManager(registry,tmp_path/"backups",tmp_path/"reports"/"tournament")
  result=manager.backup(); backup=tmp_path/result["directory"]
  assert (backup/"scaling-checkpoints"/"50000.json").read_text()=='{"checkpoint":50000}'
  inventory=result["scaling_checkpoints"]
@@ -47,9 +63,9 @@ def test_backup_preserves_scaling_checkpoints_with_integrity_manifest(tmp_path,m
 
 def test_backup_verification_fails_closed_on_checkpoint_corruption_and_unsafe_path(tmp_path):
  backup=tmp_path/"backup"; checkpoints=backup/"scaling-checkpoints"; checkpoints.mkdir(parents=True)
- with sqlite3.connect(backup/"registry.sqlite3") as db: db.execute("CREATE TABLE test(value TEXT)")
+ registry=backup/"registry.json.gz"; registry.write_bytes(gzip.compress(b'{"experiments":[],"experiment_events":[],"champion_history":[]}'))
  checkpoint=checkpoints/"50000.json"; checkpoint.write_text("original")
- manifest={"run_id":"fixture","registry_bytes":(backup/"registry.sqlite3").stat().st_size,
+ manifest={"run_id":"fixture","registry_bytes":registry.stat().st_size,"registry_sha256":hashlib.sha256(registry.read_bytes()).hexdigest(),
   "scaling_checkpoints":[{"backup":"scaling-checkpoints/50000.json","bytes":8,"sha256":"wrong"},
                          {"backup":"../outside.json","bytes":0,"sha256":"wrong"}]}
  (backup/"manifest.json").write_text(json.dumps(manifest))
@@ -61,9 +77,9 @@ def test_backup_verification_fails_closed_on_checkpoint_corruption_and_unsafe_pa
 
 def test_backup_verification_detects_auxiliary_corruption_and_unsafe_path(tmp_path):
  backup=tmp_path/"backup"; backup.mkdir()
- with sqlite3.connect(backup/"registry.sqlite3") as db: db.execute("CREATE TABLE test(value TEXT)")
+ registry=backup/"registry.json.gz"; registry.write_bytes(gzip.compress(b'{"experiments":[],"experiment_events":[],"champion_history":[]}'))
  report=backup/"worker-status.json"; report.write_text("status")
- manifest={"run_id":"fixture","registry_bytes":(backup/"registry.sqlite3").stat().st_size,
+ manifest={"run_id":"fixture","registry_bytes":registry.stat().st_size,"registry_sha256":hashlib.sha256(registry.read_bytes()).hexdigest(),
   "auxiliary_files":[{"backup":"worker-status.json","bytes":6,"sha256":"wrong"},
                      {"backup":"../outside.json","bytes":0,"sha256":"wrong"}]}
  (backup/"manifest.json").write_text(json.dumps(manifest))
@@ -74,48 +90,44 @@ def test_backup_verification_detects_auxiliary_corruption_and_unsafe_path(tmp_pa
 
 
 def test_compaction_compresses_trade_ledgers_and_updates_registry(tmp_path):
- database=tmp_path/"registry.db"; ledger=tmp_path/"trades.csv"; ledger.write_text("pnl\n"+("1.25\n"*1000))
- artifacts=json.dumps({"trades":str(ledger)})
- with sqlite3.connect(database) as db:
-  db.execute("CREATE TABLE experiments(id INTEGER,artifacts_json TEXT)"); db.execute("INSERT INTO experiments VALUES(1,?)",(artifacts,))
- result=OperationsManager(database,tmp_path/"b",tmp_path/"r").compact_artifacts()
- with sqlite3.connect(database) as db: updated=json.loads(db.execute("SELECT artifacts_json FROM experiments").fetchone()[0])
+ registry=MemoryRegistry(); ledger=tmp_path/"trades.csv"; ledger.write_text("pnl\n"+("1.25\n"*1000))
+ registry.register(ExperimentSpec("momentum","f",{},"v","d","e","c")); claimed=registry.claim_next("w")
+ registry.complete(claimed["id"],"w",{},artifacts={"trades":str(ledger)})
+ result=OperationsManager(registry,tmp_path/"b",tmp_path/"r").compact_artifacts()
+ updated=registry.get(claimed["id"])["artifacts"]
  assert result["compressed"]==1 and result["bytes_saved"]>0
  assert not ledger.exists() and updated["trades"].endswith(".gz")
 
 
 def test_remote_artifact_plan_is_deterministic_and_protects_candidates(tmp_path):
- database=tmp_path/"registry.db"; output=tmp_path/"plan.json"
- with sqlite3.connect(database) as db:
-  db.execute("CREATE TABLE experiments(id INTEGER,fingerprint TEXT,status TEXT,promoted INTEGER,validation_json TEXT,artifacts_json TEXT)")
-  for i,validation in ((1,{"passed":False,"gates":{"a":False,"b":False}}),(2,{"passed":True,"gates":{"a":True}})):
-   db.execute("INSERT INTO experiments VALUES(?,?,?,?,?,?)",(i,"f"*64,"completed",0,json.dumps(validation),json.dumps({"remote_directory":f"/opt/xauusd/var/results/xauusd-result-{i}"})))
- result=OperationsManager(database,tmp_path/"b",tmp_path/"r").remote_artifacts_plan(output,audit_percent=0)
+ registry=MemoryRegistry(); output=tmp_path/"plan.json"
+ for i,validation in ((1,{"passed":False,"gates":{"a":False,"b":False}}),(2,{"passed":True,"gates":{"a":True}})):
+  registry.register(ExperimentSpec("momentum",f"f{i}",{},"v","d","e","c")); claimed=registry.claim_next("w")
+  registry.complete(claimed["id"],"w",{},validation,{"remote_directory":f"/opt/xauusd/var/results/xauusd-result-{i}"})
+ manager=OperationsManager(registry,tmp_path/"b",tmp_path/"r")
+ result=manager.remote_artifacts_plan(output,audit_percent=0)
  plan=json.loads(output.read_text())
  assert result["candidate_count"]==1 and result["protected_count"]==1
  assert plan["candidates"][0]["experiment_id"]==1 and plan["protected"][0]["reason"]=="validation_passed"
- OperationsManager(database,tmp_path/"b",tmp_path/"r").remote_artifacts_plan(output,0)
+ manager.remote_artifacts_plan(output,0)
  repeated=json.loads(output.read_text())
  assert repeated["candidates"]==plan["candidates"] and repeated["protected"]==plan["protected"]
 
 
 def test_remote_artifact_apply_is_resumable_and_reconciles(tmp_path):
- database=tmp_path/"registry.db"; remote=tmp_path/"results"/"xauusd-result-1"; remote.mkdir(parents=True)
+ registry=MemoryRegistry(); remote=tmp_path/"results"/"xauusd-result-1"; remote.mkdir(parents=True)
  (remote/"result.json").write_text("{}"); (remote/"trades.csv.gz").write_bytes(b"trade"); (remote/"equity.parquet").write_bytes(b"equity")
  validation={"passed":False,"gates":{"a":False,"b":False}}
- with sqlite3.connect(database) as db:
-  db.execute("CREATE TABLE experiments(id INTEGER,fingerprint TEXT,status TEXT,promoted INTEGER,validation_json TEXT,artifacts_json TEXT)")
-  db.execute("CREATE TABLE experiment_events(experiment_id INTEGER,occurred_at TEXT,event TEXT,payload_json TEXT)")
-  db.execute("INSERT INTO experiments VALUES(1,?,'completed',0,?,?)",("f"*64,json.dumps(validation),json.dumps({"remote_directory":str(remote)})))
- manager=OperationsManager(database,tmp_path/"b",tmp_path/"r"); plan_path=tmp_path/"plan.json"
+ registry.register(ExperimentSpec("momentum","f",{},"v","d","e","c")); claimed=registry.claim_next("w")
+ registry.complete(claimed["id"],"w",{},validation,{"remote_directory":str(remote)})
+ manager=OperationsManager(registry,tmp_path/"b",tmp_path/"r"); plan_path=tmp_path/"plan.json"
  manager.remote_artifacts_plan(plan_path,0); plan=json.loads(plan_path.read_text()); journal=tmp_path/"journal.jsonl"
  result=manager.apply_remote_artifacts_plan(plan_path,plan["plan_digest"],journal,allowed_root=str(tmp_path/"results"))
  assert result["removed_files"]==2 and (remote/"result.json").exists() and not (remote/"equity.parquet").exists()
  assert manager.apply_remote_artifacts_plan(plan_path,plan["plan_digest"],journal,allowed_root=str(tmp_path/"results"))["previously_completed"]==1
  reconciled=manager.reconcile_remote_artifacts(plan_path,plan["plan_digest"],journal)
  assert reconciled["updated"]==1
- with sqlite3.connect(database) as db:
-  artifacts=json.loads(db.execute("SELECT artifacts_json FROM experiments").fetchone()[0]); event=db.execute("SELECT event FROM experiment_events").fetchone()[0]
+ artifacts=registry.get(1)["artifacts"]; event=registry.events(1)[-1]["event"]
  assert not artifacts["detail_retention"]["detailed"] and event=="remote_artifacts_compacted"
 
 
@@ -134,7 +146,7 @@ def test_artifact_retention_inventory_reports_policy_and_file_mismatches(tmp_pat
 
 
 def test_scaling_checkpoint_uses_registry_and_measured_stage_evidence(tmp_path):
- registry=ExperimentRegistry(tmp_path/"registry.db")
+ registry=MemoryRegistry()
  for number in range(2):
   spec=ExperimentSpec("momentum",f"formula-{number}",{"window":number+1},"v","d","e","c")
   registry.register(spec); claimed=registry.claim_next(f"w-{number}")
@@ -145,7 +157,7 @@ def test_scaling_checkpoint_uses_registry_and_measured_stage_evidence(tmp_path):
    "duration":{"median_seconds":4,"p95_seconds":7},"stage_duration":{
     "dispatching":{"median_seconds":.3},"computing":{"median_seconds":3.4},"importing":{"median_seconds":.1}},
    "telemetry":{"memory":{"percent":20},"disk":{"percent":30},"network":{"rx_bytes_per_second":10}}}))
- report=OperationsManager().scaling_checkpoint(registry,status,target=100)
+ report=OperationsManager(MemoryRegistry()).scaling_checkpoint(registry,status,target=100)
  assert report["registry"]["completed"]==1 and report["failure_rate"]==.5
  assert report["duplicate_fingerprints"]==0 and report["measured_bottleneck"]=="secondary_compute"
  assert report["checkpoints"]["50000"]["status"]=="pending"
@@ -153,7 +165,7 @@ def test_scaling_checkpoint_uses_registry_and_measured_stage_evidence(tmp_path):
 
 
 def test_checkpoint_capture_is_atomic_and_first_observation_is_immutable(tmp_path,monkeypatch):
- manager=OperationsManager(); output=tmp_path/"checkpoints"; reports=[
+ manager=OperationsManager(MemoryRegistry()); output=tmp_path/"checkpoints"; reports=[
   {"registry":{"completed":60_000},"checkpoints":{}},
   {"registry":{"completed":110_000},"checkpoints":{}},
   {"registry":{"completed":120_000},"checkpoints":{}},

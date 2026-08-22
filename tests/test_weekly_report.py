@@ -3,10 +3,11 @@ from datetime import datetime,timezone
 from xauusd.experiment_registry import ExperimentRegistry,ExperimentSpec
 from xauusd.weekly_report import (WeeklyTournamentReport,classify_loss_source,gate_analytics,
                                   parameter_stability_analytics,selection_bias_analytics)
+from tests.memory_registry import MemoryRegistry
 
 
 def test_weekly_report_tracks_throughput_families_and_multiple_testing(tmp_path):
- registry=ExperimentRegistry(tmp_path/"registry.db")
+ registry=MemoryRegistry()
  spec=ExperimentSpec("momentum","f",{},"v","d","e","c"); row,_=registry.register(spec); claimed=registry.claim_next("w")
  registry.complete(claimed["id"],"w",{"validation":{"net_profit":2}}, {"score":1.5,"passed":True})
  report=WeeklyTournamentReport(registry,tmp_path/"weekly").build(datetime.now(timezone.utc))

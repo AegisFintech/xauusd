@@ -5,7 +5,6 @@ from pathlib import Path
 import json
 import math
 import shutil
-import sqlite3
 import gzip
 import hashlib
 import os
@@ -14,14 +13,19 @@ from .experiment_registry import ExperimentRegistry
 
 
 class OperationsManager:
- def __init__(self,registry_path=Path("data/experiments/registry.sqlite3"),
+ def __init__(self,registry: ExperimentRegistry | None=None,
               backup_root=Path("backups/tournament"),reports=Path("reports/tournament")):
-  self.registry_path=Path(registry_path); self.backup_root=Path(backup_root); self.reports=Path(reports)
+  self.registry=registry or ExperimentRegistry(initialize=False)
+  self.backup_root=Path(backup_root); self.reports=Path(reports)
 
- def health(self) -> dict:
-  database={"available":self.registry_path.exists(),"integrity":"missing"}
-  if self.registry_path.exists():
-   with sqlite3.connect(self.registry_path) as db: database["integrity"]=db.execute("PRAGMA quick_check").fetchone()[0]
+ def health(self,registry: ExperimentRegistry | None=None) -> dict:
+  registry=registry or self.registry
+  database={"available":False,"integrity":"unavailable","backend":"cockroachdb"}
+  try:
+   with registry.connect() as db: db.execute("SELECT 1").fetchone()
+   database.update({"available":True,"integrity":"ok"})
+  except Exception as error:
+   database["error_type"]=type(error).__name__
   disk=shutil.disk_usage(Path.cwd()); free_percent=100*disk.free/disk.total
   latest_path=self.backup_root/"latest.json"
   latest=json.loads(latest_path.read_text()) if latest_path.exists() else None
@@ -169,8 +173,13 @@ class OperationsManager:
  def backup(self) -> dict:
   run_id=datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"); directory=self.backup_root/run_id
   directory.mkdir(parents=True,exist_ok=False)
-  destination=directory/"registry.sqlite3"
-  with sqlite3.connect(self.registry_path) as source,sqlite3.connect(destination) as target: source.backup(target)
+  destination=directory/"registry.json.gz"; snapshot={}
+  with self.registry.connect() as db:
+   for table in ("experiments","experiment_events","champion_history"):
+    snapshot[table]=[dict(row) for row in db.execute(f"SELECT * FROM {table} ORDER BY id").fetchall()]
+  encoded=json.dumps(snapshot,sort_keys=True,separators=(",",":"),default=str).encode()
+  with gzip.open(destination,"wb",compresslevel=6) as target: target.write(encoded)
+  registry_sha256=hashlib.sha256(destination.read_bytes()).hexdigest()
   copied=[]; auxiliary_inventory=[]
   for source in (Path("data/tournaments/active.json"),self.reports/"worker-status.json",
                  self.reports/"adaptive.json",self.reports/"proposals.json"):
@@ -191,7 +200,8 @@ class OperationsManager:
       "bytes":target.stat().st_size,"sha256":hashlib.sha256(target.read_bytes()).hexdigest()})
     copied.append(str(source))
   state={"run_id":run_id,"created_at":datetime.now(timezone.utc).isoformat(),"directory":str(directory),
-         "registry_bytes":destination.stat().st_size,"copied":copied,"auxiliary_files":auxiliary_inventory,
+         "registry_bytes":destination.stat().st_size,"registry_sha256":registry_sha256,
+         "registry_format":"cockroachdb-logical-json-v1","copied":copied,"auxiliary_files":auxiliary_inventory,
          "scaling_checkpoints":checkpoint_inventory}
   (directory/"manifest.json").write_text(json.dumps(state,indent=2))
   latest=self.backup_root/"latest.json"; temporary=latest.with_suffix(".json.tmp"); temporary.write_text(json.dumps(state,indent=2)); temporary.replace(latest)
@@ -200,20 +210,23 @@ class OperationsManager:
  @staticmethod
  def verify_backup(directory: Path) -> dict:
   directory=Path(directory).resolve(); errors=[]; checkpoints=[]; auxiliary=[]
-  manifest_path=directory/"manifest.json"; registry_path=directory/"registry.sqlite3"
+  manifest_path=directory/"manifest.json"; registry_path=directory/"registry.json.gz"
   try: manifest=json.loads(manifest_path.read_text())
   except (OSError,json.JSONDecodeError) as exc:
    return {"valid":False,"directory":str(directory),"registry_integrity":None,
            "checkpoint_files":0,"errors":[f"manifest unreadable: {type(exc).__name__}"]}
   integrity=None
-  if not registry_path.is_file(): errors.append("registry.sqlite3 missing")
+  if not registry_path.is_file(): errors.append("registry.json.gz missing")
   else:
    expected=manifest.get("registry_bytes")
    if expected is not None and registry_path.stat().st_size!=expected: errors.append("registry size mismatch")
    try:
-    with sqlite3.connect(f"file:{registry_path}?mode=ro",uri=True) as db: integrity=db.execute("PRAGMA quick_check").fetchone()[0]
+    hash_ok=hashlib.sha256(registry_path.read_bytes()).hexdigest()==manifest.get("registry_sha256")
+    payload=json.loads(gzip.decompress(registry_path.read_bytes()))
+    structure_ok=set(payload)=={"experiments","experiment_events","champion_history"}
+    integrity="ok" if hash_ok and structure_ok else "failed"
     if integrity!="ok": errors.append("registry integrity check failed")
-   except sqlite3.Error: errors.append("registry integrity check failed")
+   except (OSError,gzip.BadGzipFile,json.JSONDecodeError): errors.append("registry integrity check failed")
   for item in manifest.get("scaling_checkpoints") or []:
    relative=Path(item.get("backup") or "")
    target=(directory/relative).resolve()
@@ -229,7 +242,7 @@ class OperationsManager:
    checkpoints.append(result)
   for item in manifest.get("auxiliary_files") or []:
    relative=Path(item.get("backup") or ""); target=(directory/relative).resolve()
-   safe=target.parent==directory and target.name not in {"manifest.json","registry.sqlite3","latest.json"}
+   safe=target.parent==directory and target.name not in {"manifest.json","registry.json.gz","latest.json"}
    result={"backup":str(relative),"valid":False}
    if not safe: errors.append(f"unsafe auxiliary path: {relative}")
    elif not target.is_file(): errors.append(f"auxiliary file missing: {relative}")
@@ -245,9 +258,10 @@ class OperationsManager:
 
  def compact_artifacts(self) -> dict:
   compressed=skipped=0; before=after=0
-  with sqlite3.connect(self.registry_path) as db:
+  with self.registry.connect() as db:
    rows=db.execute("SELECT id,artifacts_json FROM experiments WHERE artifacts_json IS NOT NULL").fetchall()
-   for experiment_id,encoded in rows:
+   for row in rows:
+    experiment_id,encoded=row["id"],row["artifacts_json"]
     artifacts=json.loads(encoded); changed=False
     for key in ("trades","holdout_trades"):
      value=artifacts.get(key)
@@ -290,8 +304,7 @@ class OperationsManager:
 
  def remote_artifacts_plan(self,output=Path("reports/tournament/remote-artifact-compaction-plan.json"),audit_percent=1) -> dict:
   candidates=[]; protected=[]
-  with sqlite3.connect(self.registry_path) as db:
-   db.row_factory=sqlite3.Row
+  with self.registry.connect() as db:
    rows=db.execute("""SELECT id,fingerprint,status,promoted,validation_json,artifacts_json
                       FROM experiments WHERE status='completed' AND artifacts_json IS NOT NULL ORDER BY id""").fetchall()
   for row in rows:
@@ -358,11 +371,11 @@ class OperationsManager:
    if eid not in candidates or row["fingerprint"]!=candidates[eid]["fingerprint"]: raise ValueError("journal does not match plan")
    rows[eid]=row
   now=datetime.now(timezone.utc).isoformat(); updated=0
-  with sqlite3.connect(self.registry_path) as db:
+  with self.registry.connect() as db:
    for eid,row in rows.items():
     current=db.execute("SELECT artifacts_json FROM experiments WHERE id=? AND status='completed'",(eid,)).fetchone()
     if not current: raise ValueError(f"experiment {eid} is not completed")
-    artifacts=json.loads(current[0] or "{}"); artifacts["detail_retention"]={"detailed":False,
+    artifacts=json.loads(current["artifacts_json"] or "{}"); artifacts["detail_retention"]={"detailed":False,
      "reason":"historical_ordinary_reject_compacted","plan_digest":digest,"compacted_at":row["completed_at"],
      "removed_files":row["removed_files"],"removed_bytes":row["removed_bytes"]}
     db.execute("UPDATE experiments SET artifacts_json=? WHERE id=?",(json.dumps(artifacts,sort_keys=True,separators=(",",":")),eid))

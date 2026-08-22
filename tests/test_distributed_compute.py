@@ -5,12 +5,13 @@ from xauusd.distributed_compute import PROTOCOL_VERSION,RemoteComputeBridge,comp
 from xauusd.experiment_registry import ExperimentRegistry,ExperimentSpec,canonical_json
 from xauusd.tournament_data import TournamentDataConfig,TournamentDataset
 from xauusd.search_space import catalog_size
+from tests.memory_registry import MemoryRegistry
 
 
 def setup(tmp_path):
  dataset=TournamentDataset(TournamentDataConfig(root=tmp_path/"data",active_path=tmp_path/"active.json",days=30))
  manifest=dataset.create(synthetic_bars(60*24*40,seed=4))
- registry=ExperimentRegistry(tmp_path/"registry.sqlite3")
+ registry=MemoryRegistry()
  spec=ExperimentSpec("momentum","formula",{"strategy":{"fast":8,"slow":34,"threshold_atr":.1}},
                      manifest["version"],manifest["fingerprint"],manifest["engine_version"],manifest["cost_model_version"])
  row,_=registry.register(spec); claimed=registry.claim_next("remote")
@@ -40,7 +41,7 @@ def test_compute_job_rejects_wrong_dataset(tmp_path):
 
 
 def test_remote_artifact_fetch_restricts_path_and_name(tmp_path,monkeypatch):
- monkeypatch.setenv("COMPUTE_HOST","example"); bridge=RemoteComputeBridge(root=tmp_path)
+ monkeypatch.setenv("COMPUTE_HOST","example"); bridge=RemoteComputeBridge(registry=MemoryRegistry(),root=tmp_path)
  for path,name in (("/etc","equity.parquet"),("/tmp/xauusd-result-1","secret")):
   try: bridge.fetch_artifact(path,name,tmp_path/"out")
   except ValueError: pass
@@ -49,10 +50,10 @@ def test_remote_artifact_fetch_restricts_path_and_name(tmp_path,monkeypatch):
 
 def test_remote_result_root_is_persistent_and_below_compute_root(tmp_path,monkeypatch):
  monkeypatch.setenv("COMPUTE_HOST","example")
- bridge=RemoteComputeBridge(root=tmp_path)
+ bridge=RemoteComputeBridge(registry=MemoryRegistry(),root=tmp_path)
  assert bridge.remote_result_root=="/opt/xauusd/var/results"
  monkeypatch.setenv("COMPUTE_RESULT_ROOT","/tmp/results")
- try: RemoteComputeBridge(root=tmp_path)
+ try: RemoteComputeBridge(registry=MemoryRegistry(),root=tmp_path)
  except ValueError: pass
  else: raise AssertionError("unsafe result root accepted")
 
@@ -63,7 +64,7 @@ def test_result_root_is_not_created_per_scenario(tmp_path):
 
 
 def test_remote_telemetry_has_bpytop_capacity_fields(tmp_path,monkeypatch):
- monkeypatch.setenv("COMPUTE_HOST","example"); bridge=RemoteComputeBridge(root=tmp_path)
+ monkeypatch.setenv("COMPUTE_HOST","example"); bridge=RemoteComputeBridge(registry=MemoryRegistry(),root=tmp_path)
  class Result:
   returncode=0
   stdout='{"cpu":{"total_percent":50,"per_core":[40,60],"cores":2,"load":[1,2,3]},"memory":{"percent":25},"disk":{"percent":10},"network":{},"tunnel":{"active":true},"clock":{"synchronized":true,"offset_seconds":0.001}}'
@@ -73,7 +74,7 @@ def test_remote_telemetry_has_bpytop_capacity_fields(tmp_path,monkeypatch):
 
 
 def test_control_plane_refills_at_ten_percent(tmp_path,monkeypatch):
- dataset,experiment=setup(tmp_path); registry=ExperimentRegistry(tmp_path/"registry.sqlite3")
+ dataset,experiment=setup(tmp_path); registry=MemoryRegistry()
  monkeypatch.setenv("COMPUTE_HOST","example")
  bridge=RemoteComputeBridge(registry,dataset,tmp_path/"reports")
  calls=[]
@@ -92,7 +93,7 @@ def test_remote_failure_codes_are_structured():
 
 
 def test_readiness_uses_most_constrained_mount(tmp_path,monkeypatch):
- monkeypatch.setenv("COMPUTE_HOST","example"); bridge=RemoteComputeBridge(root=tmp_path)
+ monkeypatch.setenv("COMPUTE_HOST","example"); bridge=RemoteComputeBridge(registry=MemoryRegistry(),root=tmp_path)
  bridge.telemetry={"mounts":{"root":{"percent":40},"tmp":{"percent":91}},"clock":{"synchronized":True,"offset_seconds":0}}
  assert bridge.readiness()["state"]=="RESOURCE_EXHAUSTED" and not bridge.readiness()["ready"]
  bridge.telemetry={"mounts":{"root":{"percent":40},"tmp":{"percent":81}},"clock":{"synchronized":True,"offset_seconds":0}}
@@ -101,7 +102,7 @@ def test_readiness_uses_most_constrained_mount(tmp_path,monkeypatch):
 
 def test_readiness_degrades_for_unsynchronized_or_drifted_clock(tmp_path,monkeypatch):
  monkeypatch.setenv("COMPUTE_HOST","example"); monkeypatch.setenv("COMPUTE_CLOCK_WARNING_SECONDS",".5")
- bridge=RemoteComputeBridge(root=tmp_path)
+ bridge=RemoteComputeBridge(registry=MemoryRegistry(),root=tmp_path)
  bridge.telemetry={"mounts":{"root":{"percent":40}},"clock":{"synchronized":False,"offset_seconds":0}}
  assert bridge.readiness()["state"]=="DEGRADED" and bridge.readiness()["clock_degraded"]
  bridge.telemetry["clock"]={"synchronized":True,"offset_seconds":.6}
@@ -113,7 +114,7 @@ def test_readiness_degrades_for_unsynchronized_or_drifted_clock(tmp_path,monkeyp
 def test_coordinator_drain_flag_is_reversible(tmp_path,monkeypatch):
  monkeypatch.setenv("COMPUTE_HOST","example")
  monkeypatch.setenv("COMPUTE_DRAIN_PATH",str(tmp_path/"DRAIN"))
- bridge=RemoteComputeBridge(root=tmp_path)
+ bridge=RemoteComputeBridge(registry=MemoryRegistry(),root=tmp_path)
  assert not bridge.drain_status()["draining"]
  assert bridge.drain()["draining"] and bridge.drain_path.exists()
  assert bridge.drain_status()["requested_at"]

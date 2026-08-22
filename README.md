@@ -84,12 +84,7 @@ flowchart LR
     style API fill:#1f5b78,color:#fff
 ```
 
-Registry selection:
-
-- With `DATABASE_URL`: PostgreSQL-compatible backend. Production currently uses CockroachDB with `read_committed` isolation.
-- Without `DATABASE_URL`: SQLite at `data/experiments/registry.sqlite3`, using WAL and foreign keys.
-
-Do not run two authoritative registries for one tournament.
+CockroachDB is the only experiment registry. `DATABASE_URL` is mandatory, and connections use `read_committed` isolation by default. The application fails closed when the URL is absent; there is no local registry fallback.
 
 ## Research workflow
 
@@ -261,7 +256,7 @@ Start a local-only dashboard:
 |---|---|
 | `CTRADER_*` | Read-only historical data credentials/account. |
 | `DASHBOARD_*`, `PORT` | API authentication and dashboard port. |
-| `DATABASE_URL` | Active PostgreSQL-compatible registry; omit for SQLite. |
+| `DATABASE_URL` | Required CockroachDB registry connection. |
 | `DATABASE_URL_DIRECT` | Direct administration/migration endpoint. |
 | `DATABASE_TRANSACTION_ISOLATION` | `read_committed` or `serializable`. |
 | `COCKROACH_*` | Cluster metadata and CA path. |
@@ -381,7 +376,7 @@ For complete `compute-job` result directories, compare bundle metadata, metrics,
 | `xauusd/research.py`, `search_space.py` | Causal strategies and deterministic grids. |
 | `xauusd/engine.py` | Event simulation, costs, ledger, and metrics. |
 | `xauusd/validation.py`, `tournament_runner.py` | Gates, walk-forward, bootstrap, holdout. |
-| `xauusd/experiment_registry.py` | SQLite/PostgreSQL-compatible state/events. |
+| `xauusd/experiment_registry.py` | CockroachDB state, events, metrics, and champions. |
 | `xauusd/distributed_compute.py` | SSH jobs, telemetry, retry, recovery, artifacts. |
 | `xauusd/adaptive_search.py`, `strategy_proposals.py` | Search extensions and provenance. |
 | `xauusd/codex_workflow.py` | Review-only proposal workflow. |

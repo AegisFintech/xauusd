@@ -1,5 +1,6 @@
 from xauusd.adaptive_search import AdaptiveSearch,BOUNDS,semantic_identity,mutation_analytics
 from xauusd.experiment_registry import ExperimentRegistry,ExperimentSpec
+from tests.memory_registry import MemoryRegistry
 
 
 DATASET={"version":"v1","fingerprint":"abc","engine_version":"e1","cost_model_version":"c1"}
@@ -15,7 +16,7 @@ def completed(registry,family,value,score):
 
 
 def test_adaptive_search_creates_bounded_lineage(tmp_path):
- registry=ExperimentRegistry(tmp_path/"registry.db")
+ registry=MemoryRegistry()
  parent=completed(registry,"momentum",0,2.0)
  report=AdaptiveSearch(registry,tmp_path/"adaptive.json").generate(DATASET,5)
  assert report["created"]==5
@@ -28,14 +29,14 @@ def test_adaptive_search_creates_bounded_lineage(tmp_path):
 
 
 def test_adaptive_search_preserves_family_exploration(tmp_path):
- registry=ExperimentRegistry(tmp_path/"registry.db")
+ registry=MemoryRegistry()
  completed(registry,"momentum",0,10); completed(registry,"micro_trend",1,1)
  report=AdaptiveSearch(registry,tmp_path/"adaptive.json").generate(DATASET,50)
  assert set(report["family_counts"])=={"micro_trend","momentum"}
 
 
 def test_small_adaptive_batch_round_robins_families(tmp_path):
- registry=ExperimentRegistry(tmp_path/"registry.db")
+ registry=MemoryRegistry()
  completed(registry,"mean_reversion",0,10); completed(registry,"momentum",1,1)
  report=AdaptiveSearch(registry,tmp_path/"adaptive.json").generate(DATASET,4)
  assert report["family_counts"]=={"mean_reversion":2,"momentum":2}
@@ -48,7 +49,7 @@ def test_semantic_identity_ignores_provenance():
 
 
 def test_adaptive_generation_walks_past_duplicates(tmp_path):
- registry=ExperimentRegistry(tmp_path/"registry.db"); completed(registry,"momentum",0,2)
+ registry=MemoryRegistry(); completed(registry,"momentum",0,2)
  engine=AdaptiveSearch(registry,tmp_path/"adaptive.json")
  first=engine.generate(DATASET,3); second=engine.generate(DATASET,3)
  assert first["created"]==3 and second["created"]==3 and second["duplicates"]>=3
@@ -77,12 +78,11 @@ def test_mutation_analytics_measures_improvement_and_duplicates():
 
 
 def test_adaptive_analyze_updates_existing_report(tmp_path):
- registry=ExperimentRegistry(tmp_path/"registry.db"); completed(registry,"momentum",0,2)
+ registry=MemoryRegistry(); completed(registry,"momentum",0,2)
  row=registry.list("completed",1)[0]; parameters=row["parameters"]
  parameters["provenance"]={"generator":"adaptive-search-v1","generation":1,"mutated_parameter":"fast",
                            "multiplier":1.15,"parent_validation_score":1.0}
- with registry.connect() as db:
-  db.execute("UPDATE experiments SET parameters_json=? WHERE id=?",(__import__('json').dumps(parameters),row["id"]))
+ registry.rows[row["id"]-1]["parameters"]=parameters
  path=tmp_path/"adaptive.json"; path.write_text('{"generation":1}')
  history=tmp_path/"adaptive"; history.mkdir(); (history/"generation-0001.json").write_text('{"created":1,"duplicates":0}')
  report=AdaptiveSearch(registry,path).analyze()

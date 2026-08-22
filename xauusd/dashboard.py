@@ -196,9 +196,10 @@ def weekly_report_status() -> dict | None:
     return read_json(REPORTS/"tournament"/"weekly"/"latest.json")
 
 
-def registry() -> ExperimentRegistry | None:
-    path=Path(os.getenv("XAUUSD_EXPERIMENT_DB", "data/experiments/registry.sqlite3"))
-    return ExperimentRegistry(path,initialize=False) if path.exists() else None
+def registry() -> ExperimentRegistry:
+    if not os.getenv("DATABASE_URL"):
+        raise RuntimeError("DATABASE_URL is required for the dashboard registry")
+    return ExperimentRegistry(initialize=False)
 
 
 def recent_logs(lines: int=30) -> list[str]:
@@ -213,7 +214,7 @@ def live_snapshot(include_static: bool=True) -> dict:
     database=registry(); summary=database.summary() if database else {"total":0,"by_status":{},"strategy_families":0,"promoted":0}
     result={"sent_at":datetime.now(timezone.utc).isoformat(),"tournament_worker":tournament_worker_status(),
             "experiments":{**summary,"catalog_size":catalog_size()},"system":system_metrics(),
-            "operations":OperationsManager().health(),"adaptive":adaptive_status(),"distributed":distributed_status()}
+            "operations":OperationsManager(database).health(),"adaptive":adaptive_status(),"distributed":distributed_status()}
     if include_static:
         result.update({"champion":tournament_champion() or read_json(REPORTS/"champion.json"),
                        "proposals":proposal_status(),"codex":codex_status(),
@@ -249,7 +250,7 @@ def api_status(_: str = Depends(authenticate)):
             "weekly":weekly_report_status(),
             "shadow":ShadowTradingReadiness(registry=local_registry).readiness() if local_registry else
             {"ready":False,"mode":"shadow_only","blocked_reason":"local registry unavailable"},
-            "operations":OperationsManager().health(),
+            "operations":OperationsManager(local_registry).health(),
             "tournament": tournament_status(), "experiments": {**(local_registry.summary() if local_registry else
             {"total":0,"by_status":{},"strategy_families":0,"promoted":0}),"catalog_size":catalog_size()}}
 

@@ -56,8 +56,9 @@ class TournamentRunner:
                  dataset: TournamentDataset | None = None,
                  output_root: Path = Path("reports/tournament"),
                  gates: TournamentGates | None = None,
-                 worker_id: str | None = None):
-        self.registry = registry or ExperimentRegistry()
+                 worker_id: str | None = None,
+                 connect_registry: bool = True):
+        self.registry = registry if registry is not None else ExperimentRegistry() if connect_registry else None
         self.dataset = dataset or TournamentDataset()
         self.output_root = output_root
         self.gates = gates or TournamentGates()
@@ -154,6 +155,8 @@ class TournamentRunner:
         return True,holdout,finalist
 
     def run_once(self) -> dict | None:
+        if self.registry is None:
+            raise RuntimeError("a CockroachDB registry is required to run tournament orchestration")
         experiment = self.registry.claim_next(self.worker_id)
         if experiment is None:
             return None

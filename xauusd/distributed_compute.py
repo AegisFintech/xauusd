@@ -113,8 +113,7 @@ def compute_job(job_path: Path,output_directory: Path,dataset: TournamentDataset
         "dataset_fingerprint":experiment["dataset_fingerprint"],"engine_version":experiment["engine_version"],
         "cost_model_version":experiment["cost_model_version"]}).encode()).hexdigest():
         raise ValueError("experiment fingerprint mismatch")
-    runner=TournamentRunner(registry=ExperimentRegistry(output_directory/"unused.sqlite3"),dataset=dataset,
-                            output_root=output_directory)
+    runner=TournamentRunner(dataset=dataset,output_root=output_directory,connect_registry=False)
     strategy,execution=runner.reconstruct(experiment)
     development=runner._backtest("train",strategy,execution)
     validation_result=None
@@ -145,13 +144,11 @@ def compute_job(job_path: Path,output_directory: Path,dataset: TournamentDataset
             "files":files,"artifact_retention":{"detailed":retain_detail,"reason":retention_reason}}
     bundle["result_digest"]=hashlib.sha256(canonical_json(bundle).encode()).hexdigest()
     _atomic_json(output_directory/"result.json",bundle)
-    try: (output_directory/"unused.sqlite3").unlink()
-    except FileNotFoundError: pass
     return bundle
 
 
 class RemoteComputeBridge:
-    """Master-only SSH bridge. The remote host never opens the master SQLite database."""
+    """Primary-only SSH bridge. The secondary never opens the CockroachDB registry."""
     def __init__(self,registry: ExperimentRegistry | None=None,dataset: TournamentDataset | None=None,
                  root: Path=Path("reports/tournament/distributed")):
         self.registry=registry or ExperimentRegistry(); self.dataset=dataset or TournamentDataset(); self.root=root

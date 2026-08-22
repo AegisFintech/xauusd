@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from xauusd.experiment_registry import ExperimentRegistry, ExperimentSpec, PostgresConnection
+from tests.memory_registry import MemoryRegistry
 
 
 def spec(**parameters):
@@ -33,14 +34,14 @@ def test_postgres_connection_uses_configured_read_committed(monkeypatch):
 
 
 def test_registration_rejects_duplicate_identity(tmp_path):
-    registry=ExperimentRegistry(tmp_path/"registry.db")
+    registry=MemoryRegistry()
     first,created=registry.register(spec(entry_z=1.5)); second,created_again=registry.register(spec(entry_z=1.5))
     assert created and not created_again and first["id"]==second["id"]
     assert registry.summary()["total"]==1
 
 
 def test_worker_lifecycle_and_events(tmp_path):
-    registry=ExperimentRegistry(tmp_path/"registry.db"); registry.register(spec(),priority=5)
+    registry=MemoryRegistry(); registry.register(spec(),priority=5)
     claimed=registry.claim_next("worker-1"); registry.heartbeat(claimed["id"],"worker-1")
     result=registry.complete(claimed["id"],"worker-1",{"net_profit":12.},
                              {"passed":True},{"ledger":"trades.csv"},promoted=True)
@@ -50,22 +51,21 @@ def test_worker_lifecycle_and_events(tmp_path):
 
 
 def test_claim_is_priority_ordered_and_failure_is_recorded(tmp_path):
-    registry=ExperimentRegistry(tmp_path/"registry.db")
+    registry=MemoryRegistry()
     registry.register(spec(x=1),priority=1); registry.register(spec(x=2),priority=10)
     claimed=registry.claim_next("w"); assert claimed["parameters"]=={"x":2}
     failed=registry.fail(claimed["id"],"w","boom"); assert failed["status"]=="failed" and failed["error"]=="boom"
 
 
 def test_stale_work_is_requeued(tmp_path):
-    registry=ExperimentRegistry(tmp_path/"registry.db"); registered,_=registry.register(spec()); registry.claim_next("dead")
-    with registry.connect() as db:
-        db.execute("UPDATE experiments SET heartbeat_at=? WHERE id=?", ((datetime.now(timezone.utc)-timedelta(hours=2)).isoformat(),registered["id"]))
+    registry=MemoryRegistry(); registered,_=registry.register(spec()); registry.claim_next("dead")
+    registry.rows[0]["heartbeat_at"]=(datetime.now(timezone.utc)-timedelta(hours=2)).isoformat()
     assert registry.recover_stale(datetime.now(timezone.utc)-timedelta(hours=1))==1
     assert registry.get(registered["id"])["status"]=="queued"
 
 
 def test_leaderboard_orders_validation_score(tmp_path):
- registry=ExperimentRegistry(tmp_path/"registry.db")
+ registry=MemoryRegistry()
  for value,score in ((1,2.0),(2,1.0)):
   row,_=registry.register(spec(x=value)); claimed=registry.claim_next("w")
   registry.complete(claimed["id"],"w",{"validation":{"net_profit":value}}, {"passed":True,"score":score})
@@ -73,19 +73,19 @@ def test_leaderboard_orders_validation_score(tmp_path):
 
 
 def test_replaced_worker_is_recovered_immediately(tmp_path):
- registry=ExperimentRegistry(tmp_path/"registry.db"); row,_=registry.register(spec()); registry.claim_next("old")
+ registry=MemoryRegistry(); row,_=registry.register(spec()); registry.claim_next("old")
  assert registry.recover_other_workers("new")==1 and registry.get(row["id"])["status"]=="queued"
 
 
 def test_remote_error_can_requeue_owned_experiment(tmp_path):
- registry=ExperimentRegistry(tmp_path/"registry.db"); row,_=registry.register(spec()); claimed=registry.claim_next("remote")
+ registry=MemoryRegistry(); row,_=registry.register(spec()); claimed=registry.claim_next("remote")
  result=registry.requeue(claimed["id"],"remote","connection lost")
  assert result["status"]=="queued" and result["worker_id"] is None
  assert registry.events(row["id"])[-1]["event"]=="requeued_remote_error"
 
 
 def test_remote_retry_count_is_durable_and_limit_is_terminal(tmp_path):
- registry=ExperimentRegistry(tmp_path/"registry.db"); row,_=registry.register(spec())
+ registry=MemoryRegistry(); row,_=registry.register(spec())
  claimed=registry.claim_next("remote")
  retried=registry.requeue(claimed["id"],"remote","disk full","RESOURCE_EXHAUSTED",2)
  assert retried["status"]=="queued" and retried["retry_count"]==1
@@ -96,15 +96,14 @@ def test_remote_retry_count_is_durable_and_limit_is_terminal(tmp_path):
  assert registry.events(row["id"])[-1]["event"]=="failed_retry_limit"
 
 
-def test_registry_migrates_retry_columns(tmp_path):
- registry=ExperimentRegistry(tmp_path/"registry.db")
- with registry.connect() as db:
-  columns={row["name"] for row in db.execute("PRAGMA table_info(experiments)")}
- assert {"retry_count","failure_code"} <= columns
+def test_registry_requires_cockroach_database_url(monkeypatch):
+ monkeypatch.delenv("DATABASE_URL",raising=False)
+ with pytest.raises(RuntimeError,match="DATABASE_URL is required"):
+  ExperimentRegistry(initialize=False)
 
 
 def test_replaced_remote_pool_is_recovered_without_touching_current_pool(tmp_path):
- registry=ExperimentRegistry(tmp_path/"registry.db")
+ registry=MemoryRegistry()
  old,_=registry.register(spec(x=1)); current,_=registry.register(spec(x=2))
  registry.claim_next("remote-master-old-1"); registry.claim_next("remote-master-new-1")
  assert registry.recover_worker_prefix("remote-master-","remote-master-new")==1
@@ -112,7 +111,7 @@ def test_replaced_remote_pool_is_recovered_without_touching_current_pool(tmp_pat
 
 
 def test_champion_history_is_atomic_and_requires_improvement(tmp_path):
- registry=ExperimentRegistry(tmp_path/"registry.db")
+ registry=MemoryRegistry()
  rows=[]
  for value in (1,2): rows.append(registry.register(spec(x=value))[0])
  first=registry.promote_champion("dataset-v1",rows[0]["id"],1,2,{"net_profit":10})
