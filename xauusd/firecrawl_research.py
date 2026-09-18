@@ -18,12 +18,16 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+ALLOW_ALL_DOMAINS = "*"
+
+
 def _safe_source_url(value: str, allowed_domains: tuple[str, ...]) -> str:
     parsed = urlparse(value)
     hostname = (parsed.hostname or "").lower().rstrip(".")
     if parsed.scheme != "https" or not hostname or parsed.username or parsed.password:
         raise ValueError("source URL must be HTTPS without embedded credentials")
-    if not any(hostname == domain or hostname.endswith(f".{domain}") for domain in allowed_domains):
+    if ALLOW_ALL_DOMAINS not in allowed_domains and not any(
+            hostname == domain or hostname.endswith(f".{domain}") for domain in allowed_domains):
         raise ValueError("source URL host is not allow-listed")
     if any(token in parsed.query.lower() for token in ("api_key", "apikey", "token=", "secret=", "password=")):
         raise ValueError("source URL query must not contain credentials")

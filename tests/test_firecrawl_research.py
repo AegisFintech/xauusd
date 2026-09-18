@@ -24,3 +24,25 @@ def test_firecrawl_tool_marks_content_as_untrusted_and_applies_content_limit():
     store = InMemorySourceStore(); tool = firecrawl_fetch_tool(client(store, "x" * 100))
     result = tool.handler({"url": "https://reuters.com/markets"})
     assert result["trust"] == "untrusted_external_content" and len(result["content"]) == 20
+
+
+def test_firecrawl_star_domain_allow_allows_any_https_source():
+    store = InMemorySourceStore()
+    client = FirecrawlResearchClient(FirecrawlConfig("not-a-real-key", ("*",), max_content_chars=20), store,
+                                     transport=lambda payload, timeout: {"data": {"markdown": "# Gold"}})
+
+    result = client.fetch("https://sub.anywhere.example/markets/gold?topic=china")
+
+    assert result["source_url"] == "https://sub.anywhere.example/markets/gold?topic=china"
+    assert result["trust"] == "untrusted_external_content"
+    assert store.records[0]["source_url"] == result["source_url"]
+
+
+@pytest.mark.parametrize("url", ["http://anywhere.example/news", "https://key@anywhere.example/news",
+                                 "https://anywhere.example/news?moex_token=x"])
+def test_firecrawl_star_domain_still_rejects_insecure_or_credential_urls(url):
+    client = FirecrawlResearchClient(FirecrawlConfig("not-a-real-key", ("*",), max_content_chars=20),
+                                     InMemorySourceStore(),
+                                     transport=lambda payload, timeout: {"data": {"markdown": "# Gold"}})
+    with pytest.raises(ValueError):
+        client.fetch(url)
