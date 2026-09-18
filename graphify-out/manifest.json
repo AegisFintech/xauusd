@@ -454,5 +454,107 @@
     "seen": 1789725997.938495,
     "ast_hash": "914d85370c698bdc1d5e329e454ab405",
     "semantic_hash": "914d85370c698bdc1d5e329e454ab405"
+  },
+  ".opencode/opencode.json": {
+    "mtime": 1789726024.6544077,
+    "seen": 1789735321.3203812,
+    "ast_hash": "abcc8b9dcd80bca5f9dde6d9f0c3ae79",
+    "semantic_hash": ""
+  },
+  ".opencode/plugins/graphify.js": {
+    "mtime": 1789726024.6544077,
+    "seen": 1789735321.3203855,
+    "ast_hash": "3ea725724bc8ebe483c9f13d6aa1124f",
+    "semantic_hash": ""
+  },
+  ".opencode/skills/graphify/SKILL.md": {
+    "mtime": 1789726024.6504076,
+    "seen": 1789735321.3204842,
+    "ast_hash": "2e9858a59406dd2af786cf4cb74bc610",
+    "semantic_hash": ""
+  },
+  ".opencode/skills/graphify/references/add-watch.md": {
+    "mtime": 1789725944.0223,
+    "seen": 1789735321.3204856,
+    "ast_hash": "d59d027fe449f06aa03905a01184e779",
+    "semantic_hash": ""
+  },
+  ".opencode/skills/graphify/references/exports.md": {
+    "mtime": 1789725944.0223,
+    "seen": 1789735321.3204865,
+    "ast_hash": "9da2a2152e60a22f07f05fed5158f287",
+    "semantic_hash": ""
+  },
+  ".opencode/skills/graphify/references/extraction-spec.md": {
+    "mtime": 1789725944.0223,
+    "seen": 1789735321.3204877,
+    "ast_hash": "42fef56a01698118f7fd722acdadea34",
+    "semantic_hash": ""
+  },
+  ".opencode/skills/graphify/references/github-and-merge.md": {
+    "mtime": 1789725944.0223,
+    "seen": 1789735321.3204887,
+    "ast_hash": "cde13df085e4c492aeb7ba298a996d0d",
+    "semantic_hash": ""
+  },
+  ".opencode/skills/graphify/references/hooks.md": {
+    "mtime": 1789725944.0223,
+    "seen": 1789735321.3204894,
+    "ast_hash": "3f545db6ce646650bb9de588f5512a27",
+    "semantic_hash": ""
+  },
+  ".opencode/skills/graphify/references/query.md": {
+    "mtime": 1789725944.0223,
+    "seen": 1789735321.3204906,
+    "ast_hash": "3c46f8ad006874260614ed8657d02307",
+    "semantic_hash": ""
+  },
+  ".opencode/skills/graphify/references/transcribe.md": {
+    "mtime": 1789725944.0223,
+    "seen": 1789735321.3204916,
+    "ast_hash": "67b6a5fa6c0974e18f60db9f8932fbd8",
+    "semantic_hash": ""
+  },
+  ".opencode/skills/graphify/references/update.md": {
+    "mtime": 1789725944.0223,
+    "seen": 1789735321.320494,
+    "ast_hash": "9378bd03d56baaf78bd738ab3848f142",
+    "semantic_hash": ""
+  },
+  "AGENTS.md": {
+    "mtime": 1789726024.6504076,
+    "seen": 1789735321.320495,
+    "ast_hash": "45a4b12ee100aa68272d0b4cbac0b7e6",
+    "semantic_hash": ""
+  },
+  "README.md": {
+    "mtime": 1789725692.9579642,
+    "seen": 1789735321.3204956,
+    "ast_hash": "5180cdb4709136d2ab1500cf95a3bf0d",
+    "semantic_hash": ""
+  },
+  "docker-compose.yml": {
+    "mtime": 1787306396.8670268,
+    "seen": 1789735321.3204966,
+    "ast_hash": "1f179213c9a47dd06dfc4fe8f04c5087",
+    "semantic_hash": ""
+  },
+  "docs/ARCHITECTURE.md": {
+    "mtime": 1787370641.4205594,
+    "seen": 1789735321.3204975,
+    "ast_hash": "0c77f55a7278d93eba32030b4af70135",
+    "semantic_hash": ""
+  },
+  "docs/DISCOVERY_AND_SCALING_AUDIT_2026-08-19.md": {
+    "mtime": 1787370909.2049065,
+    "seen": 1789735321.3204982,
+    "ast_hash": "fd609156c86bfcebed9d2c13139616a5",
+    "semantic_hash": ""
+  },
+  "requirements.txt": {
+    "mtime": 1786613457.8262482,
+    "seen": 1789735321.3204992,
+    "ast_hash": "25b0086bf36a3f8c88eba17ff13b4598",
+    "semantic_hash": ""
   }
 }
