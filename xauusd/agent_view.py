@@ -79,10 +79,7 @@ _PAGE = """<!doctype html>
     if(c.error_type)return 'error - '+(c.summary||c.error_type);
     return (c.summary?'summary: '+(c.summary||''):'done')+(c.steps!=null?'  ·  '+c.steps+' steps':'');
    case 'assistant':
-    if(c.action==='tool')return 'decided to call '+c.tool+(c.input&&Object.keys(c.input).length?'  ('+pairs(c.input)+')':'');
-    if(c.action==='final')return 'decision  -  '+(c.summary||'see raw json');
-    if(c.content)return String(c.content);
-    return JSON.stringify(c);
+    return humanizeAssistant(c);
    case 'tool_call':
     return 'executing '+c.tool+(c.input&&Object.keys(c.input).length?'  ('+pairs(c.input)+')':'');
    case 'tool_result':
@@ -92,6 +89,23 @@ _PAGE = """<!doctype html>
    default:
     return JSON.stringify(c);
   }
+ }
+ function firstSentence(s){if(!s)return '';const t=String(s).trim();const i=t.search(/[.!?]/);return i>0?t.slice(0,i+1):t;}
+ function humanizeAssistant(c){
+  if(!c||typeof c!=='object')return JSON.stringify(c);
+  if(typeof c.content==='string'){
+   try{const p=JSON.parse(c.content);if(p&&typeof p==='object'&&p.action)return humanizeAssistant(p);}catch(e){}
+   return String(c.content).slice(0,400);
+  }
+  const reason=firstSentence(c.reason);
+  if(c.action==='final')return 'decision  -  '+(c.summary||'')+(reason?'  ('+reason+')':'');
+  if(c.action==='tool'){
+   let line='decided to run '+c.tool;
+   if(c.input&&Object.keys(c.input).length)line+='  ·  '+pairs(c.input);
+   if(reason)line+='  -  '+reason;
+   return line;
+  }
+  return JSON.stringify(c);
  }
  function markEnded(){ended=true;$('more').style.display='none';$('end').style.display='block';}
  async function loadTop(){

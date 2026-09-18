@@ -196,6 +196,20 @@ def _decision_id(provider: str, symbol: str, side: str, quantity: float, market_
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
+def _assistant_step(action: dict[str, Any], raw: str, limit: int) -> dict[str, Any]:
+    """Display-friendly assistant step: parsed action plus the model's plain-English reason."""
+    content = {"action": action["action"], "reply": raw[:limit]}
+    if action["action"] == "final":
+        content["summary"] = action["summary"]
+    else:
+        content["tool"] = action["tool"]
+        content["input"] = _redact_for_transcript(action["input"], limit)
+    reason = action.get("reason")
+    if reason:
+        content["reason"] = reason[:400]
+    return content
+
+
 def _redact_for_transcript(result: dict[str, Any], limit: int) -> dict[str, Any]:
     """Transcript-friendly view: keep structures, bound untrusted string lengths."""
     if isinstance(result, dict):
@@ -355,7 +369,7 @@ class ContinuousAgentRunner:
                 self.transcript.append(self.run_id, tick, "tick_end",
                                        {"summary": "planner error", "steps": step + 1, "error_type": type(exc).__name__})
                 return {"tick": tick, "status": "planner_error", "summary": "planner error", "steps": step + 1}
-            self.transcript.append(self.run_id, tick, "assistant", {"content": raw[:self.config.transcript_content_limit]})
+            self.transcript.append(self.run_id, tick, "assistant", _assistant_step(action, raw, self.config.transcript_content_limit))
             if action["action"] == "final":
                 self.transcript.append(self.run_id, tick, "tick_end",
                                        {"summary": action["summary"], "steps": step + 1})

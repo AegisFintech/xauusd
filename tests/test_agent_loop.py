@@ -162,6 +162,38 @@ def test_runner_final_action_only_records_summary(tmp_path):
     assert [step["phase"] for step in transcript.steps()] == ["tick_start", "assistant", "tick_end"]
 
 
+def test_assistant_steps_carry_parsed_action_and_human_reason(tmp_path):
+    runner, transcript = agent_runner(tmp_path, [
+        ("raw", {"action": "tool", "tool": "canary_signal", "input": {}, "reason": "Check the canary before deciding."}),
+        ("raw", {"action": "final", "summary": "no trade", "reason": "Canary is silent."}),
+    ])
+
+    runner.run_tick()
+
+    assistant = [step for step in transcript.steps() if step["phase"] == "assistant"]
+    assert assistant[0]["content"]["action"] == "tool"
+    assert assistant[0]["content"]["tool"] == "canary_signal"
+    assert assistant[0]["content"]["reason"] == "Check the canary before deciding."
+    assert assistant[1]["content"]["action"] == "final"
+    assert assistant[1]["content"]["summary"] == "no trade"
+    assert assistant[1]["content"]["reason"] == "Canary is silent."
+
+
+def test_assistant_steps_without_reason_remain_well_formed(tmp_path):
+    runner, transcript = agent_runner(tmp_path, [
+        ("raw", {"action": "tool", "tool": "canary_signal", "input": {}}),
+        ("raw", {"action": "final", "summary": "ok"}),
+    ])
+
+    runner.run_tick()
+
+    assistant = [step for step in transcript.steps() if step["phase"] == "assistant"]
+    assert assistant[0]["content"]["tool"] == "canary_signal"
+    assert "reason" not in assistant[0]["content"]
+    assert assistant[1]["content"]["summary"] == "ok"
+    assert "reason" not in assistant[1]["content"]
+
+
 def test_runner_forever_loops_and_stops(tmp_path):
     runner, transcript = agent_runner(tmp_path, [
         ("raw", {"action": "final", "summary": "tick one"}),

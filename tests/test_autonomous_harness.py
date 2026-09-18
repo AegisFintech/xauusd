@@ -54,6 +54,26 @@ def test_unknown_tool_and_extra_action_fields_are_refused_before_execution():
         extra.run("research")
 
 
+def test_optional_display_only_reason_is_accepted_and_string_checked():
+    harness = AutonomousResearchHarness(planner_action({"action": "final", "summary": "ok", "reason": "No signal to act on."}),
+                                        ToolRegistry([tool()]), InMemoryHarnessStore())
+    result = harness.run("research")
+    assert result["summary"] == "ok"
+
+    store = InMemoryHarnessStore()
+    captured = []
+    harness = AutonomousResearchHarness(planner_actions([
+        {"action": "tool", "tool": "research_note", "input": {"topic": "gold"}, "reason": "Investigating gold."},
+        {"action": "final", "summary": "complete"},
+    ], captured), ToolRegistry([tool()]), store)
+    harness.run("research")
+    assert list(store.calls.values())[0]["status"] == "completed"
+
+    with pytest.raises(PlannerResponseError, match="reason"):
+        AutonomousResearchHarness(planner_action({"action": "final", "summary": "x", "reason": 7}),
+                                  ToolRegistry([tool()]), InMemoryHarnessStore()).run("research")
+
+
 def test_invalid_tool_output_retries_then_fails_with_audited_attempts():
     store = InMemoryHarnessStore()
     harness = AutonomousResearchHarness(planner_action({"action": "tool", "tool": "research_note", "input": {"topic": "gold"}}), ToolRegistry([tool(lambda _: {"unexpected": True}, retry_limit=1)]), store)
