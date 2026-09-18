@@ -7,6 +7,7 @@ from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse
 
 from .agent_loop import AgentTranscriptStore, CockroachAgentTranscriptStore
+from .paper_trading import PaperTrading, paper_from_env
 
 DEFAULT_VIEW_HOST = "127.0.0.1"
 DEFAULT_VIEW_PORT = 8100
@@ -32,9 +33,16 @@ _PAGE = """<!doctype html>
  #more{text-align:center;color:#7f8ea3;padding:10px}
  #end{text-align:center;color:#57637a;padding:10px;font-size:12px}
  .k{color:#7f8ea3}
+ #paper{margin-bottom:12px;padding:8px 10px;border:1px solid #2a3444;background:#12151c;border-radius:4px;font-size:12px}
+ #paper .pl{white-space:pre-wrap}
+ #paper .fills{margin-top:4px;color:#7f8ea3;font-size:11px;white-space:pre-wrap}
+ #paper .badge.on{color:#4dab6d}.badge{color:#7f8ea3}.badge.stopped{color:#e3746e}
+ .pos{color:#4dab6d}.neg{color:#e3746e}
+ #paper b{color:#8ab4f8}
 </style></head><body>
 <h1>xauusd autonomous agent &mdash; live thinking <span style="font-weight:400">(newest first)</span></h1>
 <div id="meta">connecting&hellip;</div>
+<div id="paper">paper &mdash; checking&hellip;</div>
 <div id="runs"></div>
 <div id="log"></div>
 <div id="more">load older decisions&hellip;</div>
@@ -149,16 +157,53 @@ _PAGE = """<!doctype html>
     }
    }
    await refreshRuns();
+   await refreshPaper();
   }catch(e){/* transient; next poll retries */}
  }
  function updateMeta(status){
   const detail=(cur?cur:'no run yet')+(status?'  ·  '+status:'');
   $('meta').textContent=detail+'  ·  '+rendered.size+' steps';
  }
+ function fmtMoney(v){const n=Number(v);if(!Number.isFinite(n))return String(v);return n.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});}
+ function fmtPnl(v){const n=Number(v);if(!Number.isFinite(n))return String(v);return (n>=0?'+':'')+n.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});}
+ function durationText(a,b){if(!a||!b)return '';const ms=Math.max(0,new Date(b)-new Date(a));const m=Math.floor(ms/60000);return m<1?'<1 min':(m>=60?(Math.floor(m/60)+'h '+(m%60)+'m'):m+' min');}
+ function renderRun(r){
+  let s='<span class="k">'+esc(r.run_id)+'</span> ('+esc(r.status);
+  if(r.finished_at)s+='  ·  '+esc(fmtTime(r.finished_at));
+  if(r.ticks)s+='  ·  '+r.ticks+' '+(r.ticks===1?'tick':'ticks');
+  const dur=durationText(r.created_at,r.finished_at);
+  if(dur)s+='  ·  '+dur;
+  return s+')';
+ }
  async function refreshRuns(){
   const r=await j('/api/runs?limit=6');
-  const line='recent runs: '+r.runs.map(row=>'<span class="k">'+esc(row.run_id)+'</span> ('+esc(row.status)+(row.finished_at?'  ·  '+esc(fmtTime(row.finished_at)):'')+')').join('  ·  ');
+  const line='recent runs: '+r.runs.map(renderRun).join('  ·  ');
   if(line!==refreshRuns.last){refreshRuns.last=line;$('runs').innerHTML=line;}
+ }
+ function paperHeadline(s, risk){
+  const pnl=s.day_pl>=0?'pos':'neg';
+  let line='<span class="badge '+(s.stopped?'stopped':'on')+'">'+(s.stopped?'STOPPED':'running')+'</span>'
+   +'  ·  equity <b>$'+fmtMoney(s.equity)+'</b>'
+   +'  ·  '+posText(s)
+   +'  ·  '+s.trades_today+'/'+risk.max_trades_per_day+' trades today'
+   +'  ·  day P&L <span class="'+pnl+'">$'+fmtPnl(s.day_pl)+'</span>'
+   +'  ·  realized <span class="'+(s.realized_pl>=0?'pos':'neg')+'">$'+fmtPnl(s.realized_pl)+'</span>'
+   +'  ·  drawdown '+(s.drawdown_pct?s.drawdown_pct.toFixed(2):'0.00')+'%';
+  return '<div class="pl">'+line+'</div>';
+ }
+ function posText(s){
+  if(Math.abs(s.position)<1e-9)return 'flat';
+  return '<b>'+esc(s.side)+'</b> '+s.position.toFixed(2)+' @ $'+fmtMoney(s.average_entry_price);
+ }
+ function renderFill(f){return '<b>'+esc(f.side)+'</b> '+f.quantity+' @ $'+fmtMoney(f.price)+(f.realized_pnl?'  ·  <span class="'+(f.realized_pnl>=0?'pos':'neg')+'">realized $'+fmtPnl(f.realized_pnl)+'</span>':'');}
+ async function refreshPaper(){
+  const p=await j('/api/paper');
+  const sig=JSON.stringify(p);
+  if(sig===refreshPaper.last)return;refreshPaper.last=sig;
+  const s=p.paper.summary, risk=p.paper.risk;
+  let html=paperHeadline(s,risk);
+  if(s.recent_fills.length)html+='<div class="fills">fills: '+s.recent_fills.map(renderFill).join('  ·  ')+'</div>';
+  $('paper').innerHTML=html;
  }
  setInterval(pull,1000);watchSentinel();pull();
  setTimeout(()=>{if(!cur)$('meta').textContent='no run yet  -  agent has not started';},4000);
@@ -166,13 +211,21 @@ _PAGE = """<!doctype html>
 """
 
 
-def create_app(store: AgentTranscriptStore | None = None) -> FastAPI:
+def create_app(store: AgentTranscriptStore | None = None,
+               paper: PaperTrading | None = None) -> FastAPI:
     transcript: AgentTranscriptStore
     if store is None:
         transcript = CockroachAgentTranscriptStore()
     else:
         transcript = store
     transcript.initialize()
+    paper_trading: PaperTrading | None = paper
+
+    def paper_or_default() -> PaperTrading:
+        nonlocal paper_trading
+        if paper_trading is None:
+            paper_trading = paper_from_env()
+        return paper_trading
 
     app = FastAPI(title="xauusd agent view", docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -199,6 +252,13 @@ def create_app(store: AgentTranscriptStore | None = None) -> FastAPI:
         run_status = transcript.run_status(run_id) if run_id else None
         return {"run_id": run_id, "run_status": run_status, "order": "desc" if desc else "asc",
                 "after": after, "before": before, "count": len(rows), "steps": rows}
+
+    @app.get("/api/paper")
+    def paper_endpoint() -> dict[str, Any]:
+        pt = paper_or_default()
+        return {"paper": {"summary": pt.summary(), "risk": {
+            key: getattr(pt.config, key) for key in ("daily_loss_limit", "max_drawdown", "max_position",
+                                                     "max_trades_per_day", "max_market_data_age_seconds")}}}
 
     @app.get("/api/health")
     def health() -> dict[str, str]:

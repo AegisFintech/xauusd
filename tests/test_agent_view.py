@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timedelta, timezone
 import threading
 import time
 from urllib import request
@@ -7,10 +8,16 @@ import pytest
 
 from xauusd.agent_loop import InMemoryAgentTranscriptStore
 from xauusd.agent_view import create_app
+from xauusd.paper_trading import InMemoryPaperTradingStore, PaperDecision, PaperRiskConfig, PaperTrading
 
 
 @pytest.fixture
-def server():
+def paper_trading():
+    return PaperTrading(InMemoryPaperTradingStore(), PaperRiskConfig(max_market_data_age_seconds=120))
+
+
+@pytest.fixture
+def server(paper_trading):
     import uvicorn
 
     store = InMemoryAgentTranscriptStore()
@@ -19,7 +26,7 @@ def server():
     store.append("agent_test_1", 1, "assistant", {"content": "thinking about the bar"})
     store.append("agent_test_1", 1, "tick_end", {"summary": "done", "steps": 2})
 
-    app = create_app(store)
+    app = create_app(store, paper=paper_trading)
     config = uvicorn.Config(app, host="127.0.0.1", port=0, log_level="error")
     server = uvicorn.Server(config)
     thread = threading.Thread(target=server.run, daemon=True)
@@ -44,6 +51,7 @@ def test_index_html_renders_live_view(server):
     assert "raw json" in body
     assert "steps" in body
     assert "&middot;" not in body
+    assert 'id="paper"' in body
 
 
 def test_steps_endpoint_defaults_to_newest_first(server):
@@ -79,3 +87,42 @@ def test_status_endpoint_returns_latest_run(server):
         payload = json.loads(response.read())
     assert payload["latest_run_id"] == "agent_test_1"
     assert payload["latest_run_status"] == "running"
+
+
+def test_runs_endpoint_reports_tick_counts(server):
+    with request.urlopen(server + "/api/runs?limit=6") as response:
+        payload = json.loads(response.read())
+    assert payload["runs"][0]["run_id"] == "agent_test_1"
+    assert payload["runs"][0]["ticks"] == 0
+
+
+def test_paper_endpoint_reports_headline_metrics(server):
+    with request.urlopen(server + "/api/paper") as response:
+        payload = json.loads(response.read())
+    summary = payload["paper"]["summary"]
+    assert summary["position"] == 0.0
+    assert summary["side"] == "flat"
+    assert summary["cash"] == pytest.approx(100_000.0)
+    assert summary["equity"] == pytest.approx(100_000.0)
+    assert summary["day_pl"] == pytest.approx(0.0)
+    assert summary["realized_pl"] == pytest.approx(0.0)
+    assert summary["trades_today"] == 0
+    assert summary["recent_fills"] == []
+    assert payload["paper"]["risk"]["daily_loss_limit"] > 0
+
+
+def test_paper_endpoint_reflects_accepted_fill(server, paper_trading):
+    paper_trading.start("test")
+    now = datetime.now(timezone.utc)
+    result = paper_trading.evaluate(PaperDecision("fill-test-1", "XAUUSD", "BUY", 0.5, 4290.0, now - timedelta(seconds=5)))
+    assert result["accepted"] is True
+
+    with request.urlopen(server + "/api/paper") as response:
+        payload = json.loads(response.read())
+    summary = payload["paper"]["summary"]
+    assert summary["position"] == pytest.approx(0.5)
+    assert summary["side"] == "long"
+    assert summary["trades_today"] == 1
+    assert summary["equity"] == pytest.approx(100_000.0)
+    assert len(summary["recent_fills"]) == 1
+    assert summary["recent_fills"][0]["decision_id"] == "fill-test-1"

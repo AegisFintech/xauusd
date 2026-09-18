@@ -194,6 +194,16 @@ def test_assistant_steps_without_reason_remain_well_formed(tmp_path):
     assert "reason" not in assistant[1]["content"]
 
 
+def test_runs_include_tick_counts(tmp_path):
+    runner, transcript = agent_runner(tmp_path, [
+        ("raw", {"action": "final", "summary": "tick one"}),
+    ])
+    runner.run_tick()
+    runs = transcript.runs()
+    assert runs[0]["run_id"] == runner.run_id
+    assert runs[0]["ticks"] == 1
+
+
 def test_runner_forever_loops_and_stops(tmp_path):
     runner, transcript = agent_runner(tmp_path, [
         ("raw", {"action": "final", "summary": "tick one"}),

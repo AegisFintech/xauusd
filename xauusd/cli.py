@@ -25,7 +25,7 @@ from .ctrader_demo import (CTraderDemoAdapter, CTraderDemoOpenApiConfig,
                            CTraderDemoOpenApiTransport, CockroachCTraderDemoStore)
 from .demo_execution import CTraderVolumeConversion, CTraderVolumePolicy, PaperToCTraderDemoCoordinator
 from .demo_runner import DemoAutomationRunner, DemoRunnerConfig
-from .paper_trading import CockroachPaperTradingStore, PaperRiskConfig, PaperTrading
+from .paper_trading import CockroachPaperTradingStore, PaperRiskConfig, PaperTrading, paper_from_env
 import subprocess
 def campaign(synthetic: bool=False):
  Path("reports").mkdir(exist_ok=True); bars=synthetic_bars() if synthetic else None
@@ -95,14 +95,7 @@ def _positive_env_float(name: str, default: float) -> float:
  return value
 
 def _paper_risk_config_from_env() -> PaperRiskConfig:
- config=PaperRiskConfig(
-  daily_loss_limit=_positive_env_float("PAPER_DAILY_LOSS_LIMIT",500),
-  max_drawdown=_positive_env_float("PAPER_MAX_DRAWDOWN",.10),
-  max_position=_positive_env_float("PAPER_MAX_POSITION",1),
-  max_trades_per_day=int(os.getenv("PAPER_MAX_TRADES_PER_DAY","20")),
-  max_market_data_age_seconds=_positive_env_float("PAPER_MAX_MARKET_DATA_AGE_SECONDS",60),
- )
- config.validate(); return config
+ return PaperRiskConfig.from_env()
 
 def _demo_automation_status(config: DemoRunnerConfig) -> dict:
  return {"state":"disabled" if not config.enabled else "not_started","enabled":config.enabled,
@@ -110,8 +103,7 @@ def _demo_automation_status(config: DemoRunnerConfig) -> dict:
          "status_path":str(config.status_path)}
 
 def _paper_from_env() -> PaperTrading:
- return PaperTrading(CockroachPaperTradingStore(initial_cash=_positive_env_float("PAPER_INITIAL_CASH",100_000)),
-                     _paper_risk_config_from_env())
+ return paper_from_env()
 
 def _paper_to_demo_coordinator(paper: PaperTrading) -> PaperToCTraderDemoCoordinator:
  if os.getenv("CTRADER_PAPER_ONLY")=="true":

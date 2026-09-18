@@ -1,3 +1,4 @@
+import pytest
 from datetime import datetime, timedelta, timezone
 
 from xauusd.paper_trading import (ACCEPTED, DAILY_LOSS_LIMIT, KILL_SWITCH, MAX_POSITION,
@@ -42,6 +43,22 @@ def test_simulated_ledger_realizes_profit_when_position_is_closed():
     result = trading.evaluate(decision("sell", side="SELL", price=4010), NOW)
     assert result["accepted"] and result["position"] == 0
     assert trading.state()["ledger"][-1]["realized_pnl"] == 10
+
+
+def test_summary_includes_equity_pnl_drawdown_and_recent_fills():
+    trading = PaperTrading(InMemoryPaperTradingStore(), PaperRiskConfig(max_market_data_age_seconds=120))
+    assert trading.summary()["stopped"] is True
+    assert trading.summary()["side"] == "flat"
+    trading.start("test")
+    trading.evaluate(decision("buy", price=4000), NOW)
+    summary = trading.summary()
+    assert summary["stopped"] is False
+    assert summary["position"] == pytest.approx(1.0)
+    assert summary["side"] == "long"
+    assert summary["equity"] == pytest.approx(100_000.0)
+    assert summary["day_pl"] == pytest.approx(0.0)
+    assert len(summary["recent_fills"]) == 1
+    assert summary["recent_fills"][0]["decision_id"] == "buy"
 
 
 def test_corrupt_memory_state_fails_closed():

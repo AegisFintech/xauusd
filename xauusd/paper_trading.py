@@ -22,6 +22,16 @@ MAX_DRAWDOWN = "MAX_DRAWDOWN"
 ACCEPTED = "ACCEPTED"
 
 
+def _positive_env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    value = float(raw)
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{name} must be a positive finite number")
+    return value
+
+
 @dataclass(frozen=True)
 class PaperRiskConfig:
     daily_loss_limit: float = 500.0
@@ -39,6 +49,18 @@ class PaperRiskConfig:
             raise ValueError("max_drawdown must be between zero and one")
         if not float(self.max_trades_per_day).is_integer():
             raise ValueError("max_trades_per_day must be a whole number")
+
+    @classmethod
+    def from_env(cls) -> "PaperRiskConfig":
+        config = cls(
+            daily_loss_limit=_positive_env_float("PAPER_DAILY_LOSS_LIMIT", 500.0),
+            max_drawdown=_positive_env_float("PAPER_MAX_DRAWDOWN", 0.10),
+            max_position=_positive_env_float("PAPER_MAX_POSITION", 1),
+            max_trades_per_day=int(_positive_env_float("PAPER_MAX_TRADES_PER_DAY", 20)),
+            max_market_data_age_seconds=_positive_env_float("PAPER_MAX_MARKET_DATA_AGE_SECONDS", 60),
+        )
+        config.validate()
+        return config
 
 
 @dataclass(frozen=True)
@@ -196,6 +218,34 @@ class PaperTrading:
     def state(self) -> dict[str, Any]:
         return self.store.state()
 
+    def summary(self) -> dict[str, Any]:
+        """Computed, display-only paper results for the live view."""
+        state = self.store.state()
+        equity = self._equity(state)
+        day_start = float(state.get("day_start_equity") or equity)
+        high_water = float(state.get("high_water_equity") or equity)
+        position = float(state.get("position", 0.0))
+        realized = sum(float(fill.get("realized_pnl") or 0.0) for fill in state.get("ledger", []))
+        fills = [dict(fill) for fill in state.get("ledger", [])[-6:]][::-1]
+        return {
+            "stopped": bool(state.get("stopped")),
+            "kill_switch_reason": state.get("kill_switch_reason"),
+            "cash": float(state.get("cash", 0.0)),
+            "position": position,
+            "side": "long" if position > 1e-9 else "short" if position < -1e-9 else "flat",
+            "average_entry_price": float(state.get("average_entry_price") or 0.0),
+            "mark_price": float(state.get("mark_price") or 0.0),
+            "equity": equity,
+            "day": state.get("day"),
+            "day_start_equity": day_start,
+            "day_pl": equity - day_start,
+            "realized_pl": realized,
+            "drawdown_pct": round((high_water - equity) / high_water * 100, 3) if high_water > 0 else 0.0,
+            "high_water_equity": high_water,
+            "trades_today": int(state.get("trades_today", 0)),
+            "recent_fills": fills,
+        }
+
     def evaluate(self, decision: PaperDecision, now: datetime | None = None) -> dict[str, Any]:
         now = (now or _now()).astimezone(timezone.utc)
         if not decision.decision_id.strip():
@@ -276,3 +326,9 @@ class PaperTrading:
         return {"accepted": accepted, "reason": reason, "decision_id": decision_id,
                 "position": state["position"], "equity": self._equity(state),
                 "trades_today": state["trades_today"]}
+
+
+def paper_from_env() -> PaperTrading:
+    """Single paper-trading entry point shared by the CLI and the live view."""
+    return PaperTrading(CockroachPaperTradingStore(initial_cash=_positive_env_float("PAPER_INITIAL_CASH", 100_000.0)),
+                        PaperRiskConfig.from_env())

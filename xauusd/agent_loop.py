@@ -143,8 +143,10 @@ class CockroachAgentTranscriptStore:
         with self.connect() as db:
             rows = db.execute("SELECT run_id,status,created_at,finished_at FROM agent_runs ORDER BY created_at DESC LIMIT ?",
                               (limit,)).fetchall()
-        return [{"run_id": row["run_id"], "status": row["status"], "created_at": row["created_at"], "finished_at": row["finished_at"]}
-                for row in rows]
+            counts = {row["run_id"]: int(row["total"]) for row in db.execute(
+                "SELECT run_id, COUNT(*) AS total FROM agent_transcript WHERE phase='tick_start' GROUP BY run_id")}
+        return [{"run_id": row["run_id"], "status": row["status"], "created_at": row["created_at"],
+                 "finished_at": row["finished_at"], "ticks": counts.get(row["run_id"], 0)} for row in rows]
 
     def run_status(self, run_id: str) -> str | None:
         with self.connect() as db:
@@ -186,7 +188,11 @@ class InMemoryAgentTranscriptStore:
             matches = [step for step in matches if step["id"] > after_id]
             matches.sort(key=lambda step: step["id"])
         return matches[:limit]
-    def runs(self, limit=20): return [{"run_id": rid, "status": run["status"]} for rid, run in self._runs.items()][:limit]
+    def runs(self, limit=20):
+        from collections import Counter
+        ticks = Counter(step["run_id"] for step in self._steps if step["phase"] == "tick_start")
+        return [{"run_id": rid, "status": run["status"], "ticks": int(ticks.get(rid, 0))}
+                for rid, run in self._runs.items()][:limit]
     def run_status(self, run_id): return self._runs.get(run_id, {}).get("status")
 
 
