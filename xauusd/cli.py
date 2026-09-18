@@ -106,16 +106,23 @@ def _paper_risk_config_from_env() -> PaperRiskConfig:
 
 def _demo_automation_status(config: DemoRunnerConfig) -> dict:
  return {"state":"disabled" if not config.enabled else "not_started","enabled":config.enabled,
+         "paper_only":os.getenv("CTRADER_PAPER_ONLY")=="true",
          "status_path":str(config.status_path)}
 
 def _demo_automation_runner(config: DemoRunnerConfig) -> DemoAutomationRunner:
- volume_text=os.getenv("CTRADER_VOLUME_PER_PAPER_UNIT")
- if volume_text is None: raise ValueError("CTRADER_VOLUME_PER_PAPER_UNIT is required")
- volume=CTraderVolumeConversion(int(volume_text)); volume.validate()
+ paper_only=os.getenv("CTRADER_PAPER_ONLY")=="true"
  quantity=_positive_env_float("CTRADER_CANARY_PAPER_QUANTITY",1)
  market_store=HistoricalDataStore()
  paper=PaperTrading(CockroachPaperTradingStore(initial_cash=_positive_env_float("PAPER_INITIAL_CASH",100_000)),
                     _paper_risk_config_from_env())
+ if paper_only:
+  # Broker-free stage: exercise the deterministic paper pipeline without credentials or volumes.
+  coordinator=PaperToCTraderDemoCoordinator(paper,paper_only=True)
+  return DemoAutomationRunner(coordinator,LocalHistoricalMarketDataSource(market_store),
+                              ConfirmedBreakoutCanarySource(market_store,quantity),config)
+ volume_text=os.getenv("CTRADER_VOLUME_PER_PAPER_UNIT")
+ if volume_text is None: raise ValueError("CTRADER_VOLUME_PER_PAPER_UNIT is required")
+ volume=CTraderVolumeConversion(int(volume_text)); volume.validate()
  api_config=CTraderDemoOpenApiConfig.from_env()
  transport=CTraderDemoOpenApiTransport(api_config)
  adapter=CTraderDemoAdapter(transport.discover(),CockroachCTraderDemoStore(),transport,api_config.timeout_seconds)

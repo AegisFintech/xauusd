@@ -81,19 +81,29 @@ class CTraderVolumePolicy:
 
 class PaperToCTraderDemoCoordinator:
     """Runs paper risk first; execution lifecycle remains explicitly operator controlled."""
-    def __init__(self, paper_trading: PaperTrading, demo_adapter: DemoExecutor,
-                 volume_conversion: CTraderVolumeConversion,
-                 volume_policy: CTraderVolumePolicy | None = None):
+    def __init__(self, paper_trading: PaperTrading, demo_adapter: DemoExecutor | None = None,
+                 volume_conversion: CTraderVolumeConversion | None = None,
+                 volume_policy: CTraderVolumePolicy | None = None,
+                 paper_only: bool = False):
         self.paper_trading = paper_trading
         self.demo_adapter = demo_adapter
         self.volume_conversion = volume_conversion
         self.volume_policy = volume_policy
-        self.volume_conversion.validate()
-        if self.volume_policy is not None:
-            self.volume_policy.validate()
+        self.paper_only = paper_only
+        if not paper_only:
+            if self.demo_adapter is None:
+                raise ValueError("demo adapter is required unless paper_only is set")
+            if self.volume_conversion is None:
+                raise ValueError("volume conversion is required unless paper_only is set")
+            self.volume_conversion.validate()
+            if self.volume_policy is not None:
+                self.volume_policy.validate()
 
     def execute(self, decision: NormalizedDecision, market_price: float, now: datetime) -> dict[str, Any]:
-        """Convert and gate the volume first so an impossible order never mutates paper state."""
+        """Evaluate paper risk first; broker submission only happens behind all gates."""
+        if self.paper_only:
+            return self._execute_paper_only(decision, market_price, now)
+        assert self.demo_adapter is not None and self.volume_conversion is not None
         try:
             volume = self.volume_conversion.to_volume(decision.quantity)
         except (ValueError, TypeError) as exc:
@@ -122,6 +132,16 @@ class PaperToCTraderDemoCoordinator:
             self.demo_adapter.stop(reason)
         return {"accepted": bool(demo_outcome.get("accepted", False)), "decision_id": decision.decision_id,
                 "paper": paper_outcome, "demo": demo_outcome}
+
+    def _execute_paper_only(self, decision: NormalizedDecision, market_price: float, now: datetime) -> dict[str, Any]:
+        """Broker-free validation of the paper pipeline; no adapter, volume, or kill-switch changes."""
+        paper_decision = PaperDecision(decision.decision_id, decision.symbol, decision.side,
+                                       decision.quantity, market_price, decision.market_data_at)
+        paper_outcome = self.paper_trading.evaluate(paper_decision, now)
+        demo_outcome = {"accepted": False, "request_id": decision.decision_id, "reason": "PAPER_ONLY_MODE"}
+        self._audit_outcome(decision.decision_id, demo_outcome)
+        return {"accepted": False, "decision_id": decision.decision_id, "paper": paper_outcome,
+                "demo": demo_outcome, "paper_only": True}
 
     def _audit_outcome(self, decision_id: str, outcome: dict[str, Any]) -> None:
         """Use the adapter's persistent audit store when the concrete adapter exposes it."""

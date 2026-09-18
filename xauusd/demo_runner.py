@@ -88,15 +88,20 @@ class DemoAutomationRunner:
     def demo_adapter(self) -> DemoLifecycle:
         return self.coordinator.demo_adapter  # type: ignore[return-value]
 
+    @property
+    def paper_only(self) -> bool:
+        return self.coordinator.paper_only
+
     def start(self) -> bool:
         """Reconcile first, then make the explicitly enabled paper/demo pair runnable."""
         if not self.config.enabled:
             self._record("disabled")
             return False
         try:
-            if not self.demo_adapter.reconcile_after_restart():
-                raise RuntimeError("startup_reconciliation_failed")
-            self.demo_adapter.start("explicit demo automation enabled")
+            if not self.paper_only:
+                if not self.demo_adapter.reconcile_after_restart():
+                    raise RuntimeError("startup_reconciliation_failed")
+                self.demo_adapter.start("explicit demo automation enabled")
             self.coordinator.paper_trading.start("explicit demo automation enabled")
         except Exception:
             self._stop("startup_reconciliation_failed")
@@ -119,7 +124,7 @@ class DemoAutomationRunner:
                 self.consecutive_failures = 0
                 return self._record("no_decision")
             result = self.coordinator.execute(decision, market_data.price, self._now())
-            if result.get("paper", {}).get("accepted") and not result.get("accepted"):
+            if not result.get("paper_only") and result.get("paper", {}).get("accepted") and not result.get("accepted"):
                 return self._stop("broker_execution_failed", result=result)
             self.consecutive_failures = 0
             return self._record("executed", result=result)
@@ -144,7 +149,9 @@ class DemoAutomationRunner:
     def _stop(self, reason: str, **details: Any) -> dict[str, Any]:
         self.running = False
         # Attempt both stops even if one persistence backend is unavailable.
-        for lifecycle in (self.coordinator.paper_trading, self.demo_adapter):
+        for lifecycle in (self.coordinator.paper_trading, self.coordinator.demo_adapter):
+            if lifecycle is None:
+                continue
             try:
                 lifecycle.stop(reason)
             except Exception as exc:

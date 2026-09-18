@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
 
+import pytest
+
 from xauusd.demo_execution import (CTraderVolumeConversion, CTraderVolumePolicy,
                                    NormalizedDecision, PaperToCTraderDemoCoordinator)
 from xauusd.ctrader_demo import (CTraderDemoAccount, CTraderDemoAdapter,
@@ -201,3 +203,25 @@ def test_volume_policy_from_metadata():
     assert instance.min_volume == 10
     assert instance.max_volume == 1000
     assert instance.step_volume == 10
+
+
+def test_paper_only_runs_without_adapter_or_volume_and_never_stops_switches():
+    paper = PaperTrading(InMemoryPaperTradingStore())
+    paper.start("test")
+    instance = PaperToCTraderDemoCoordinator(paper, paper_only=True)
+
+    result = instance.execute(decision(), 4000.0, NOW)
+
+    assert result["paper_only"]
+    assert result["paper"]["accepted"]
+    assert result["demo"]["reason"] == "PAPER_ONLY_MODE"
+    assert not result["accepted"]
+    assert not paper.state()["stopped"]
+
+
+def test_non_paper_only_requires_adapter_and_volume():
+    paper = PaperTrading(InMemoryPaperTradingStore())
+    with pytest.raises(ValueError, match="demo adapter"):
+        PaperToCTraderDemoCoordinator(paper)
+    with pytest.raises(ValueError, match="volume conversion"):
+        PaperToCTraderDemoCoordinator(paper, DemoAdapterDouble())

@@ -1,5 +1,6 @@
 import json
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 from xauusd.demo_execution import CTraderVolumeConversion, PaperToCTraderDemoCoordinator
 from xauusd.demo_runner import DemoAutomationRunner, DemoRunnerConfig, MarketData
@@ -116,3 +117,32 @@ def test_status_artifact_is_persistent_and_records_terminal_state(tmp_path):
     assert status["state"] == "stopped"
     assert status["reason"] == "max_consecutive_failures"
     assert not status["running"]
+
+
+def paper_only_runner(tmp_path, decision, *, enabled=True, market=None):
+    paper = PaperTrading(InMemoryPaperTradingStore())
+    coordinator = PaperToCTraderDemoCoordinator(paper, paper_only=True)
+    instance = DemoAutomationRunner(
+        coordinator, market or MarketSource(), DecisionSource(decision),
+        DemoRunnerConfig(enabled, 1, 3, 60, tmp_path / "runner-status.json"), clock=lambda: NOW,
+    )
+    return instance, paper
+
+
+def test_paper_only_start_skips_broker_reconciliation_and_runs_cycle(tmp_path):
+    decision = SimpleNamespace(decision_id="decision-p1", symbol="XAUUSD", side="BUY", quantity=0.5)
+    decision.market_data_at = NOW
+    instance, paper = paper_only_runner(tmp_path, decision)
+
+    assert instance.paper_only
+    assert instance.start()
+    assert instance.coordinator.demo_adapter is None
+    assert not paper.state()["stopped"]
+
+    result = instance.run_cycle()
+
+    assert result["state"] == "executed"
+    assert result["result"]["paper"]["accepted"]
+    assert result["result"]["paper_only"]
+    assert result["result"]["demo"]["reason"] == "PAPER_ONLY_MODE"
+    assert not paper.state()["stopped"]

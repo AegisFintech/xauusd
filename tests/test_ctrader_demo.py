@@ -145,3 +145,27 @@ def test_symbol_metadata_and_volume_policy_validate_invariants():
     with pytest.raises(CTraderDemoSafetyError, match="restricted"):
         CTraderSymbolMetadata("EURUSD", 99, digits=2, lot_size=100.0,
                               min_volume=10, max_volume=1000, step_volume=10).validate()
+
+
+def test_open_api_transport_surfaces_access_token_error(monkeypatch):
+    monkeypatch.setenv("CTRADER_DEMO_ONLY", "true")
+    client = FakeClient([{}, {"errorCode": "CH_ACCESS_TOKEN_INVALID", "description": "Invalid access token"}])
+    messages = {name: Message for name in ("ProtoOAApplicationAuthReq", "ProtoOAGetAccountListByAccessTokenReq")}
+    transport = CTraderDemoOpenApiTransport(CTraderDemoOpenApiConfig("id", "secret", "token"),
+        client_factory=lambda host, port: client, extract=lambda value: value, message_types=messages)
+    with pytest.raises(CTraderDemoSafetyError, match=r"CH_ACCESS_TOKEN_INVALID.*Invalid access token"):
+        transport.discover()
+
+
+def test_symbol_detail_error_is_fail_closed(monkeypatch):
+    monkeypatch.setenv("CTRADER_DEMO_ONLY", "true")
+    client = FakeClient([{}, {"ctidTraderAccount": [{"ctidTraderAccountId": 7, "isLive": False}]}, {},
+                         {"symbol": [{"symbolName": "XAUUSD", "symbolId": 99, "enabled": True}]},
+                         {"errorCode": "CH_UNKNOWN", "description": "symbol detail failure"}])
+    messages = {name: Message for name in ("ProtoOAApplicationAuthReq", "ProtoOAGetAccountListByAccessTokenReq",
+                                            "ProtoOAAccountAuthReq", "ProtoOASymbolsListReq",
+                                            "ProtoOASymbolByIdReq")}
+    transport = CTraderDemoOpenApiTransport(CTraderDemoOpenApiConfig("id", "secret", "token", 7),
+        client_factory=lambda host, port: client, extract=lambda value: value, message_types=messages)
+    with pytest.raises(CTraderDemoSafetyError, match=r"symbol detail error CH_UNKNOWN"):
+        transport.symbol_metadata()

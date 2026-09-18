@@ -177,6 +177,7 @@ class CTraderDemoOpenApiTransport:
         response = self._extract_message(self._request(messages["ProtoOASymbolByIdReq"](
             ctidTraderAccountId=self._account.account_id, symbolId=[self._account.symbol_id]),
             self.config.timeout_seconds))
+        self._raise_for_error(response, "symbol detail")
         symbols = self._values(response, "symbol")
         if not symbols:
             raise CTraderDemoSafetyError("cTrader returned no XAUUSD symbol detail")
@@ -216,12 +217,14 @@ class CTraderDemoOpenApiTransport:
             clientId=self.config.client_id, clientSecret=self.config.client_secret), self.config.timeout_seconds)
         accounts = self._extract_message(self._request(messages["ProtoOAGetAccountListByAccessTokenReq"](
             accessToken=self.config.access_token), self.config.timeout_seconds))
+        self._raise_for_error(accounts, "account list")
         account = self._find_account(accounts)
         account_id = self._field(account, "ctidTraderAccountId")
         self._request(messages["ProtoOAAccountAuthReq"](
             ctidTraderAccountId=account_id, accessToken=self.config.access_token), self.config.timeout_seconds)
         symbols = self._extract_message(self._request(messages["ProtoOASymbolsListReq"](
             ctidTraderAccountId=account_id, includeArchivedSymbols=False), self.config.timeout_seconds))
+        self._raise_for_error(symbols, "symbol list")
         symbol_id = self._find_symbol_id(symbols)
         self._account = CTraderDemoAccount(account_id, symbol_id, account_type="DEMO", symbol=self.config.symbol,
                                            host=self.config.host)
@@ -316,6 +319,23 @@ class CTraderDemoOpenApiTransport:
             return self._extract(response)
         from ctrader_open_api import Protobuf
         return Protobuf.extract(response)
+
+    @staticmethod
+    def _error_fields(message: Any) -> tuple[str, str] | None:
+        """Return ``(code, description)`` for a cTrader error message, else None."""
+        code = (message.get("errorCode") if isinstance(message, dict) else getattr(message, "errorCode", None))
+        if not code:
+            return None
+        description = (message.get("description") if isinstance(message, dict)
+                       else getattr(message, "description", None))
+        return str(code), str(description or "")
+
+    @staticmethod
+    def _raise_for_error(message: Any, context: str) -> None:
+        fields = CTraderDemoOpenApiTransport._error_fields(message)
+        if fields is not None:
+            code, description = fields
+            raise CTraderDemoSafetyError(f"cTrader {context} error {code}: {description}")
 
     @staticmethod
     def _values(message: Any, name: str) -> list[Any]:
