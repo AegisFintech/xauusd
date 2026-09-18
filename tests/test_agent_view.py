@@ -39,16 +39,37 @@ def test_index_html_renders_live_view(server):
     with request.urlopen(server + "/") as response:
         body = response.read().decode()
     assert "live thinking" in body
+    assert "newest first" in body
+    assert "load older decisions" in body
     assert "steps" in body
 
 
-def test_steps_endpoint_returns_transcript(server):
+def test_steps_endpoint_defaults_to_newest_first(server):
     with request.urlopen(server + "/api/steps?run_id=agent_test_1") as response:
         payload = json.loads(response.read())
     assert payload["run_status"] == "running"
+    assert payload["order"] == "desc"
     assert payload["count"] == 2
-    assert payload["steps"][0]["content"]["content"] == "thinking about the bar"
-    assert payload["steps"][1]["phase"] == "tick_end"
+    assert payload["steps"][0]["phase"] == "tick_end"
+    assert payload["steps"][1]["content"]["content"] == "thinking about the bar"
+
+
+def test_steps_endpoint_after_cursor_returns_newer_ascending(server):
+    with request.urlopen(server + "/api/steps?run_id=agent_test_1&after=1") as response:
+        payload = json.loads(response.read())
+    assert payload["order"] == "asc"
+    assert [s["phase"] for s in payload["steps"]] == ["tick_end"]
+
+
+def test_steps_endpoint_before_cursor_pages_older_history(server):
+    with request.urlopen(server + "/api/steps?run_id=agent_test_1&before=2") as response:
+        payload = json.loads(response.read())
+    assert payload["order"] == "desc"
+    assert [s["phase"] for s in payload["steps"]] == ["assistant"]
+
+    with request.urlopen(server + "/api/steps?run_id=agent_test_1&before=1") as response:
+        payload = json.loads(response.read())
+    assert payload["count"] == 0
 
 
 def test_status_endpoint_returns_latest_run(server):

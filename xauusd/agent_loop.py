@@ -78,7 +78,8 @@ class AgentTranscriptStore(Protocol):
     def start_run(self, run_id: str) -> None: ...
     def finish_run(self, run_id: str, status: str) -> None: ...
     def append(self, run_id: str, tick: int, phase: str, content: dict[str, Any]) -> int: ...
-    def steps(self, run_id: str | None = None, after_id: int = 0, limit: int = 100) -> list[dict[str, Any]]: ...
+    def steps(self, run_id: str | None = None, after_id: int = 0, before_id: int | None = None,
+              desc: bool = False, limit: int = 100) -> list[dict[str, Any]]: ...
     def runs(self, limit: int = 20) -> list[dict[str, Any]]: ...
     def run_status(self, run_id: str) -> str | None: ...
 
@@ -116,13 +117,24 @@ class CockroachAgentTranscriptStore:
                                 (run_id, tick, phase, canonical_json(content), _now()))
             return int(cursor.fetchone()["id"])
 
-    def steps(self, run_id: str | None = None, after_id: int = 0, limit: int = 100) -> list[dict[str, Any]]:
-        where, params = ["id > ?"], [after_id]
+    def steps(self, run_id: str | None = None, after_id: int = 0, before_id: int | None = None,
+              desc: bool = False, limit: int = 100) -> list[dict[str, Any]]:
+        if desc:
+            params: list[Any] = []
+            where = []
+            if before_id is not None:
+                where.append("id < ?")
+                params.append(before_id)
+            order = "ORDER BY id DESC"
+        else:
+            params = [after_id]
+            where = ["id > ?"]
+            order = "ORDER BY id ASC"
         if run_id:
             where.append("run_id = ?")
             params.append(run_id)
         params.append(limit)
-        sql = f"SELECT id,run_id,tick,phase,content_json,occurred_at FROM agent_transcript WHERE {' AND '.join(where)} ORDER BY id LIMIT ?"
+        sql = f"SELECT id,run_id,tick,phase,content_json,occurred_at FROM agent_transcript WHERE {' AND '.join(where) or '1=1'} {order} LIMIT ?"
         with self.connect() as db:
             rows = db.execute(sql, tuple(params)).fetchall()
         return [self._row(row) for row in rows]
@@ -164,8 +176,16 @@ class InMemoryAgentTranscriptStore:
         self._next_id += 1
         self._steps.append(step)
         return step["id"]
-    def steps(self, run_id=None, after_id=0, limit=100):
-        return [step for step in self._steps if step["id"] > after_id and (run_id is None or step["run_id"] == run_id)][-limit:]
+    def steps(self, run_id=None, after_id=0, before_id=None, desc=False, limit=100):
+        matches = [step for step in self._steps if run_id is None or step["run_id"] == run_id]
+        if desc:
+            if before_id is not None:
+                matches = [step for step in matches if step["id"] < before_id]
+            matches.sort(key=lambda step: -step["id"])
+        else:
+            matches = [step for step in matches if step["id"] > after_id]
+            matches.sort(key=lambda step: step["id"])
+        return matches[:limit]
     def runs(self, limit=20): return [{"run_id": rid, "status": run["status"]} for rid, run in self._runs.items()][:limit]
     def run_status(self, run_id): return self._runs.get(run_id, {}).get("status")
 
