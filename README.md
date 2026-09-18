@@ -76,6 +76,17 @@ Every tick the planner may call a fixed allow-list of read-only tools (`read_mar
 
 `agent run` and `agent once` are inert unless `CTRADER_AUTOMATION_ENABLED=true`. Paper trading starts explicitly on each launch; cTrader demo wiring is a deliberate follow-up and stays disabled unless added explicitly.
 
+To run the agent as a persistent background service (paper-only, live view on `http://127.0.0.1:8100/`):
+
+```bash
+sudo cp deploy/systemd/xauusd-agent.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now xauusd-agent.service
+journalctl -u xauusd-agent.service -f   # follow the agent's printed ticks
+```
+
+The service reads only `EnvironmentFile=/root/xauusd/.env` (it inherits no shell exports), so `OPENAI_BASE_URL`, `OPENAI_MODEL`, `OPENAI_API_KEY`, `DATABASE_URL`, `CTRADER_AUTOMATION_ENABLED=true`, and `CTRADER_PAPER_ONLY=true` must all be set there. Restart it (`systemctl restart xauusd-agent.service`) after editing `.env`. SIGTERM finishes the transcript run cleanly before the process stops.
+
 ## Development
 
 ```bash

@@ -15,6 +15,7 @@ def test_demo_automation_disabled_returns_status_without_constructing_clients(mo
 
 def test_demo_automation_requires_explicit_positive_volume(monkeypatch):
     monkeypatch.setenv("CTRADER_AUTOMATION_ENABLED", "true")
+    monkeypatch.delenv("CTRADER_PAPER_ONLY", raising=False)
     monkeypatch.delenv("CTRADER_VOLUME_PER_PAPER_UNIT", raising=False)
 
     try:

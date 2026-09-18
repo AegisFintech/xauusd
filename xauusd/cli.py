@@ -127,7 +127,10 @@ def _paper_to_demo_coordinator(paper: PaperTrading) -> PaperToCTraderDemoCoordin
  return PaperToCTraderDemoCoordinator(paper,adapter,volume,volume_policy)
 
 def _demo_automation_runner(config: DemoRunnerConfig) -> DemoAutomationRunner:
+ paper_only=os.getenv("CTRADER_PAPER_ONLY")=="true"
  quantity=_positive_env_float("CTRADER_CANARY_PAPER_QUANTITY",1)
+ if not paper_only and os.getenv("CTRADER_VOLUME_PER_PAPER_UNIT") is None:
+  raise ValueError("CTRADER_VOLUME_PER_PAPER_UNIT is required")
  market_store=HistoricalDataStore()
  paper=_paper_from_env()
  coordinator=_paper_to_demo_coordinator(paper)
@@ -198,10 +201,16 @@ def agent_controller(action: str) -> dict:
   print(f"agent run {runner.run_id} tick recorded; live view http://127.0.0.1:{os.getenv('AGENT_VIEW_PORT','8100')}/",flush=True)
   return result
  if action=="run":
+  import signal
   import threading
+  stop=threading.Event()
+  def _terminate(signum,frame):
+   runner.stop()
+   stop.set()
+  signal.signal(signal.SIGTERM,_terminate)
   threading.Thread(target=_serve_agent_view,daemon=True).start()
   try:
-   runner.run_forever(on_tick=lambda result: print(f"[{runner.run_id}] tick {result.get('tick')} status={result.get('status')}",flush=True))
+   runner.run_forever(stop=stop,on_tick=lambda result: print(f"[{runner.run_id}] tick {result.get('tick')} status={result.get('status')}",flush=True))
   except KeyboardInterrupt:
    runner.stop()
   return runner.status()
