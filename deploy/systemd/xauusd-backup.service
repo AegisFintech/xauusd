@@ -1,7 +1,0 @@
-[Unit]
-Description=Back up XAUUSD tournament control state
-
-[Service]
-Type=oneshot
-WorkingDirectory=/root/xauusd
-ExecStart=/root/xauusd/.venv/bin/python -m xauusd.cli operations backup

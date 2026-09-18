@@ -1,5 +1,5 @@
 from __future__ import annotations
-import argparse,json,logging
+import argparse,json,logging,os
 from pathlib import Path
 from dotenv import load_dotenv
 from .core import synthetic_bars, features, Backtester
@@ -20,6 +20,12 @@ from .operations import OperationsManager
 from .weekly_report import WeeklyTournamentReport
 from .shadow_trading import ShadowTradingReadiness
 from .adaptive_search import AdaptiveSearch
+from .canary_strategy import ConfirmedBreakoutCanarySource, LocalHistoricalMarketDataSource
+from .ctrader_demo import (CTraderDemoAdapter, CTraderDemoOpenApiConfig,
+                           CTraderDemoOpenApiTransport, CockroachCTraderDemoStore)
+from .demo_execution import CTraderVolumeConversion, CTraderVolumePolicy, PaperToCTraderDemoCoordinator
+from .demo_runner import DemoAutomationRunner, DemoRunnerConfig
+from .paper_trading import CockroachPaperTradingStore, PaperRiskConfig, PaperTrading
 import subprocess
 def campaign(synthetic: bool=False):
  Path("reports").mkdir(exist_ok=True); bars=synthetic_bars() if synthetic else None
@@ -83,6 +89,52 @@ def ml_walk_forward(start: str|None, end: str|None, threshold: float):
 def daily_run():
  print(json.dumps(DailyResearchPipeline().run(),indent=2,allow_nan=False))
 
+def _positive_env_float(name: str, default: float) -> float:
+ value=float(os.getenv(name,str(default)))
+ if value <= 0: raise ValueError(f"{name} must be positive")
+ return value
+
+def _paper_risk_config_from_env() -> PaperRiskConfig:
+ config=PaperRiskConfig(
+  daily_loss_limit=_positive_env_float("PAPER_DAILY_LOSS_LIMIT",500),
+  max_drawdown=_positive_env_float("PAPER_MAX_DRAWDOWN",.10),
+  max_position=_positive_env_float("PAPER_MAX_POSITION",1),
+  max_trades_per_day=int(os.getenv("PAPER_MAX_TRADES_PER_DAY","20")),
+  max_market_data_age_seconds=_positive_env_float("PAPER_MAX_MARKET_DATA_AGE_SECONDS",60),
+ )
+ config.validate(); return config
+
+def _demo_automation_status(config: DemoRunnerConfig) -> dict:
+ return {"state":"disabled" if not config.enabled else "not_started","enabled":config.enabled,
+         "status_path":str(config.status_path)}
+
+def _demo_automation_runner(config: DemoRunnerConfig) -> DemoAutomationRunner:
+ volume_text=os.getenv("CTRADER_VOLUME_PER_PAPER_UNIT")
+ if volume_text is None: raise ValueError("CTRADER_VOLUME_PER_PAPER_UNIT is required")
+ volume=CTraderVolumeConversion(int(volume_text)); volume.validate()
+ quantity=_positive_env_float("CTRADER_CANARY_PAPER_QUANTITY",1)
+ market_store=HistoricalDataStore()
+ paper=PaperTrading(CockroachPaperTradingStore(initial_cash=_positive_env_float("PAPER_INITIAL_CASH",100_000)),
+                    _paper_risk_config_from_env())
+ api_config=CTraderDemoOpenApiConfig.from_env()
+ transport=CTraderDemoOpenApiTransport(api_config)
+ adapter=CTraderDemoAdapter(transport.discover(),CockroachCTraderDemoStore(),transport,api_config.timeout_seconds)
+ volume_policy=CTraderVolumePolicy.from_metadata(transport.symbol_metadata())
+ coordinator=PaperToCTraderDemoCoordinator(paper,adapter,volume,volume_policy)
+ return DemoAutomationRunner(coordinator,LocalHistoricalMarketDataSource(market_store),
+                             ConfirmedBreakoutCanarySource(market_store,quantity),config)
+
+def demo_automation(action: str) -> dict:
+ """Run the explicitly enabled local-data paper-to-demo canary."""
+ config=DemoRunnerConfig.from_env()
+ # Status and disabled actions remain local: do not open a database or broker connection.
+ if action=="status" or not config.enabled: return _demo_automation_status(config)
+ runner=_demo_automation_runner(config)
+ if action=="once":
+  return runner.run_cycle() if runner.start() else runner.status()
+ runner.run_forever()
+ return runner.status()
+
 def main():
  load_dotenv(".env")
  p=argparse.ArgumentParser(); sub=p.add_subparsers(dest="cmd"); c=sub.add_parser("campaign"); c.add_argument("--synthetic",action="store_true")
@@ -102,6 +154,8 @@ def main():
  ops=sub.add_parser("operations"); ops.add_argument("action",choices=["health","backup","verify-backup","capacity-plan","compact-artifacts","artifact-retention-inventory","scaling-checkpoint","capture-scaling-checkpoints","remote-artifacts-plan","remote-artifacts-apply","remote-artifacts-reconcile"]); ops.add_argument("--plan"); ops.add_argument("--digest"); ops.add_argument("--journal"); ops.add_argument("--root"); ops.add_argument("--target-hours",type=float,default=24); ops.add_argument("--efficiency",type=float,default=.8); ops.add_argument("--host-hour-cost",type=float)
  sub.add_parser("tournament-weekly-report")
  shadow=sub.add_parser("shadow"); shadow.add_argument("action",choices=["status","stop"]); shadow.add_argument("--reason",default="manual emergency stop")
+ demo=sub.add_parser("demo-automation",help="explicitly operate the local-data cTrader demo canary")
+ demo.add_argument("action",nargs="?",choices=["status","once","run"],default="status")
  sub.add_parser("adaptive-analytics")
  d=sub.add_parser("data"); ds=d.add_subparsers(dest="data_cmd"); i=ds.add_parser("import"); i.add_argument("csv"); v=ds.add_parser("validate")
  download=ds.add_parser("download"); download.add_argument("--start",required=True,help="UTC start date/time (for example 2026-08-01)"); download.add_argument("--end",help="UTC end date/time; defaults to now"); download.add_argument("--page-size",type=int,default=5000)
@@ -176,6 +230,10 @@ def main():
  if a.cmd=="shadow":
   manager=ShadowTradingReadiness(); result=manager.readiness() if a.action=="status" else manager.emergency_stop(a.reason)
   print(json.dumps(result,indent=2,default=str))
+ if a.cmd=="demo-automation":
+  try: result=demo_automation(a.action)
+  except Exception as exc: p.error(f"demo automation setup failed: {type(exc).__name__}")
+  print(json.dumps(result,indent=2,allow_nan=False,default=str))
  if a.cmd=="adaptive-analytics":
   print(json.dumps(AdaptiveSearch(ExperimentRegistry()).analyze(),indent=2,default=str))
  if a.cmd=="data":
