@@ -109,17 +109,14 @@ def _demo_automation_status(config: DemoRunnerConfig) -> dict:
          "paper_only":os.getenv("CTRADER_PAPER_ONLY")=="true",
          "status_path":str(config.status_path)}
 
-def _demo_automation_runner(config: DemoRunnerConfig) -> DemoAutomationRunner:
- paper_only=os.getenv("CTRADER_PAPER_ONLY")=="true"
- quantity=_positive_env_float("CTRADER_CANARY_PAPER_QUANTITY",1)
- market_store=HistoricalDataStore()
- paper=PaperTrading(CockroachPaperTradingStore(initial_cash=_positive_env_float("PAPER_INITIAL_CASH",100_000)),
-                    _paper_risk_config_from_env())
- if paper_only:
+def _paper_from_env() -> PaperTrading:
+ return PaperTrading(CockroachPaperTradingStore(initial_cash=_positive_env_float("PAPER_INITIAL_CASH",100_000)),
+                     _paper_risk_config_from_env())
+
+def _paper_to_demo_coordinator(paper: PaperTrading) -> PaperToCTraderDemoCoordinator:
+ if os.getenv("CTRADER_PAPER_ONLY")=="true":
   # Broker-free stage: exercise the deterministic paper pipeline without credentials or volumes.
-  coordinator=PaperToCTraderDemoCoordinator(paper,paper_only=True)
-  return DemoAutomationRunner(coordinator,LocalHistoricalMarketDataSource(market_store),
-                              ConfirmedBreakoutCanarySource(market_store,quantity),config)
+  return PaperToCTraderDemoCoordinator(paper,paper_only=True)
  volume_text=os.getenv("CTRADER_VOLUME_PER_PAPER_UNIT")
  if volume_text is None: raise ValueError("CTRADER_VOLUME_PER_PAPER_UNIT is required")
  volume=CTraderVolumeConversion(int(volume_text)); volume.validate()
@@ -127,7 +124,13 @@ def _demo_automation_runner(config: DemoRunnerConfig) -> DemoAutomationRunner:
  transport=CTraderDemoOpenApiTransport(api_config)
  adapter=CTraderDemoAdapter(transport.discover(),CockroachCTraderDemoStore(),transport,api_config.timeout_seconds)
  volume_policy=CTraderVolumePolicy.from_metadata(transport.symbol_metadata())
- coordinator=PaperToCTraderDemoCoordinator(paper,adapter,volume,volume_policy)
+ return PaperToCTraderDemoCoordinator(paper,adapter,volume,volume_policy)
+
+def _demo_automation_runner(config: DemoRunnerConfig) -> DemoAutomationRunner:
+ quantity=_positive_env_float("CTRADER_CANARY_PAPER_QUANTITY",1)
+ market_store=HistoricalDataStore()
+ paper=_paper_from_env()
+ coordinator=_paper_to_demo_coordinator(paper)
  return DemoAutomationRunner(coordinator,LocalHistoricalMarketDataSource(market_store),
                              ConfirmedBreakoutCanarySource(market_store,quantity),config)
 
@@ -141,6 +144,68 @@ def demo_automation(action: str) -> dict:
   return runner.run_cycle() if runner.start() else runner.status()
  runner.run_forever()
  return runner.status()
+
+def _agent_status_view() -> dict:
+ from .agent_loop import CockroachAgentTranscriptStore
+ store=CockroachAgentTranscriptStore()
+ paper=_paper_from_env()
+ state=paper.state()
+ return {"runs":store.runs(limit=5),
+         "paper":{"stopped":state.get("stopped"),"position":state.get("position"),"cash":state.get("cash"),
+                  "trades_today":state.get("trades_today"),"day_start_equity":state.get("day_start_equity")}}
+
+def _serve_agent_view() -> None:
+ import threading
+ from .agent_view import DEFAULT_VIEW_HOST, DEFAULT_VIEW_PORT
+ from .agent_view import create_app
+ host=os.getenv("AGENT_VIEW_HOST",DEFAULT_VIEW_HOST)
+ port=int(os.getenv("AGENT_VIEW_PORT",str(DEFAULT_VIEW_PORT)))
+ print(f"agent live view: http://{host}:{port}/",flush=True)
+ uvicorn_server=__import__("uvicorn")
+ uvicorn_server.run(create_app(),host=host,port=port,log_level="warning")
+
+def agent_controller(action: str) -> dict:
+ """Single continuously trading AI agent with a visible thinking process."""
+ from .agent_loop import AgentConfig, CockroachAgentTranscriptStore, ContinuousAgentRunner, build_agent_registry
+ from .autonomous_harness import OpenAICompatiblePlanner
+ from .canary_strategy import ConfirmedBreakoutCanarySource
+ if action=="status": return _agent_status_view()
+ if action=="view":
+  _serve_agent_view()
+  return {}
+ if os.getenv("CTRADER_AUTOMATION_ENABLED")!="true":
+  return {"state":"disabled","reason":"CTRADER_AUTOMATION_ENABLED must equal true",
+          "enabled":os.getenv("CTRADER_AUTOMATION_ENABLED")=="true"}
+ config=AgentConfig.from_env(); config.validate()
+ market_store=HistoricalDataStore()
+ source=LocalHistoricalMarketDataSource(market_store)
+ paper=_paper_from_env(); paper.start("agent_continuous_paper_loop")
+ coordinator=_paper_to_demo_coordinator(paper)
+ firecrawl_client=None
+ try:
+  from .firecrawl_research import CockroachSourceStore, FirecrawlConfig, FirecrawlResearchClient
+  firecrawl_client=FirecrawlResearchClient(FirecrawlConfig.from_env(),CockroachSourceStore())
+ except RuntimeError:
+  firecrawl_client=None  # research is optional; the loop still runs without web retrieval
+ registry=build_agent_registry(
+  source,paper,coordinator,config,
+  canary=ConfirmedBreakoutCanarySource(market_store,_positive_env_float("CTRADER_CANARY_PAPER_QUANTITY",1)),
+  firecrawl_client=firecrawl_client)
+ runner=ContinuousAgentRunner(OpenAICompatiblePlanner.from_env(),registry,
+                              CockroachAgentTranscriptStore(),source,paper,coordinator,config)
+ if action=="once":
+  result=runner.run_tick()
+  print(f"agent run {runner.run_id} tick recorded; live view http://127.0.0.1:{os.getenv('AGENT_VIEW_PORT','8100')}/",flush=True)
+  return result
+ if action=="run":
+  import threading
+  threading.Thread(target=_serve_agent_view,daemon=True).start()
+  try:
+   runner.run_forever(on_tick=lambda result: print(f"[{runner.run_id}] tick {result.get('tick')} status={result.get('status')}",flush=True))
+  except KeyboardInterrupt:
+   runner.stop()
+  return runner.status()
+ raise ValueError(f"unknown agent action: {action}")
 
 def main():
  load_dotenv(".env")
@@ -163,6 +228,8 @@ def main():
  shadow=sub.add_parser("shadow"); shadow.add_argument("action",choices=["status","stop"]); shadow.add_argument("--reason",default="manual emergency stop")
  demo=sub.add_parser("demo-automation",help="explicitly operate the local-data cTrader demo canary")
  demo.add_argument("action",nargs="?",choices=["status","once","run"],default="status")
+ agent=sub.add_parser("agent",help="single continuous AI paper-trading agent with a live thinking view")
+ agent.add_argument("action",nargs="?",choices=["status","once","view","run"],default="status")
  sub.add_parser("adaptive-analytics")
  d=sub.add_parser("data"); ds=d.add_subparsers(dest="data_cmd"); i=ds.add_parser("import"); i.add_argument("csv"); v=ds.add_parser("validate")
  download=ds.add_parser("download"); download.add_argument("--start",required=True,help="UTC start date/time (for example 2026-08-01)"); download.add_argument("--end",help="UTC end date/time; defaults to now"); download.add_argument("--page-size",type=int,default=5000)
@@ -240,6 +307,11 @@ def main():
  if a.cmd=="demo-automation":
   try: result=demo_automation(a.action)
   except Exception as exc: p.error(f"demo automation setup failed: {type(exc).__name__}")
+  print(json.dumps(result,indent=2,allow_nan=False,default=str))
+ if a.cmd=="agent":
+  try: result=agent_controller(a.action)
+  except KeyboardInterrupt: raise
+  except Exception as exc: p.error(f"agent command failed: {type(exc).__name__}")
   print(json.dumps(result,indent=2,allow_nan=False,default=str))
  if a.cmd=="adaptive-analytics":
   print(json.dumps(AdaptiveSearch(ExperimentRegistry()).analyze(),indent=2,default=str))

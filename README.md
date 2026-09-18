@@ -61,6 +61,21 @@ Credentials belong in `.env` with mode `0600`; never commit them. Current histor
 
 A broker-free **paper-only** stage runs the deterministic paper pipeline without any cTrader credentials or volumes: set `CTRADER_PAPER_ONLY=true` and `CTRADER_AUTOMATION_ENABLED=true` (the cTrader demo settings become unnecessary). It exercises the same paper risk, idempotency, and decision records, records `PAPER_ONLY_MODE` for the demo leg, and never touches a kill switch beyond the paper lifecycle.
 
+## Autonomous Agent
+
+`agent` runs one continuously trading AI plan-tool loop whose thinking is visible in a live web view. It is paper-first and reads `OPENAI_*`, `AGENT_*`, and (optionally) `FIRECRAWL_*` settings.
+
+```bash
+.venv/bin/python -m xauusd.cli agent status   # paper + recent transcript runs, no network
+.venv/bin/python -m xauusd.cli agent once     # a single tick, then exit
+.venv/bin/python -m xauusd.cli agent run      # continuous loop + live view (Ctrl-C to stop)
+.venv/bin/python -m xauusd.cli agent view     # live view only
+```
+
+Every tick the planner may call a fixed allow-list of read-only tools (`read_market`, `paper_state`, `canary_signal`, `firecrawl_fetch`) and `propose_trade`. A proposal is only a proposal: the same deterministic paper risk, idempotency, freshness, and duplicate-order gates decide, and the coordinator reports exactly what the gates did. The planner's raw output, each tool call and result, and the final tick summary are appended to `agent_transcript` in CockroachDB, rendered by the live view at `http://127.0.0.1:8100/`. Web content and model output are untrusted data; they can never expand the tool allow-list or change risk settings.
+
+`agent run` and `agent once` are inert unless `CTRADER_AUTOMATION_ENABLED=true`. Paper trading starts explicitly on each launch; cTrader demo wiring is a deliberate follow-up and stays disabled unless added explicitly.
+
 ## Development
 
 ```bash
