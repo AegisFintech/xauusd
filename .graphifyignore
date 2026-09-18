@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+xauusd_research.egg-info/
+reports/
+data/
+backups/

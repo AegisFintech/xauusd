@@ -7,6 +7,9 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
+# graphify
+graphify-out/cost.json
+
 # Runtime data
 *.pid
 *.seed
