@@ -15,6 +15,12 @@ from uuid import uuid4
 from .experiment_registry import PostgresConnection, canonical_json
 
 
+_PLANNER_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36 xauusd-agent/1.0"
+)
+
+
 class PlannerResponseError(ValueError):
     pass
 
@@ -189,7 +195,8 @@ class OpenAICompatiblePlanner:
     def _request(self, payload: dict[str, Any]) -> dict[str, Any]:
         url = self.base_url.rstrip("/") + "/chat/completions"
         req = request.Request(url, data=canonical_json(payload).encode(), method="POST",
-                              headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"})
+                              headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json",
+                                       "User-Agent": _PLANNER_USER_AGENT})
         with request.urlopen(req, timeout=self.timeout_seconds) as response:
             return json.loads(response.read())
 
