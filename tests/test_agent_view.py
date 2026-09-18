@@ -41,7 +41,9 @@ def test_index_html_renders_live_view(server):
     assert "live thinking" in body
     assert "newest first" in body
     assert "load older decisions" in body
+    assert "raw json" in body
     assert "steps" in body
+    assert "&middot;" not in body
 
 
 def test_steps_endpoint_defaults_to_newest_first(server):

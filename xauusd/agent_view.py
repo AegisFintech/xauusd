@@ -16,7 +16,7 @@ _PAGE = """<!doctype html>
 <style>
  body{background:#0d1017;color:#d7dde6;font:13px/1.45 ui-monospace,Menlo,monospace;margin:0;padding:16px}
  h1{font-size:15px;color:#8ab4f8;margin:0 0 4px}
- #meta{color:#7f8ea3;margin-bottom:8px}
+ #meta{color:#7f8ea3;margin-bottom:8px;min-height:15px}
  #runs{color:#7f8ea3;margin-bottom:12px;font-size:12px}
  .step{margin:6px 0;padding:8px 10px;border-left:3px solid #2a3444;background:#141a24;border-radius:0 4px 4px 0;white-space:pre-wrap;word-break:break-word}
  .step.tick_start,.step.tick_end{border-color:#8ab4f8}
@@ -24,7 +24,7 @@ _PAGE = """<!doctype html>
  .step.assistant{border-color:#f2c14e;background:#201c12}
  .step.tool_call{border-color:#4dab6d}
  .step.tool_result{border-color:#5b87b8}
- .step b{display:block;color:#8ab4f8;margin-bottom:3px}
+ .step b{display:block;color:#8ab4f8;margin-bottom:3px;font-weight:700}
  .step .human{margin:0;white-space:pre-wrap}
  .step details{margin-top:3px}
  .step summary{color:#7f8ea3;cursor:pointer;font-size:12px}
@@ -41,18 +41,17 @@ _PAGE = """<!doctype html>
 <div id="end" style="display:none">end of history</div>
 <script>
  let cur=null, topId=0, bottomId=0, loading=false, ended=false;
- const log=()=>document.getElementById('log');
+ const rendered=new Set();
+ const $=id=>document.getElementById(id);
  const esc=t=>String(t).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
  async function j(u){const r=await fetch(u);if(!r.ok)throw Error(r.status);return r.json();}
- async function loadTop(){
-  const st=await j('/api/steps?run_id='+encodeURIComponent(cur)+'&limit=100');
-  for(const s of st.steps)append(s,false);
-  if(st.steps.length)bottomId=st.steps[st.steps.length-1].id;
-  if(st.count<100)markEnded();
- }
+ function fmtTime(iso){if(!iso)return '?';const d=new Date(iso);return isNaN(d)?String(iso):d.toISOString().slice(11,19)+' UTC';}
+ function fmtBar(iso){const m=/T(\\d\\d):(\\d\\d)/.exec(String(iso||''));return m?m[1]+':'+m[2]+' UTC':String(iso);}
  function stepNode(s){
+  if(rendered.has(s.id))return null;rendered.add(s.id);
   const d=document.createElement('div');d.className='step '+s.phase;
-  const b=document.createElement('b');b.textContent=s.phase.replace('_',' ').toUpperCase()+'  #'+s.id+'  tick '+s.tick;
+  const b=document.createElement('b');
+  b.textContent=s.phase.replace('_',' ').toUpperCase()+'  ·  tick '+s.tick+'  ·  '+fmtTime(s.occurred_at);
   d.appendChild(b);
   const hu=document.createElement('div');hu.className='human';hu.textContent=humanize(s);d.appendChild(hu);
   const det=document.createElement('details');
@@ -60,85 +59,95 @@ _PAGE = """<!doctype html>
   const pre=document.createElement('pre');pre.textContent=JSON.stringify(s.content,null,2);det.appendChild(pre);
   d.appendChild(det);return d;
  }
- function append(s,atTop){const n=stepNode(s);if(atTop)log().insertBefore(n,log().firstChild);else log().appendChild(n);}
+ function addNode(n,atTop){if(!n)return;if(atTop&&$('log').firstChild)$('log').insertBefore(n,$('log').firstChild);else $('log').appendChild(n);}
+ function pairs(o){
+  const out=[];
+  for(const k of Object.keys(o||{})){
+   const v=o[k];
+   if(v===undefined||v===null||v===''||(Array.isArray(v)&&v.length===0)||(typeof v==='object'&&Object.keys(v).length===0))continue;
+   out.push(typeof v==='object'?k+'='+JSON.stringify(v):k+': '+v);
+  }
+  return out.join('  ·  ');
+ }
+ function priceFmt(p){const n=Number(p);return Number.isFinite(n)?n.toFixed(2):String(p);}
  function humanize(s){
   const c=s.content||{};
   switch(s.phase){
    case 'tick_start':
-    return 'bar '+(c.bar_time_utc||'?')+(c.price!=null?'  &middot;  price '+priceFmt(c.price):'');
+    return (c.bar_time_utc?'bar '+fmtBar(c.bar_time_utc):'market watch')+(c.price!=null?'  ·  price '+priceFmt(c.price):'');
    case 'tick_end':
-    return (c.error_type?c.error_type+(c.message?' '+c.message:''):'summary: '+(c.summary||''))+(c.steps!=null?'  &middot;  watched '+c.steps+' steps':'');
+    if(c.error_type)return 'error - '+(c.summary||c.error_type);
+    return (c.summary?'summary: '+(c.summary||''):'done')+(c.steps!=null?'  ·  '+c.steps+' steps':'');
    case 'assistant':
-    if(c.action==='tool')return 'decided to call tool  '+c.tool+(c.input&&Object.keys(c.input).length?'(params: '+pairs(c.input)+')':'');
-    if(c.action==='final')return 'decision  &mdash;  '+(c.summary||'');
+    if(c.action==='tool')return 'decided to call '+c.tool+(c.input&&Object.keys(c.input).length?'  ('+pairs(c.input)+')':'');
+    if(c.action==='final')return 'decision  -  '+(c.summary||'see raw json');
     if(c.content)return String(c.content);
     return JSON.stringify(c);
    case 'tool_call':
-    return 'calling tool  '+c.tool+'  (step '+c.step+')'+(c.input&&Object.keys(c.input).length?'  &middot;  '+pairs(c.input):'');
+    return 'executing '+c.tool+(c.input&&Object.keys(c.input).length?'  ('+pairs(c.input)+')':'');
    case 'tool_result':
-    return pairs(c)||friendlyTool(c)||JSON.stringify(c);
+    return pairs(c)||JSON.stringify(c);
    case 'planner_error':
     return c.summary||JSON.stringify(c);
    default:
     return JSON.stringify(c);
   }
  }
- function friendlyTool(c){
-  const skip=['status','completed'];
-  if(c.signal&&c.signal!=='NONE')return 'signal '+c.signal+(c.quantity!=null?' qty '+c.quantity:'');
-  return '';
+ function markEnded(){ended=true;$('more').style.display='none';$('end').style.display='block';}
+ async function loadTop(){
+  const st=await j('/api/steps?run_id='+encodeURIComponent(cur)+'&limit=100');
+  for(const s of st.steps)addNode(stepNode(s),false);
+  if(st.steps.length){topId=st.steps[0].id;bottomId=st.steps[st.steps.length-1].id;}
+  if(st.count<100)markEnded();
+  updateMeta();
  }
- function pairs(o){
-  const out=[];
-  for(const k of Object.keys(o||{})){
-   const v=o[k];
-   if(v===undefined||v===null||v===''||(Array.isArray(v)&&v.length===0)||(typeof v==='object'&&Object.keys(v).length===0))continue;
-   if(typeof v==='object')out.push(k+'='+JSON.stringify(v));else out.push(k+'='+v);
-  }
-  return out.join('  &middot;  ');
- }
- function priceFmt(p){const n=Number(p);return Number.isFinite(n)?n.toFixed(2):p;}
- function markEnded(){ended=true;document.getElementById('more').style.display='none';document.getElementById('end').style.display='block';}
  async function loadOlder(){
-  if(loading||ended||!cur)return;loading=true;
+  if(loading||ended||!cur||!bottomId)return;loading=true;
   try{
    const st=await j('/api/steps?run_id='+encodeURIComponent(cur)+'&before='+bottomId+'&limit=100');
-   for(const s of st.steps)append(s,false);
+   for(const s of st.steps)addNode(stepNode(s),false);
    if(st.steps.length){bottomId=st.steps[st.steps.length-1].id;updateMeta();}
    if(st.count<100)markEnded();
   }catch(e){/* retry next scroll */}
   finally{loading=false;}
  }
- let obs;
  function watchSentinel(){
   if(!('IntersectionObserver' in window))return;
-  obs=new IntersectionObserver(en=>{if(en[0].isIntersecting)loadOlder();},{rootMargin:'300px'});
-  obs.observe(document.getElementById('more'));
+  new IntersectionObserver(en=>{if(en[0].isIntersecting)loadOlder();},{rootMargin:'300px'}).observe($('more'));
  }
  async function pull(){
-  const st=await j('/api/status');
-  if(st.latest_run_id!==cur){
-   cur=st.latest_run_id;topId=0;bottomId=0;loading=false;ended=false;
-   log().innerHTML='';
-   document.getElementById('more').style.display='block';document.getElementById('end').style.display='none';
-   if(cur){await refreshRuns();topId=0;await loadTop();}
-  }
-  updateMeta(st.latest_run_status);
-  referenceRuns(st.latest_run_id);
-  if(cur){
-   const nw=await j('/api/steps?run_id='+encodeURIComponent(cur)+'&after='+topId+'&limit=100');
-   if(nw.steps.length){
-    const nodes=nw.steps.map(stepNode);
-    for(let i=nodes.length-1;i>=0;i--)log().insertBefore(nodes[i],log().firstChild);
-    topId=nw.steps[nw.steps.length-1].id;updateMeta();
+  try{
+   const st=await j('/api/status');
+   if(st.latest_run_id!==cur){
+    cur=st.latest_run_id;topId=0;bottomId=0;loading=false;ended=false;rendered.clear();
+    $('log').innerHTML='';
+    $('more').style.display='block';$('end').style.display='none';
+    if(cur)await loadTop();
    }
-  }
+   updateMeta(st.latest_run_status);
+   if(cur){
+    const nw=await j('/api/steps?run_id='+encodeURIComponent(cur)+'&after='+topId+'&limit=100');
+    if(nw.steps.length){
+     const nodes=[];
+     for(const s of nw.steps){const n=stepNode(s);if(n)nodes.push(n);}
+     for(let i=nodes.length-1;i>=0;i--)if(nodes[i])addNode(nodes[i],true);
+     if(nodes.length){topId=Math.max(topId,nw.steps[nw.steps.length-1].id);updateMeta();}
+    }
+   }
+   await refreshRuns();
+  }catch(e){/* transient; next poll retries */}
  }
- function updateMeta(status){document.getElementById('meta').textContent=(cur?cur+' &middot; ':'')+(status||'')+' &middot; '+log().childElementCount+' decisions visible';}
- async function refreshRuns(){const r=await j('/api/runs?limit=6');renderRuns(r.runs);}
- async function referenceRuns(latest){if(!document.getElementById('runs').childElementCount)await refreshRuns();}
- function renderRuns(runs){document.getElementById('runs').innerHTML='recent runs: '+runs.map(r=>'<span class="k">'+esc(r.run_id)+'</span> ('+esc(r.status)+(r.finished_at?', fin '+esc(r.finished_at):'')+')').join(' &middot; ');}
- setInterval(pull,1000);watchSentinel();pull();setTimeout(()=>{if(!cur)document.getElementById('meta').textContent='no run yet &mdash; agent has not started';},4000);
+ function updateMeta(status){
+  const detail=(cur?cur:'no run yet')+(status?'  ·  '+status:'');
+  $('meta').textContent=detail+'  ·  '+rendered.size+' steps';
+ }
+ async function refreshRuns(){
+  const r=await j('/api/runs?limit=6');
+  const line='recent runs: '+r.runs.map(row=>'<span class="k">'+esc(row.run_id)+'</span> ('+esc(row.status)+(row.finished_at?'  ·  '+esc(fmtTime(row.finished_at)):'')+')').join('  ·  ');
+  if(line!==refreshRuns.last){refreshRuns.last=line;$('runs').innerHTML=line;}
+ }
+ setInterval(pull,1000);watchSentinel();pull();
+ setTimeout(()=>{if(!cur)$('meta').textContent='no run yet  -  agent has not started';},4000);
 </script></body></html>
 """
 
