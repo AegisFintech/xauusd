@@ -25,3 +25,12 @@ This repository develops an XAUUSD research, paper-trading, and cTrader demo-acc
 - Run focused tests, the complete suite, and `git diff --check` before committing.
 - Treat the database as the authoritative application state; local files are recovery artifacts only.
 - Preserve existing user changes and generated research data unless explicitly asked to remove them.
+
+## Operations
+
+- Run the suite as `.venv/bin/python -m pytest tests -q -p no:cacheprovider`. A bare `pytest` from the repo root hangs while collecting `reports/` and `data/`.
+- One continuous agent process runs as the systemd unit `xauusd-agent.service` (`python -m xauusd.cli agent run`). Every `agent_<uuid12>` in the live view is one process start; a graceful SIGTERM marks it stopped, so a restart cadence produces many short runs. That is one process, not many agents.
+- The service writes no console/journald logs. Treat the Cockroach transcript/state and the live view (`AGENT_VIEW_PORT`, default `8100`) as the only observability.
+- The planner calls an OpenAI-compatible HTTP endpoint configured by `OPENAI_BASE_URL`, `OPENAI_MODEL`, `OPENAI_API_KEY` in `.env` (loaded through the unit's `EnvironmentFile`). That endpoint sits behind a Cloudflare WAF that rejects urllib's default `User-Agent` with `403 error code: 1010`; the planner always sends a browser-grade `User-Agent`, and that header must not be dropped.
+- `xauusd.paper_trading.paper_from_env()` is the single shared paper-trading entry point (CLI and live view `/api/paper`).
+- Never echo credentials or endpoint tokens into prompts, diffs, reports, or fixtures even in redacted form.

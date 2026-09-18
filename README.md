@@ -74,6 +74,8 @@ A broker-free **paper-only** stage runs the deterministic paper pipeline without
 
 Every tick the planner may call a fixed allow-list of read-only tools (`read_market`, `paper_state`, `canary_signal`, `firecrawl_fetch`) and `propose_trade`. A proposal is only a proposal: the same deterministic paper risk, idempotency, freshness, and duplicate-order gates decide, and the coordinator reports exactly what the gates did. The planner's raw output, each tool call and result, and the final tick summary are appended to `agent_transcript` in CockroachDB, rendered by the live view at `http://127.0.0.1:8100/`. Web content and model output are untrusted data; they can never expand the tool allow-list or change risk settings.
 
+The view listens on `AGENT_VIEW_PORT` (default `8100`). It shows the transcript newest-first with the AI's plain-English reasons, a paper-account strip (equity, position, day/realized P&L, drawdown, recent fills from `/api/paper`), and a recent-runs line with per-run tick counts and duration. Each `agent_<uuid12>` is one process start: a graceful SIGTERM marks the old run stopped, so a restart cadence legitimately produces many short "runs" — this is one process, not many agents., so a restart cadence legitimately produces many short "runs" — this is one process, not many agents.
+
 `agent run` and `agent once` are inert unless `CTRADER_AUTOMATION_ENABLED=true`. Paper trading starts explicitly on each launch; cTrader demo wiring is a deliberate follow-up and stays disabled unless added explicitly.
 
 To run the agent as a persistent background service (paper-only, live view on `http://127.0.0.1:8100/`):
@@ -82,19 +84,24 @@ To run the agent as a persistent background service (paper-only, live view on `h
 sudo cp deploy/systemd/xauusd-agent.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now xauusd-agent.service
-journalctl -u xauusd-agent.service -f   # follow the agent's printed ticks
 ```
 
-The service reads only `EnvironmentFile=/root/xauusd/.env` (it inherits no shell exports), so `OPENAI_BASE_URL`, `OPENAI_MODEL`, `OPENAI_API_KEY`, `DATABASE_URL`, `CTRADER_AUTOMATION_ENABLED=true`, and `CTRADER_PAPER_ONLY=true` must all be set there. Restart it (`systemctl restart xauusd-agent.service`) after editing `.env`. SIGTERM finishes the transcript run cleanly before the process stops.
+The unit captures the view port and `.env`; there is nothing to follow in the journal (see the observability note above). Use `/api/paper`, `/api/runs`, and the transcript to confirm activity.
+
+The service reads only `EnvironmentFile=/root/xauusd/.env` (it inherits no shell exports), so `OPENAI_BASE_URL`, `OPENAI_MODEL`, `OPENAI_API_KEY`, `DATABASE_URL`, `CTRADER_AUTOMATION_ENABLED=true`, and `CTRADER_PAPER_ONLY=true` must all be set there. `OPENAI_*` must point at an OpenAI-compatible HTTP endpoint; that endpoint sits behind a Cloudflare WAF that rejects urllib's default `User-Agent` with `403 error code: 1010`, so the planner always sends a browser-grade `User-Agent`. Restart it (`systemctl restart xauusd-agent.service`) after editing `.env`. SIGTERM finishes the transcript run cleanly before the process stops.
+
+The service writes no console or journald logs; the transcript, Cockroach state, and the live view are the only observability.
 
 ## Development
 
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -e '.[dev]'
-.venv/bin/python -m pytest -q
+.venv/bin/python -m pytest tests -q -p no:cacheprovider
 git diff --check
 ```
+
+An unscoped `pytest` from the repo root hangs while collecting `reports/` and `data/`; always scope it to `tests`.
 
 ## Demo Automation Service
 
