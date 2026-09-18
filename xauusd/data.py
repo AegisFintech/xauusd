@@ -13,6 +13,17 @@ import pandas as pd
 log = logging.getLogger(__name__)
 REQUIRED = ("open", "high", "low", "close", "volume")
 
+
+def _error_code(message: Any, detail: bool = False) -> str | None:
+    """Return the cTrader error code for an error message, or None when unset."""
+    code = message.get("errorCode") if isinstance(message, dict) else getattr(message, "errorCode", None)
+    if not code:
+        return None
+    if not detail:
+        return str(code)
+    description = message.get("description") if isinstance(message, dict) else getattr(message, "description", None)
+    return f"{code}: {description or ''}"
+
 @dataclass(frozen=True)
 class DataConfig:
     raw_dir: Path = Path("data/raw")
@@ -188,6 +199,9 @@ class CTraderOpenApiDownloader:
 
         def got_page(response):
             message = Protobuf.extract(response)
+            error = _error_code(message)
+            if error is not None:
+                stop_error(RuntimeError(f"cTrader data error {error}")); return
             bars = list(message.trendbar)
             if not bars:
                 reactor.stop(); return
@@ -200,6 +214,8 @@ class CTraderOpenApiDownloader:
 
         def got_symbol(response):
             message = Protobuf.extract(response)
+            if _error_code(message) is not None:
+                stop_error(RuntimeError(f"cTrader symbol error {_error_code(message)}")); return
             if not message.symbol:
                 stop_error(Exception("cTrader returned no symbol details")); return
             state["digits"] = int(message.symbol[0].digits)
@@ -207,6 +223,8 @@ class CTraderOpenApiDownloader:
 
         def got_symbols(response):
             message = Protobuf.extract(response)
+            if _error_code(message) is not None:
+                stop_error(RuntimeError(f"cTrader symbols error {_error_code(message)}")); return
             wanted = re.sub(r"[^A-Z0-9]", "", self.store.config.symbol.upper())
             matches = [s for s in message.symbol if re.sub(r"[^A-Z0-9]", "", s.symbolName.upper()) == wanted]
             if not matches:
@@ -217,7 +235,11 @@ class CTraderOpenApiDownloader:
             request = ProtoOASymbolByIdReq(ctidTraderAccountId=self.config.account_id, symbolId=[symbol.symbolId])
             client.send(request, responseTimeoutInSeconds=30).addCallbacks(got_symbol, stop_error)
 
-        def account_ok(_):
+        def account_ok(response):
+            message = Protobuf.extract(response)
+            error = _error_code(message, detail=True)
+            if error is not None:
+                stop_error(RuntimeError(f"cTrader account authorization error {error}")); return
             request = ProtoOASymbolsListReq(ctidTraderAccountId=self.config.account_id, includeArchivedSymbols=False)
             client.send(request, responseTimeoutInSeconds=30).addCallbacks(got_symbols, stop_error)
 
