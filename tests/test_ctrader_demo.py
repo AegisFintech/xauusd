@@ -84,12 +84,11 @@ class Message:
 def test_open_api_transport_discovers_demo_account_and_normalizes_reconciliation(monkeypatch):
     monkeypatch.setenv("CTRADER_DEMO_ONLY", "true")
     client = FakeClient([
-        {}, {"ctidTraderAccount": [{"ctidTraderAccountId": 7, "isLive": False}]}, {},
-        {"symbol": [{"symbolName": "XAUUSD", "symbolId": 99, "enabled": True}]},
+        {}, {}, {"symbol": [{"symbolName": "XAUUSD", "symbolId": 99, "enabled": True}]},
         {"order": [{"clientOrderId": "pending-1", "orderId": 123}]},
     ])
-    messages = {name: Message for name in ("ProtoOAApplicationAuthReq", "ProtoOAGetAccountListByAccessTokenReq",
-                                            "ProtoOAAccountAuthReq", "ProtoOASymbolsListReq")}
+    messages = {name: Message for name in ("ProtoOAApplicationAuthReq", "ProtoOAAccountAuthReq",
+                                            "ProtoOASymbolsListReq")}
     transport = CTraderDemoOpenApiTransport(
         CTraderDemoOpenApiConfig("id", "secret", "token", 7), client_factory=lambda host, port: client,
         extract=lambda value: value, message_types=messages,
@@ -97,7 +96,8 @@ def test_open_api_transport_discovers_demo_account_and_normalizes_reconciliation
     assert transport.discover() == CTraderDemoAccount(7, 99)
     details = transport.send({"type": "ProtoOAReconcileReq"}, 1)
     assert details["request_outcomes"]["pending-1"]["response"]["order_id"] == 123
-    assert client.started and len(client.requests) == 5
+    assert client.started and len(client.requests) == 4
+    assert not any(type(request).__name__ == "ProtoOAGetAccountListByAccessTokenReq" for request in client.requests)
 
 
 def test_open_api_transport_rejects_non_demo_before_constructing_client(monkeypatch):
@@ -122,13 +122,11 @@ def test_open_api_transport_selects_the_only_authorized_demo_account(monkeypatch
 
 def test_open_api_transport_reads_symbol_volume_metadata(monkeypatch):
     monkeypatch.setenv("CTRADER_DEMO_ONLY", "true")
-    client = FakeClient([{}, {"ctidTraderAccount": [{"ctidTraderAccountId": 7, "isLive": False}]}, {},
-                         {"symbol": [{"symbolName": "XAUUSD", "symbolId": 99, "enabled": True}]},
+    client = FakeClient([{}, {}, {"symbol": [{"symbolName": "XAUUSD", "symbolId": 99, "enabled": True}]},
                          {"symbol": [{"symbolName": "XAUUSD", "symbolId": 99, "digits": 2, "lotSize": 100.0,
                                       "minVolume": 10, "maxVolume": 1000, "stepVolume": 10}]}])
-    messages = {name: Message for name in ("ProtoOAApplicationAuthReq", "ProtoOAGetAccountListByAccessTokenReq",
-                                            "ProtoOAAccountAuthReq", "ProtoOASymbolsListReq",
-                                            "ProtoOASymbolByIdReq")}
+    messages = {name: Message for name in ("ProtoOAApplicationAuthReq", "ProtoOAAccountAuthReq",
+                                            "ProtoOASymbolsListReq", "ProtoOASymbolByIdReq")}
     transport = CTraderDemoOpenApiTransport(CTraderDemoOpenApiConfig("id", "secret", "token", 7),
         client_factory=lambda host, port: client, extract=lambda value: value, message_types=messages)
 
@@ -136,6 +134,18 @@ def test_open_api_transport_reads_symbol_volume_metadata(monkeypatch):
 
     assert metadata == CTraderSymbolMetadata("XAUUSD", 99, digits=2, lot_size=100.0,
                                              min_volume=10, max_volume=1000, step_volume=10)
+
+
+def test_configured_account_id_bypasses_account_list_scope(monkeypatch):
+    monkeypatch.setenv("CTRADER_DEMO_ONLY", "true")
+    client = FakeClient([{}, {}, {"symbol": [{"symbolName": "XAUUSD", "symbolId": 99, "enabled": True}]}])
+    messages = {name: Message for name in ("ProtoOAApplicationAuthReq", "ProtoOAAccountAuthReq",
+                                            "ProtoOASymbolsListReq")}
+    transport = CTraderDemoOpenApiTransport(CTraderDemoOpenApiConfig("id", "secret", "token", 7),
+        client_factory=lambda host, port: client, extract=lambda value: value, message_types=messages)
+
+    assert transport.discover() == CTraderDemoAccount(7, 99)
+    assert not any(type(request).__name__ == "ProtoOAGetAccountListByAccessTokenReq" for request in client.requests)
 
 
 def test_symbol_metadata_and_volume_policy_validate_invariants():
@@ -159,12 +169,10 @@ def test_open_api_transport_surfaces_access_token_error(monkeypatch):
 
 def test_symbol_detail_error_is_fail_closed(monkeypatch):
     monkeypatch.setenv("CTRADER_DEMO_ONLY", "true")
-    client = FakeClient([{}, {"ctidTraderAccount": [{"ctidTraderAccountId": 7, "isLive": False}]}, {},
-                         {"symbol": [{"symbolName": "XAUUSD", "symbolId": 99, "enabled": True}]},
+    client = FakeClient([{}, {}, {"symbol": [{"symbolName": "XAUUSD", "symbolId": 99, "enabled": True}]},
                          {"errorCode": "CH_UNKNOWN", "description": "symbol detail failure"}])
-    messages = {name: Message for name in ("ProtoOAApplicationAuthReq", "ProtoOAGetAccountListByAccessTokenReq",
-                                            "ProtoOAAccountAuthReq", "ProtoOASymbolsListReq",
-                                            "ProtoOASymbolByIdReq")}
+    messages = {name: Message for name in ("ProtoOAApplicationAuthReq", "ProtoOAAccountAuthReq",
+                                            "ProtoOASymbolsListReq", "ProtoOASymbolByIdReq")}
     transport = CTraderDemoOpenApiTransport(CTraderDemoOpenApiConfig("id", "secret", "token", 7),
         client_factory=lambda host, port: client, extract=lambda value: value, message_types=messages)
     with pytest.raises(CTraderDemoSafetyError, match=r"symbol detail error CH_UNKNOWN"):

@@ -215,11 +215,16 @@ class CTraderDemoOpenApiTransport:
         messages = self._messages()
         self._request(messages["ProtoOAApplicationAuthReq"](
             clientId=self.config.client_id, clientSecret=self.config.client_secret), self.config.timeout_seconds)
-        accounts = self._extract_message(self._request(messages["ProtoOAGetAccountListByAccessTokenReq"](
-            accessToken=self.config.access_token), self.config.timeout_seconds))
-        self._raise_for_error(accounts, "account list")
-        account = self._find_account(accounts)
-        account_id = self._field(account, "ctidTraderAccountId")
+        if self.config.account_id is None:
+            accounts = self._extract_message(self._request(messages["ProtoOAGetAccountListByAccessTokenReq"](
+                accessToken=self.config.access_token), self.config.timeout_seconds))
+            self._raise_for_error(accounts, "account list")
+            account = self._find_account(accounts)
+            account_id = self._field(account, "ctidTraderAccountId")
+        else:
+            # A configured demo account id bypasses the account-list request, which can require
+            # a token scope that is unnecessary for direct account authorization.
+            account_id = self.config.account_id
         self._request(messages["ProtoOAAccountAuthReq"](
             ctidTraderAccountId=account_id, accessToken=self.config.access_token), self.config.timeout_seconds)
         symbols = self._extract_message(self._request(messages["ProtoOASymbolsListReq"](
