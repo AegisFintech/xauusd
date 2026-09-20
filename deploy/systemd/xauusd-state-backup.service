@@ -1,0 +1,18 @@
+[Unit]
+Description=XAUUSD local SQLite state backup (manifest + gzip + sha256)
+After=network-online.target xauusd-agent.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/xauusd
+EnvironmentFile=/root/xauusd/.env
+ExecStart=/root/xauusd/.venv/bin/python -m xauusd.cli state backup --root /root/xauusd/backups/local-state
+TimeoutStartSec=300
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=read-only
+ReadWritePaths=/root/xauusd/backups /root/xauusd/reports
+
+[Install]
+WantedBy=multi-user.target

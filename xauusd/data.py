@@ -1,17 +1,27 @@
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 import json
 import logging
 import os
-import re
 from typing import Any
 
 import pandas as pd
 
+from .ctrader_auth import DEMO_HOST
+
 log = logging.getLogger(__name__)
 REQUIRED = ("open", "high", "low", "close", "volume")
+
+
+class CTraderAuthError(RuntimeError):
+    """A cTrader authorization request failed; ``code`` carries the Open API error code."""
+
+    def __init__(self, code: str, description: str = ""):
+        super().__init__(f"cTrader authorization error {code}: {description}")
+        self.code = str(code)
+        self.description = str(description)
 
 
 def _error_code(message: Any, detail: bool = False) -> str | None:
@@ -80,8 +90,9 @@ class CTraderOpenApiConfig:
     client_id: str
     client_secret: str
     access_token: str
-    account_id: int
-    host: str = "demo.ctraderapi.com"
+    account_id: int | None = None
+    refresh_token: str | None = None
+    host: str = DEMO_HOST
     port: int = 5035
 
     @classmethod
@@ -90,19 +101,35 @@ class CTraderOpenApiConfig:
             "client_id": os.getenv("CTRADER_CLIENT_ID"),
             "client_secret": os.getenv("CTRADER_CLIENT_SECRET"),
             "access_token": os.getenv("CTRADER_ACCESS_TOKEN"),
-            "account_id": os.getenv("CTRADER_CTID_TRADER_ACCOUNT_ID"),
         }
         missing = [name for name, value in values.items() if not value]
         if missing:
             raise RuntimeError(f"missing cTrader Open API settings: {', '.join(missing)}")
-        return cls(
+        account_raw = os.getenv("CTRADER_CTID_TRADER_ACCOUNT_ID")
+        if account_raw and not str(account_raw).strip().isdigit():
+            raise RuntimeError("CTRADER_CTID_TRADER_ACCOUNT_ID must be a positive integer when configured")
+        config = cls(
             client_id=str(values["client_id"]),
             client_secret=str(values["client_secret"]),
             access_token=str(values["access_token"]),
-            account_id=int(str(values["account_id"])),
-            host=os.getenv("CTRADER_OPEN_API_HOST", "demo.ctraderapi.com"),
+            account_id=int(str(account_raw).strip()) if account_raw and str(account_raw).strip() else None,
+            refresh_token=os.getenv("CTRADER_REFRESH_TOKEN"),
+            host=os.getenv("CTRADER_OPEN_API_HOST", DEMO_HOST),
             port=int(os.getenv("CTRADER_OPEN_API_PORT", "5035")),
         )
+        config.validate()
+        return config
+
+    def validate(self) -> None:
+        if os.getenv("CTRADER_DEMO_ONLY") != "true":
+            raise RuntimeError("CTRADER_DEMO_ONLY=true is required for cTrader data updates")
+        if self.host != DEMO_HOST:
+            raise RuntimeError(f"cTrader data updates are restricted to {DEMO_HOST}")
+        if self.port <= 0:
+            raise RuntimeError("cTrader port must be positive")
+        if self.account_id is not None and (not isinstance(self.account_id, int) or
+                                            isinstance(self.account_id, bool) or self.account_id <= 0):
+            raise RuntimeError("account_id must be a positive integer when configured")
 
 
 def trendbars_to_frame(trendbars: list[Any], digits: int = 5) -> pd.DataFrame:
@@ -150,7 +177,15 @@ class CTraderOpenApiDownloader:
         end_ms = self._timestamp_ms(end or datetime.now(timezone.utc))
         if start_ms >= end_ms:
             raise ValueError("start must be earlier than end")
-        pages, metadata = self._fetch(start_ms, end_ms, page_size)
+        try:
+            pages, metadata = self._fetch(start_ms, end_ms, page_size)
+        except CTraderAuthError as exc:
+            if exc.code != "CH_ACCESS_TOKEN_INVALID" or not self.config.refresh_token:
+                raise
+            tokens = self._refresh_tokens()
+            self.config = replace(self.config, access_token=tokens["access_token"],
+                                  refresh_token=tokens.get("refresh_token", self.config.refresh_token))
+            pages, metadata = self._fetch(start_ms, end_ms, page_size)
         frames = [trendbars_to_frame(page["trendbars"], metadata["digits"]) for page in pages]
         bars = pd.concat(frames).sort_index() if frames else trendbars_to_frame([])
         bars = bars[~bars.index.duplicated(keep="last")]
@@ -165,23 +200,38 @@ class CTraderOpenApiDownloader:
             "pages": len(pages),
             "symbol": metadata["symbol_name"],
             "symbol_id": metadata["symbol_id"],
+            "account_id": metadata["account_id"],
             "raw_archives": [str(path) for path in archive_paths],
             "processed_path": str(self.store.path),
         })
         return result
+
+    def _refresh_tokens(self) -> dict[str, str]:
+        from .oauth import CTraderOAuthError, persist_tokens_env, refresh_access_token
+        try:
+            tokens = refresh_access_token(self.config.client_id, self.config.client_secret, self.config.refresh_token)
+        except CTraderOAuthError as exc:
+            raise CTraderAuthError("CH_ACCESS_TOKEN_INVALID", f"OAuth refresh failed: {exc}") from exc
+        try:
+            persist_tokens_env(tokens["access_token"], tokens.get("refresh_token"))
+        except OSError as exc:
+            raise CTraderAuthError("CH_ACCESS_TOKEN_INVALID", f"could not persist refreshed tokens: {exc}") from exc
+        return tokens
 
     def _fetch(self, start_ms: int, end_ms: int, page_size: int) -> tuple[list[dict], dict]:
         # Twisted's global reactor is intentionally isolated to one CLI invocation.
         from twisted.internet import reactor
         from ctrader_open_api import Client, Protobuf, TcpProtocol
         from ctrader_open_api.messages.OpenApiMessages_pb2 import (
-            ProtoOAAccountAuthReq, ProtoOAApplicationAuthReq, ProtoOAGetTrendbarsReq,
-            ProtoOASymbolByIdReq, ProtoOASymbolsListReq,
+            ProtoOAAccountAuthReq, ProtoOAApplicationAuthReq, ProtoOAGetAccountListByAccessTokenReq,
+            ProtoOAGetTrendbarsReq, ProtoOASymbolByIdReq, ProtoOASymbolsListReq,
         )
         from ctrader_open_api.messages.OpenApiModelMessages_pb2 import ProtoOATrendbarPeriod
+        from .ctrader_auth import demo_accounts, resolve_symbol
 
         client = Client(self.config.host, self.config.port, TcpProtocol)
-        state: dict[str, Any] = {"pages": [], "cursor": end_ms}
+        state: dict[str, Any] = {"pages": [], "cursor": end_ms, "discover": self.config.account_id is None}
+        state.setdefault("account_id", self.config.account_id)
 
         def stop_error(failure):
             message = failure.getErrorMessage() if hasattr(failure, "getErrorMessage") else str(failure)
@@ -189,9 +239,14 @@ class CTraderOpenApiDownloader:
             if reactor.running:
                 reactor.stop()
 
+        def auth_stop(code: str, description: str = "") -> None:
+            state["error"] = CTraderAuthError(code, description)
+            if reactor.running:
+                reactor.stop()
+
         def request_page():
             request = ProtoOAGetTrendbarsReq(
-                ctidTraderAccountId=self.config.account_id, symbolId=state["symbol_id"],
+                ctidTraderAccountId=state["account_id"], symbolId=state["symbol_id"],
                 period=ProtoOATrendbarPeriod.Value(self.store.config.timeframe),
                 fromTimestamp=start_ms, toTimestamp=state["cursor"], count=page_size,
             )
@@ -221,31 +276,79 @@ class CTraderOpenApiDownloader:
             state["digits"] = int(message.symbol[0].digits)
             request_page()
 
-        def got_symbols(response):
-            message = Protobuf.extract(response)
-            if _error_code(message) is not None:
-                stop_error(RuntimeError(f"cTrader symbols error {_error_code(message)}")); return
-            wanted = re.sub(r"[^A-Z0-9]", "", self.store.config.symbol.upper())
-            matches = [s for s in message.symbol if re.sub(r"[^A-Z0-9]", "", s.symbolName.upper()) == wanted]
-            if not matches:
-                available = [s.symbolName for s in message.symbol if "XAU" in s.symbolName.upper()]
-                stop_error(Exception(f"symbol {self.store.config.symbol!r} not found; XAU candidates: {available}")); return
-            symbol = next((s for s in matches if s.enabled), matches[0])
-            state.update(symbol_id=int(symbol.symbolId), symbol_name=symbol.symbolName)
-            request = ProtoOASymbolByIdReq(ctidTraderAccountId=self.config.account_id, symbolId=[symbol.symbolId])
+        def symbol_detail(symbol_id: int) -> None:
+            request = ProtoOASymbolByIdReq(ctidTraderAccountId=state["account_id"], symbolId=[symbol_id])
             client.send(request, responseTimeoutInSeconds=30).addCallbacks(got_symbol, stop_error)
 
-        def account_ok(response):
+        def got_symbols(response, index: int):
             message = Protobuf.extract(response)
-            error = _error_code(message, detail=True)
-            if error is not None:
-                stop_error(RuntimeError(f"cTrader account authorization error {error}")); return
-            request = ProtoOASymbolsListReq(ctidTraderAccountId=self.config.account_id, includeArchivedSymbols=False)
-            client.send(request, responseTimeoutInSeconds=30).addCallbacks(got_symbols, stop_error)
+            code = _error_code(message, detail=False)
+            if code is not None:
+                if state["discover"] and code != "CH_ACCESS_TOKEN_INVALID":
+                    probe_account(index + 1); return
+                description = getattr(message, "description", "") or ""
+                auth_stop(code, description); return
+            resolved = resolve_symbol(list(message.symbol), self.store.config.symbol)
+            if resolved is None:
+                if state["discover"]:
+                    probe_account(index + 1); return
+                available = [s.symbolName for s in message.symbol if "XAU" in (s.symbolName.upper() or "")]
+                auth_stop("CH_CTID_TRADER_ACCOUNT_NOT_FOUND",
+                          f"symbol {self.store.config.symbol!r} not found; XAU candidates: {available}")
+                return
+            symbol_id, symbol_name = resolved
+            state.update(symbol_id=symbol_id, symbol_name=symbol_name)
+            symbol_detail(symbol_id)
+
+        def account_ok(response, index: int):
+            message = Protobuf.extract(response)
+            code = _error_code(message, detail=False)
+            if code is not None:
+                if state["discover"] and code != "CH_ACCESS_TOKEN_INVALID":
+                    probe_account(index + 1); return
+                description = getattr(message, "description", "") or ""
+                auth_stop(code, description); return
+            request = ProtoOASymbolsListReq(ctidTraderAccountId=state["account_id"], includeArchivedSymbols=False)
+            client.send(request, responseTimeoutInSeconds=30).addCallbacks(
+                lambda response, i=index: got_symbols(response, i), stop_error)
+
+        def probe_account(index: int) -> None:
+            accounts = state["accounts"]
+            if index >= len(accounts):
+                auth_stop("CH_CTID_TRADER_ACCOUNT_NOT_FOUND", "no authorized demo account serves XAUUSD")
+                return
+            account = accounts[index]
+            account_id = int(getattr(account, "ctidTraderAccountId"))
+            state["account_id"] = account_id
+            request = ProtoOAAccountAuthReq(ctidTraderAccountId=account_id, accessToken=self.config.access_token)
+            client.send(request, responseTimeoutInSeconds=30).addCallbacks(
+                lambda response, i=index: account_ok(response, i), stop_error)
+
+        def got_accounts(response):
+            message = Protobuf.extract(response)
+            code = _error_code(message, detail=False)
+            if code is not None:
+                description = getattr(message, "description", "") or ""
+                auth_stop(code, description); return
+            accounts = demo_accounts(list(message.ctidTraderAccount))
+            if not accounts:
+                auth_stop("CH_CTID_TRADER_ACCOUNT_NOT_FOUND", "no authorized demo account returned by discovery")
+                return
+            state["accounts"] = accounts
+            probe_account(0)
+
+        def account_or_discover() -> None:
+            if self.config.account_id is not None:
+                state.setdefault("account_id", self.config.account_id)
+                request = ProtoOAAccountAuthReq(ctidTraderAccountId=self.config.account_id, accessToken=self.config.access_token)
+                client.send(request, responseTimeoutInSeconds=30).addCallbacks(
+                    lambda response: account_ok(response, 0), stop_error)
+                return
+            request = ProtoOAGetAccountListByAccessTokenReq(accessToken=self.config.access_token)
+            client.send(request, responseTimeoutInSeconds=30).addCallbacks(got_accounts, stop_error)
 
         def app_ok(_):
-            request = ProtoOAAccountAuthReq(ctidTraderAccountId=self.config.account_id, accessToken=self.config.access_token)
-            client.send(request, responseTimeoutInSeconds=30).addCallbacks(account_ok, stop_error)
+            account_or_discover()
 
         def connected(_):
             request = ProtoOAApplicationAuthReq(clientId=self.config.client_id, clientSecret=self.config.client_secret)
@@ -259,7 +362,7 @@ class CTraderOpenApiDownloader:
         reactor.run()
         if "error" in state:
             raise state["error"]
-        metadata = {key: state[key] for key in ("symbol_id", "symbol_name", "digits")}
+        metadata = {key: state[key] for key in ("symbol_id", "symbol_name", "digits", "account_id")}
         return state["pages"], metadata
 
     def _archive(self, pages: list[dict], metadata: dict, start_ms: int, end_ms: int) -> list[Path]:
@@ -269,7 +372,7 @@ class CTraderOpenApiDownloader:
         for number, page in enumerate(pages, start=1):
             bars = page["trendbars"]
             payload = {
-                "source": "ctrader-open-api", "account_id": self.config.account_id,
+                "source": "ctrader-open-api", "account_id": metadata["account_id"],
                 "symbol": metadata["symbol_name"], "symbol_id": metadata["symbol_id"],
                 "digits": metadata["digits"], "timeframe": self.store.config.timeframe,
                 "requested_from_ms": start_ms, "requested_to_ms": end_ms,

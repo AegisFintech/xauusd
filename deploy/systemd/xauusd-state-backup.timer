@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily XAUUSD local SQLite state backup
+Requires=xauusd-state-backup.service
+
+[Timer]
+OnCalendar=*-*-* 00:15:00
+Persistent=true
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target

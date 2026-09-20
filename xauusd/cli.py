@@ -1,6 +1,8 @@
 from __future__ import annotations
-import argparse,json,logging,os
+import argparse,json,logging,os,time
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Callable
 from dotenv import load_dotenv
 from .core import synthetic_bars, features, Backtester
 from .data import HistoricalDataStore, CTraderHistoricalAdapter, CTraderOpenApiConfig, CTraderOpenApiDownloader
@@ -141,13 +143,29 @@ def demo_automation(action: str) -> dict:
  return runner.status()
 
 def _agent_status_view() -> dict:
- from .agent_loop import CockroachAgentTranscriptStore
- store=CockroachAgentTranscriptStore()
+ from .agent_loop import agent_transcript_store_from_env
+ store=agent_transcript_store_from_env()
  paper=_paper_from_env()
  state=paper.state()
  return {"runs":store.runs(limit=5),
          "paper":{"stopped":state.get("stopped"),"position":state.get("position"),"cash":state.get("cash"),
                   "trades_today":state.get("trades_today"),"day_start_equity":state.get("day_start_equity")}}
+
+def _agent_status_path() -> str:
+ return os.getenv("AGENT_STATUS_FILE","reports/agent_status.json")
+
+def _download_with_retry(downloader: Any,*args: Any,attempts: int=3,
+                         backoff: tuple[float,...]=(5.0,20.0),**kwargs: Any) -> Any:
+ """Transient-failure retry around a scheduled data download; auth errors are permanent."""
+ from .data import CTraderAuthError
+ last: Exception|None=None
+ for attempt in range(attempts):
+  try: return downloader.download(*args,**kwargs)
+  except CTraderAuthError: raise
+  except Exception as exc:
+   last=exc
+   if attempt<attempts-1: time.sleep(backoff[min(attempt,len(backoff)-1)])
+ raise last
 
 def _serve_agent_view() -> None:
  import threading
@@ -157,14 +175,31 @@ def _serve_agent_view() -> None:
  port=int(os.getenv("AGENT_VIEW_PORT",str(DEFAULT_VIEW_PORT)))
  print(f"agent live view: http://{host}:{port}/",flush=True)
  uvicorn_server=__import__("uvicorn")
- uvicorn_server.run(create_app(),host=host,port=port,log_level="warning")
+ from .agent_loop import agent_transcript_store_from_env
+ uvicorn_server.run(create_app(store=agent_transcript_store_from_env()),host=host,port=port,log_level="warning")
+
+def _agent_data_refresh_source(market_store: HistoricalDataStore, config: AgentConfig) -> Callable[[], dict]:
+ """Bound data refresh for a stale agent tick. The downloader's auth errors fail loudly."""
+ from .data import CTraderOpenApiConfig, CTraderOpenApiDownloader
+ import pandas as pd
+ def refresh():
+  last=market_store.read().index.max()
+  start=last-pd.Timedelta(minutes=10)
+  result=CTraderOpenApiDownloader(CTraderOpenApiConfig.from_env(),market_store).download(start)
+  return {"ok":True,"downloaded_rows":int(result.get("downloaded_rows",0)),
+          "pages":int(result.get("pages",0)),"last_bar_utc":result.get("end"),
+          "symbol":result.get("symbol")}
+ return refresh
 
 def agent_controller(action: str) -> dict:
  """Single continuously trading AI agent with a visible thinking process."""
- from .agent_loop import AgentConfig, CockroachAgentTranscriptStore, ContinuousAgentRunner, build_agent_registry
+ from .agent_loop import (AgentConfig, ContinuousAgentRunner, agent_transcript_store_from_env, build_agent_registry)
  from .autonomous_harness import OpenAICompatiblePlanner
  from .canary_strategy import ConfirmedBreakoutCanarySource
- if action=="status": return _agent_status_view()
+ from .agent_status import read_status, write_status
+ status_path=_agent_status_path()
+ if action=="status":
+  view=_agent_status_view(); view["status_file"]=read_status(status_path); return view
  if action=="view":
   _serve_agent_view()
   return {}
@@ -172,22 +207,39 @@ def agent_controller(action: str) -> dict:
   return {"state":"disabled","reason":"CTRADER_AUTOMATION_ENABLED must equal true",
           "enabled":os.getenv("CTRADER_AUTOMATION_ENABLED")=="true"}
  config=AgentConfig.from_env(); config.validate()
+ paper=_paper_from_env()
+ integrity=paper.integrity_check()
+ if integrity!="ok":
+  write_status({"state":"failed","reason":"integrity_check_failed","detail":integrity},status_path)
+  return {"state":"refused","reason":"integrity_check_failed","integrity":integrity}
+ transcript_store=agent_transcript_store_from_env(initialize=True)
+ transcript_integrity=getattr(transcript_store,"integrity_check",lambda:"ok")()
+ if transcript_integrity!="ok":
+  write_status({"state":"failed","reason":"transcript_integrity_check_failed","detail":transcript_integrity},status_path)
+  return {"state":"refused","reason":"transcript_integrity_check_failed","integrity":transcript_integrity}
+ resume=paper.maybe_resume("agent_continuous_paper_loop")
+ if not resume["resumed"]:
+  write_status({"state":"stopped","reason":"resume_refused","kill_switch_reason":resume["kill_switch_reason"]},status_path)
+  return {"state":"stopped","reason":"resume_refused","kill_switch_reason":resume["kill_switch_reason"]}
  market_store=HistoricalDataStore()
  source=LocalHistoricalMarketDataSource(market_store)
- paper=_paper_from_env(); paper.start("agent_continuous_paper_loop")
  coordinator=_paper_to_demo_coordinator(paper)
+ refresh_source=None
+ if config.data_refresh_enabled:
+  refresh_source=_agent_data_refresh_source(market_store,config)
  firecrawl_client=None
  try:
   from .firecrawl_research import CockroachSourceStore, FirecrawlConfig, FirecrawlResearchClient
   firecrawl_client=FirecrawlResearchClient(FirecrawlConfig.from_env(),CockroachSourceStore())
- except RuntimeError:
+ except Exception:
   firecrawl_client=None  # research is optional; the loop still runs without web retrieval
  registry=build_agent_registry(
   source,paper,coordinator,config,
   canary=ConfirmedBreakoutCanarySource(market_store,_positive_env_float("CTRADER_CANARY_PAPER_QUANTITY",1)),
   firecrawl_client=firecrawl_client)
  runner=ContinuousAgentRunner(OpenAICompatiblePlanner.from_env(),registry,
-                              CockroachAgentTranscriptStore(),source,paper,coordinator,config)
+                              transcript_store,source,paper,coordinator,config,
+                              refresh_source=refresh_source,status_path=status_path)
  if action=="once":
   result=runner.run_tick()
   print(f"agent run {runner.run_id} tick recorded; live view http://127.0.0.1:{os.getenv('AGENT_VIEW_PORT','8100')}/",flush=True)
@@ -231,10 +283,17 @@ def main():
  demo.add_argument("action",nargs="?",choices=["status","once","run"],default="status")
  agent=sub.add_parser("agent",help="single continuous AI paper-trading agent with a live thinking view")
  agent.add_argument("action",nargs="?",choices=["status","once","view","run"],default="status")
+ paper=sub.add_parser("paper",help="manage the deterministic paper trading lifecycle (kill switch)")
+ paper.add_argument("action",choices=["status","start","stop"])
+ paper.add_argument("--reason",default="operator")
+ pst=sub.add_parser("state",help="local state database integrity, backup, and restore")
+ pst.add_argument("action",choices=["integrity","backup","restore"])
+ pst.add_argument("--backup",help="backup directory or state.db.gz to restore")
+ pst.add_argument("--root",default="backups/local-state")
  sub.add_parser("adaptive-analytics")
  d=sub.add_parser("data"); ds=d.add_subparsers(dest="data_cmd"); i=ds.add_parser("import"); i.add_argument("csv"); v=ds.add_parser("validate")
- download=ds.add_parser("download"); download.add_argument("--start",required=True,help="UTC start date/time (for example 2026-08-01)"); download.add_argument("--end",help="UTC end date/time; defaults to now"); download.add_argument("--page-size",type=int,default=5000)
- update=ds.add_parser("update"); update.add_argument("--overlap-minutes",type=int,default=10)
+ download=ds.add_parser("download"); download.add_argument("--start",required=True,help="UTC start date/time (for example 2026-08-01)"); download.add_argument("--end",help="UTC end date/time; defaults to now"); download.add_argument("--page-size",type=int,default=int(os.getenv("CTRADER_DATA_UPDATE_PAGE_SIZE","5000")))
+ update=ds.add_parser("update"); update.add_argument("--overlap-minutes",type=int,default=int(os.getenv("CTRADER_DATA_UPDATE_OVERLAP_MINUTES","10"))); update.add_argument("--page-size",type=int,default=int(os.getenv("CTRADER_DATA_UPDATE_PAGE_SIZE","5000")))
  a=p.parse_args(); logging.basicConfig(level=logging.INFO)
  if a.cmd=="campaign": campaign(a.synthetic)
  if a.cmd=="backtest": event_backtest(a.strategy,a.start,a.end)
@@ -312,19 +371,62 @@ def main():
  if a.cmd=="agent":
   try: result=agent_controller(a.action)
   except KeyboardInterrupt: raise
-  except Exception as exc: p.error(f"agent command failed: {type(exc).__name__}")
+  except Exception as exc:
+   from .agent_status import write_status
+   write_status({"state":"failed","error_type":type(exc).__name__})
+   p.error(f"agent command failed: {type(exc).__name__}")
+   raise SystemExit(1)
   print(json.dumps(result,indent=2,allow_nan=False,default=str))
+ if a.cmd=="paper":
+  pt=_paper_from_env()
+  if a.action=="stop": pt.stop(a.reason)
+  elif a.action=="start": pt.start(a.reason or "operator_resume")
+  print(json.dumps(pt.summary(),indent=2,allow_nan=False,default=str))
+ if a.cmd=="state":
+  from .local_state import state_db_path
+  from .paper_trading import state_backend
+  from .agent_loop import agent_transcript_store_from_env
+  if state_backend()=="cockroach":
+   print(json.dumps({"backend":"cockroach","action":a.action,"skipped":True,
+                     "reason":"backup/restore/integrity are local-only commands"},indent=2))
+  elif a.action=="integrity":
+   result={"backend":"local","db_path":state_db_path(),
+           "paper":_paper_from_env().integrity_check(),
+           "transcript":getattr(agent_transcript_store_from_env(),"integrity_check",lambda:"ok")()}
+   print(json.dumps(result,indent=2,allow_nan=False,default=str))
+   if result["paper"]!="ok" or result["transcript"]!="ok": raise SystemExit(1)
+  elif a.action=="backup":
+   from .state_backup import backup_local_state
+   print(json.dumps(backup_local_state(dest_root=a.root),indent=2,allow_nan=False,default=str))
+  else:
+   if not a.backup: p.error("--backup is required (backup directory or state.db.gz)")
+   from .state_backup import restore_local_state
+   print(json.dumps(restore_local_state(a.backup),indent=2,allow_nan=False,default=str))
  if a.cmd=="adaptive-analytics":
   print(json.dumps(AdaptiveSearch(ExperimentRegistry()).analyze(),indent=2,default=str))
  if a.cmd=="data":
-  s=HistoricalDataStore()
-  if a.data_cmd=="import": result=CTraderHistoricalAdapter(s).import_csv(Path(a.csv))
-  elif a.data_cmd=="validate": result=s.validate(s.read())
-  elif a.data_cmd=="download": result=CTraderOpenApiDownloader(CTraderOpenApiConfig.from_env(),s).download(a.start,a.end,a.page_size)
-  elif a.data_cmd=="update":
-   if not s.path.exists(): raise RuntimeError("no local data; run data download --start DATE first")
-   start=s.read().index.max()-__import__('pandas').Timedelta(minutes=a.overlap_minutes)
-   result=CTraderOpenApiDownloader(CTraderOpenApiConfig.from_env(),s).download(start)
-  else: p.error("choose a data command")
-  print(json.dumps(result,indent=2))
+  s=HistoricalDataStore(); status_path=Path(os.getenv("CTRADER_DATA_UPDATE_STATUS_PATH","reports/data_update_status.json"))
+  try:
+   if a.data_cmd=="import": result=CTraderHistoricalAdapter(s).import_csv(Path(a.csv))
+   elif a.data_cmd=="validate": result=s.validate(s.read())
+   elif a.data_cmd=="download": result=CTraderOpenApiDownloader(CTraderOpenApiConfig.from_env(),s).download(a.start,a.end,a.page_size)
+   elif a.data_cmd=="update":
+    if not s.path.exists(): raise RuntimeError("no local data; run data download --start DATE first")
+    start=s.read().index.max()-__import__('pandas').Timedelta(minutes=a.overlap_minutes)
+    result=_download_with_retry(CTraderOpenApiDownloader(CTraderOpenApiConfig.from_env(),s),
+                                start,page_size=a.page_size)
+   else: p.error("choose a data command")
+   if a.data_cmd in ("download","update"):
+    status_path.parent.mkdir(parents=True,exist_ok=True)
+    status_path.write_text(json.dumps({"state":"ok","recorded_at":datetime.now(timezone.utc).isoformat(),
+       "end":result.get("end"),"downloaded_rows":result.get("downloaded_rows"),"error_code":None}))
+   print(json.dumps(result,indent=2))
+  except Exception as exc:
+   from .data import CTraderAuthError
+   code=getattr(exc,"code",None) if isinstance(exc,CTraderAuthError) else None
+   description=getattr(exc,"description",None) if isinstance(exc,CTraderAuthError) else None
+   status={"state":"auth_error" if code else "failed","recorded_at":datetime.now(timezone.utc).isoformat(),
+           "error_code":code,"description":description,"error_type":type(exc).__name__}
+   status_path.parent.mkdir(parents=True,exist_ok=True); status_path.write_text(json.dumps(status))
+   print(json.dumps(status,indent=2)); raise SystemExit(1)
 if __name__=="__main__": main()

@@ -113,8 +113,8 @@ def test_paper_endpoint_reports_headline_metrics(server):
 
 def test_paper_endpoint_reflects_accepted_fill(server, paper_trading):
     paper_trading.start("test")
-    now = datetime.now(timezone.utc)
-    result = paper_trading.evaluate(PaperDecision("fill-test-1", "XAUUSD", "BUY", 0.5, 4290.0, now - timedelta(seconds=5)))
+    now = datetime(2026, 9, 17, 12, tzinfo=timezone.utc)  # Thursday midday, market open
+    result = paper_trading.evaluate(PaperDecision("fill-test-1", "XAUUSD", "BUY", 0.5, 4290.0, now - timedelta(seconds=5)), now)
     assert result["accepted"] is True
 
     with request.urlopen(server + "/api/paper") as response:
@@ -126,3 +126,32 @@ def test_paper_endpoint_reflects_accepted_fill(server, paper_trading):
     assert summary["equity"] == pytest.approx(100_000.0)
     assert len(summary["recent_fills"]) == 1
     assert summary["recent_fills"][0]["decision_id"] == "fill-test-1"
+
+
+def test_health_endpoint_reports_all_sections(server, paper_trading):
+    paper_trading.start("test")
+    with request.urlopen(server + "/api/health") as response:
+        payload = json.loads(response.read())
+    assert payload["status"] in {"ok", "degraded"}
+    assert isinstance(payload["alerts"], list)
+    assert payload["agent"]["latest_run_id"] == "agent_test_1"
+    assert "heartbeat" in payload["agent"]
+    assert payload["paper"]["stopped"] is False
+    assert "market_open" in payload["paper"]
+    assert payload["paper"]["market_open"] in {True, False}
+    assert "data_update" in payload
+    assert "age_seconds" in payload["data_update"]
+    assert payload["database"]["backend"] in {"local", "cockroach"}
+    assert "integrity" in payload["database"]
+
+
+def test_age_seconds_parses_timezone_aware_timestamps():
+    from xauusd.agent_view import _age_seconds
+    moment = datetime.now(timezone.utc) - timedelta(seconds=30)
+    age = _age_seconds(moment.isoformat())
+    assert age is not None
+    assert 25 < age < 35
+    naive = moment.replace(tzinfo=None)
+    assert _age_seconds(naive.isoformat()) is not None
+    assert _age_seconds(None) is None
+    assert _age_seconds("not-a-timestamp") is None

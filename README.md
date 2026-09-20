@@ -61,6 +61,20 @@ Credentials belong in `.env` with mode `0600`; never commit them. Current histor
 
 A broker-free **paper-only** stage runs the deterministic paper pipeline without any cTrader credentials or volumes: set `CTRADER_PAPER_ONLY=true` and `CTRADER_AUTOMATION_ENABLED=true` (the cTrader demo settings become unnecessary). It exercises the same paper risk, idempotency, and decision records, records `PAPER_ONLY_MODE` for the demo leg, and never touches a kill switch beyond the paper lifecycle.
 
+## Market Data & Authentication
+
+Historical and live M1 data is fetched through the cTrader Open API demo host (`demo.ctraderapi.com`, read-only) and normalized into `data/processed/XAUUSD_M1.parquet` by:
+
+```bash
+.venv/bin/python -m xauusd.cli data download --start 2026-09-17   # backfill a window
+.venv/bin/python -m xauusd.cli data update                        # catch up to now
+.venv/bin/python -m xauusd.cli data validate                      # report rows/gaps
+```
+
+Credentials are an **OAuth2 token pair** (`CTRADER_ACCESS_TOKEN`, `CTRADER_REFRESH_TOKEN`) minted once through the cTrader ID granting-access flow (`xauusd.oauth.authorize_url` → `/apps/token`). With `CTRADER_CTID_TRADER_ACCOUNT_ID` left empty, both the data downloader and the demo execution adapter auto-discover the demo account and its XAUUSD symbol from the token (`ProtoOAGetAccountListByAccessTokenReq`); set the explicit id to pin a specific account (legacy leaf-token mode). On a `CH_ACCESS_TOKEN_INVALID`, `data update/download` refresh via `grant_type=refresh_token` once and atomically rewrite only the two token keys in `.env` (`0o600`) — nothing is ever logged. Both paths require `CTRADER_DEMO_ONLY=true`.
+
+Every `data update/download` run records `reports/data_update_status.json` (`state: ok | auth_error | failed`, `error_code`, `recorded_at`, `end`), surfaced by the live view at `/api/data-update`, so timer failures are loud instead of silent `exit-code` entries. The `xauusd-data-update.timer` re-enables scheduled 6-hourly refreshes.
+
 ## Autonomous Agent
 
 `agent` runs one continuously trading AI plan-tool loop whose thinking is visible in a live web view. It is paper-first and reads `OPENAI_*`, `AGENT_*`, and (optionally) `FIRECRAWL_*` settings.
@@ -72,11 +86,28 @@ A broker-free **paper-only** stage runs the deterministic paper pipeline without
 .venv/bin/python -m xauusd.cli agent view     # live view only
 ```
 
-Every tick the planner may call a fixed allow-list of read-only tools (`read_market`, `paper_state`, `canary_signal`, `firecrawl_fetch`) and `propose_trade`. A proposal is only a proposal: the same deterministic paper risk, idempotency, freshness, and duplicate-order gates decide, and the coordinator reports exactly what the gates did. The planner's raw output, each tool call and result, and the final tick summary are appended to `agent_transcript` in CockroachDB, rendered by the live view at `http://127.0.0.1:8100/`. Web content and model output are untrusted data; they can never expand the tool allow-list or change risk settings.
+The paper lifecycle and local state store have their own explicit commands:
+
+```bash
+.venv/bin/python -m xauusd.cli paper status   # kill-switch state, position, equity, recent fills
+.venv/bin/python -m xauusd.cli paper stop     # persistent kill switch (reason defaults to operator)
+.venv/bin/python -m xauusd.cli paper start    # explicit override (requires a reason)
+.venv/bin/python -m xauusd.cli state integrity  # quick_check on paper + transcript DB
+.venv/bin/python -m xauusd.cli state backup --root backups/local-state   # gzip + sha256 snapshot
+.venv/bin/python -m xauusd.cli state restore --backup <dir|state.db.gz>  # verified restore
+```
+
+`paper stop` persists a kill switch across restarts, and the agent refuses to auto-resume it; `paper start` is the explicit override. `state backup` snapshots the live SQLite file (verifies it with `quick_check`, gzips it, records a sha256 in a manifest), and `state restore` refuses any archive whose checksum or database integrity does not verify. A daily `xauusd-state-backup.timer` (midnight + randomized delay) keeps one verified snapshot per day under `backups/local-state`.
+
+Every tick the planner may call a fixed allow-list of read-only tools (`read_market`, `paper_state`, `canary_signal`, `firecrawl_fetch`) and `propose_trade`. A proposal is only a proposal: the same deterministic paper risk, idempotency, freshness, and duplicate-order gates decide, and the coordinator reports exactly what the gates did. The planner's raw output, each tool call and result, and the final tick summary are appended to the agent transcript, rendered by the live view at `http://127.0.0.1:8100/`. Web content and model output are untrusted data; they can never expand the tool allow-list or change risk settings.
+
+Paper account and transcript state live in a **local SQLite file** (`STATE_DB_PATH`, default `state/xauusd_local.db`) by default, so the running agent needs no external database or `DATABASE_URL`. Set `XAUUSD_STATE_BACKEND=cockroach` to return to the Cockroach-backed stores. The view serves the same transcript and paper endpoints from this store.
 
 The view listens on `AGENT_VIEW_PORT` (default `8100`). It shows the transcript newest-first with the AI's plain-English reasons, a paper-account strip (equity, position, day/realized P&L, drawdown, recent fills from `/api/paper`), and a recent-runs line with per-run tick counts and duration. Each `agent_<uuid12>` is one process start: a graceful SIGTERM marks the old run stopped, so a restart cadence legitimately produces many short "runs" — this is one process, not many agents., so a restart cadence legitimately produces many short "runs" — this is one process, not many agents.
 
-`agent run` and `agent once` are inert unless `CTRADER_AUTOMATION_ENABLED=true`. Paper trading starts explicitly on each launch; cTrader demo wiring is a deliberate follow-up and stays disabled unless added explicitly.
+`agent run` and `agent once` are inert unless `CTRADER_AUTOMATION_ENABLED=true`. On every launch the agent verifies database integrity and then consults the paper kill switch: it auto-resumes a clean paper account, but a stop left behind by `paper stop`, corrupt state, missing credentials, an unknown account type, or a failed recovery stays stopped (fail closed) until `paper start`. Each tick also writes a heartbeat to `AGENT_STATUS_FILE` (default `reports/agent_status.json`); the live view's `/api/health` turns that heartbeat, stall/error counts, paper-stop state, and data-update failures into a healthy/degraded status with `alerts`.
+
+Each tick records market `fresh`/`age_seconds`/`market_open` on `tick_start`, so a stale or closed-market feed is always visible in the transcript as "no trade". **When XAUUSD is not trading (weekends, the 21:00-22:00 UTC daily break), the deterministic paper gate refuses every proposal with `MARKET_CLOSED` — the agent never trades a closed market.** Optionally set `AGENT_DATA_REFRESH_ENABLED=true` to let a stale tick refresh the local M1 parquet in-loop before the planner reasons (bounded by `AGENT_DATA_REFRESH_*`; still gated by the paper freshness and market-hours checks).
 
 To run the agent as a persistent background service (paper-only, live view on `http://127.0.0.1:8100/`):
 
@@ -88,9 +119,9 @@ sudo systemctl enable --now xauusd-agent.service
 
 The unit captures the view port and `.env`; there is nothing to follow in the journal (see the observability note above). Use `/api/paper`, `/api/runs`, and the transcript to confirm activity.
 
-The service reads only `EnvironmentFile=/root/xauusd/.env` (it inherits no shell exports), so `OPENAI_BASE_URL`, `OPENAI_MODEL`, `OPENAI_API_KEY`, `DATABASE_URL`, `CTRADER_AUTOMATION_ENABLED=true`, and `CTRADER_PAPER_ONLY=true` must all be set there. `OPENAI_*` must point at an OpenAI-compatible HTTP endpoint; that endpoint sits behind a Cloudflare WAF that rejects urllib's default `User-Agent` with `403 error code: 1010`, so the planner always sends a browser-grade `User-Agent`. Restart it (`systemctl restart xauusd-agent.service`) after editing `.env`. SIGTERM finishes the transcript run cleanly before the process stops.
+The service reads only `EnvironmentFile=/root/xauusd/.env` (it inherits no shell exports), so `OPENAI_BASE_URL`, `OPENAI_MODEL`, `OPENAI_API_KEY`, `CTRADER_AUTOMATION_ENABLED=true`, `CTRADER_PAPER_ONLY=true`, and the local-state keys (`XAUUSD_STATE_BACKEND=local`, `STATE_DB_PATH`) must all be set there. With in-loop refresh desired, also set `AGENT_DATA_REFRESH_ENABLED=true`, `AGENT_DATA_REFRESH_MAX_AGE_SECONDS=30`, and `AGENT_DATA_REFRESH_MIN_INTERVAL_SECONDS=60` (the example ships these values). `OPENAI_*` must point at an OpenAI-compatible HTTP endpoint; that endpoint sits behind a Cloudflare WAF that rejects urllib's default `User-Agent` with `403 error code: 1010`, so the planner always sends a browser-grade `User-Agent`. Restart it (`systemctl restart xauusd-agent.service`) after editing `.env`. SIGTERM finishes the transcript run cleanly before the process stops.
 
-The service writes no console or journald logs; the transcript, Cockroach state, and the live view are the only observability.
+The service writes no console or journald logs; the transcript, state store, and the live view (including `/api/health` at `http://127.0.0.1:8100/api/health`) are the only observability.
 
 ## Development
 

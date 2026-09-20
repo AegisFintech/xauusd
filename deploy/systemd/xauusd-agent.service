@@ -13,7 +13,8 @@ RestartSec=30
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectHome=read-only
-ReadWritePaths=/root/xauusd/reports
+# Local SQLite state (STATE_DB_PATH), in-loop market-data refresh, and heartbeat writes.
+ReadWritePaths=/root/xauusd/reports /root/xauusd/state /root/xauusd/data /root/xauusd/backups
 
 [Install]
 WantedBy=multi-user.target

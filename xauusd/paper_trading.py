@@ -15,11 +15,31 @@ KILL_SWITCH = "KILL_SWITCH"
 INVALID_DECISION = "INVALID_DECISION"
 UNSUPPORTED_SYMBOL = "UNSUPPORTED_SYMBOL"
 STALE_MARKET_DATA = "STALE_MARKET_DATA"
+MARKET_CLOSED = "MARKET_CLOSED"
 MAX_TRADES_PER_DAY = "MAX_TRADES_PER_DAY"
 MAX_POSITION = "MAX_POSITION"
 DAILY_LOSS_LIMIT = "DAILY_LOSS_LIMIT"
 MAX_DRAWDOWN = "MAX_DRAWDOWN"
 ACCEPTED = "ACCEPTED"
+
+# A persisted kill-switch reason in this set must never be cleared by an
+# unattended process restart (AGENTS.md: fail closed after state trouble).
+KILL_SWITCH_NO_AUTO_RESUME = frozenset({
+    "corrupt_state", "operator", "missing_credentials", "unknown_account_type", "recovery_failed",
+})
+
+
+def market_is_open(now: datetime) -> bool:
+    """XAUUSD spot session: Sunday 22:00 UTC through Friday 21:00 UTC, break 21:00-22:00 UTC."""
+    now = now.astimezone(timezone.utc)
+    weekday = now.weekday()  # Monday=0 ... Sunday=6
+    if weekday == 5:  # Saturday
+        return False
+    if weekday == 6:  # Sunday open from 22:00 UTC
+        return now.hour >= 22
+    if weekday == 4:  # Friday closes at 21:00 UTC
+        return now.hour < 21
+    return now.hour < 21 or now.hour >= 22  # Monday-Thursday: closed for the evening break
 
 
 def _positive_env_float(name: str, default: float) -> float:
@@ -215,6 +235,33 @@ class PaperTrading:
             raise ValueError("stop reason is required")
         self.store.set_kill_switch(True, reason)
 
+    def maybe_resume(self, reason: str) -> dict[str, Any]:
+        """Auto-resume on a benign restart; fail closed on persisted trouble.
+
+        A paper lifecycle that is already running resumes as a no-op. A stopped
+        lifecycle resumes only when its persisted kill-switch reason is benign
+        (for example a fresh ``missing_state`` account or a prior agent restart);
+        corruption, missing credentials, recovery failure, and operator stops are
+        preserved across restarts.
+        """
+        if not reason.strip():
+            raise ValueError("start reason is required")
+        state = self.store.state()
+        prior = state.get("kill_switch_reason")
+        already_running = not state.get("stopped")
+        if already_running:
+            return {"resumed": True, "already_running": True, "reason": prior, "kill_switch_reason": prior}
+        if prior in KILL_SWITCH_NO_AUTO_RESUME:
+            return {"resumed": False, "already_running": False, "reason": prior, "kill_switch_reason": prior,
+                    "blocked": True}
+        self.store.set_kill_switch(False, reason)
+        return {"resumed": True, "already_running": False, "reason": reason, "kill_switch_reason": reason}
+
+    def integrity_check(self) -> str:
+        """Quick integrity check for the persisted store; non-local stores report 'ok'."""
+        method = getattr(self.store, "integrity_check", None)
+        return method() if callable(method) else "ok"
+
     def state(self) -> dict[str, Any]:
         return self.store.state()
 
@@ -243,6 +290,7 @@ class PaperTrading:
             "drawdown_pct": round((high_water - equity) / high_water * 100, 3) if high_water > 0 else 0.0,
             "high_water_equity": high_water,
             "trades_today": int(state.get("trades_today", 0)),
+            "market_open": market_is_open(_now()),
             "recent_fills": fills,
         }
 
@@ -268,6 +316,8 @@ class PaperTrading:
                         for value in (decision.quantity, decision.price)) or
                 not isinstance(decision.market_data_at, datetime) or decision.market_data_at.tzinfo is None):
             return INVALID_DECISION if decision.symbol == "XAUUSD" else UNSUPPORTED_SYMBOL
+        if not market_is_open(now):
+            return MARKET_CLOSED
         age = (now - decision.market_data_at.astimezone(timezone.utc)).total_seconds()
         if age > self.config.max_market_data_age_seconds:
             return STALE_MARKET_DATA
@@ -328,7 +378,19 @@ class PaperTrading:
                 "trades_today": state["trades_today"]}
 
 
+def state_backend() -> str:
+    backend = (os.getenv("XAUUSD_STATE_BACKEND") or "local").lower()
+    if backend not in {"local", "cockroach"}:
+        raise ValueError("XAUUSD_STATE_BACKEND must be 'local' or 'cockroach'")
+    return backend
+
+
 def paper_from_env() -> PaperTrading:
     """Single paper-trading entry point shared by the CLI and the live view."""
-    return PaperTrading(CockroachPaperTradingStore(initial_cash=_positive_env_float("PAPER_INITIAL_CASH", 100_000.0)),
-                        PaperRiskConfig.from_env())
+    initial_cash = _positive_env_float("PAPER_INITIAL_CASH", 100_000.0)
+    if state_backend() == "cockroach":
+        store: PaperTradingStore = CockroachPaperTradingStore(initial_cash=initial_cash)
+    else:
+        from .local_state import SQLitePaperTradingStore
+        store = SQLitePaperTradingStore(initial_cash=initial_cash)
+    return PaperTrading(store, PaperRiskConfig.from_env())

@@ -26,6 +26,7 @@ reports/automation/
 reports/tournament/
 reports/champion.json
 backups/
+state/
 
 # Coverage and test output
 coverage/

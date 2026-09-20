@@ -1,13 +1,17 @@
 """FastAPI live view of the autonomous agent's visible thinking process."""
 from __future__ import annotations
 
+import json
+import os
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse
 
-from .agent_loop import AgentTranscriptStore, CockroachAgentTranscriptStore
-from .paper_trading import PaperTrading, paper_from_env
+from .agent_loop import AgentTranscriptStore
+from .paper_trading import PaperTrading, paper_from_env, state_backend
 
 DEFAULT_VIEW_HOST = "127.0.0.1"
 DEFAULT_VIEW_PORT = 8100
@@ -16,8 +20,11 @@ _PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>xauusd agent - live thinking</title>
 <style>
  body{background:#0d1017;color:#d7dde6;font:13px/1.45 ui-monospace,Menlo,monospace;margin:0;padding:16px}
- h1{font-size:15px;color:#8ab4f8;margin:0 0 4px}
- #meta{color:#7f8ea3;margin-bottom:8px;min-height:15px}
+h1{font-size:15px;color:#8ab4f8;margin:0 0 4px}
+  #meta{color:#7f8ea3;margin-bottom:8px;min-height:15px}
+  #health{margin:0 0 8px;padding:6px 10px;border:1px solid #2a3444;border-radius:4px;font-size:12px;color:#7f8ea3}
+  #health.ok{color:#4dab6d;border-color:#274a33}
+  #health.problem{color:#e3746e;border-color:#5c2a28}
  #runs{color:#7f8ea3;margin-bottom:12px;font-size:12px}
  .step{margin:6px 0;padding:8px 10px;border-left:3px solid #2a3444;background:#141a24;border-radius:0 4px 4px 0;white-space:pre-wrap;word-break:break-word}
  .step.tick_start,.step.tick_end{border-color:#8ab4f8}
@@ -42,6 +49,7 @@ _PAGE = """<!doctype html>
 </style></head><body>
 <h1>xauusd autonomous agent &mdash; live thinking <span style="font-weight:400">(newest first)</span></h1>
 <div id="meta">connecting&hellip;</div>
+<div id="health">checking&hellip;</div>
 <div id="paper">paper &mdash; checking&hellip;</div>
 <div id="runs"></div>
 <div id="log"></div>
@@ -156,9 +164,10 @@ _PAGE = """<!doctype html>
      if(nodes.length){topId=Math.max(topId,nw.steps[nw.steps.length-1].id);updateMeta();}
     }
    }
-   await refreshRuns();
-   await refreshPaper();
-  }catch(e){/* transient; next poll retries */}
+await refreshRuns();
+    await refreshPaper();
+    await refreshHealth();
+   }catch(e){/* transient; next poll retries */}
  }
  function updateMeta(status){
   const detail=(cur?cur:'no run yet')+(status?'  ·  '+status:'');
@@ -175,11 +184,16 @@ _PAGE = """<!doctype html>
   if(dur)s+='  ·  '+dur;
   return s+')';
  }
- async function refreshRuns(){
-  const r=await j('/api/runs?limit=6');
-  const line='recent runs: '+r.runs.map(renderRun).join('  ·  ');
-  if(line!==refreshRuns.last){refreshRuns.last=line;$('runs').innerHTML=line;}
- }
+async function refreshRuns(){
+   const r=await j('/api/runs?limit=6');
+   const line='recent runs: '+r.runs.map(renderRun).join('  ·  ');
+   if(line!==refreshRuns.last){refreshRuns.last=line;$('runs').innerHTML=line;}
+  }
+  async function refreshHealth(){
+   try{const h=await j('/api/health');const el=$('health');
+    el.textContent=(h.alerts&&h.alerts.length)?'ATTENTION: '+h.alerts.join('  ·  '):'healthy';
+    el.className=h.status==='ok'?'ok':'problem';}catch(e){}
+  }
  function paperHeadline(s, risk){
   const pnl=s.day_pl>=0?'pos':'neg';
   let line='<span class="badge '+(s.stopped?'stopped':'on')+'">'+(s.stopped?'STOPPED':'running')+'</span>'
@@ -213,9 +227,10 @@ _PAGE = """<!doctype html>
 
 def create_app(store: AgentTranscriptStore | None = None,
                paper: PaperTrading | None = None) -> FastAPI:
+    from .agent_loop import agent_transcript_store_from_env
     transcript: AgentTranscriptStore
     if store is None:
-        transcript = CockroachAgentTranscriptStore()
+        transcript = agent_transcript_store_from_env()
     else:
         transcript = store
     transcript.initialize()
@@ -260,8 +275,67 @@ def create_app(store: AgentTranscriptStore | None = None,
             key: getattr(pt.config, key) for key in ("daily_loss_limit", "max_drawdown", "max_position",
                                                      "max_trades_per_day", "max_market_data_age_seconds")}}}
 
+    @app.get("/api/data-update")
+    def data_update_status() -> dict[str, Any]:
+        path = Path(os.getenv("CTRADER_DATA_UPDATE_STATUS_PATH", "reports/data_update_status.json"))
+        try:
+            payload = dict(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            return {"exists": False, "state": None, "recorded_at": None, "error_code": None}
+        return {"exists": True, **payload}
+
     @app.get("/api/health")
-    def health() -> dict[str, str]:
-        return {"status": "ok"}
+    def health() -> dict[str, Any]:
+        from .agent_status import read_status
+        alerts: list[str] = []
+        pt = paper_or_default()
+        paper_state = pt.state()
+        heartbeat = read_status()
+        heartbeat_age = _age_seconds((heartbeat or {}).get("recorded_at"))
+        runs = transcript.runs(limit=1)
+        latest = runs[0] if runs else None
+        if heartbeat is None:
+            alerts.append("agent heartbeat missing")
+        elif heartbeat.get("stalled"):
+            alerts.append(f"agent stalled ({heartbeat.get('consecutive_errors', 0)} consecutive errors)")
+        elif heartbeat.get("status") in {"planner_error", "tick_error"}:
+            alerts.append(f"agent last tick {heartbeat.get('status')}")
+        if heartbeat_age is not None and heartbeat_age > 600:
+            alerts.append(f"agent heartbeat stale ({int(heartbeat_age)}s)")
+        if paper_state.get("stopped"):
+            alerts.append(f"paper trading stopped: {paper_state.get('kill_switch_reason')}")
+        data = data_update_status()
+        if data.get("state") in {"auth_error", "failed"}:
+            alerts.append(f"data update {data.get('state')}")
+        integrity = "checks not available"
+        if state_backend() == "local":
+            try:
+                integrity = pt.integrity_check()
+                if integrity != "ok":
+                    alerts.append(f"state database integrity: {integrity}")
+            except Exception as exc:
+                integrity = f"error ({type(exc).__name__})"
+                alerts.append("state database integrity check failed")
+        return {"status": "ok" if not alerts else "degraded", "alerts": alerts,
+                "agent": {"heartbeat": heartbeat, "heartbeat_age_seconds": heartbeat_age,
+                          "latest_run_id": latest["run_id"] if latest else None,
+                          "latest_run_status": latest["status"] if latest else None},
+                "paper": {"stopped": paper_state.get("stopped"),
+                          "kill_switch_reason": paper_state.get("kill_switch_reason"),
+                          "market_open": pt.summary().get("market_open")},
+                "data_update": {**data, "age_seconds": _age_seconds(data.get("recorded_at"))},
+                "database": {"backend": state_backend(), "integrity": integrity}}
 
     return app
+
+
+def _age_seconds(iso: str | None) -> float | None:
+    if not iso:
+        return None
+    try:
+        moment = datetime.fromisoformat(iso)
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - moment.astimezone(timezone.utc)).total_seconds()
+    except ValueError:
+        return None

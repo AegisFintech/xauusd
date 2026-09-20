@@ -9,7 +9,8 @@ import os
 import threading
 from typing import Any, Callable, Protocol
 
-DEMO_HOST = "demo.ctraderapi.com"
+from .ctrader_auth import DEMO_HOST, demo_accounts, is_error, resolve_symbol
+
 KILL_SWITCH = "KILL_SWITCH"
 DUPLICATE_REQUEST = "DUPLICATE_REQUEST"
 
@@ -328,12 +329,7 @@ class CTraderDemoOpenApiTransport:
     @staticmethod
     def _error_fields(message: Any) -> tuple[str, str] | None:
         """Return ``(code, description)`` for a cTrader error message, else None."""
-        code = (message.get("errorCode") if isinstance(message, dict) else getattr(message, "errorCode", None))
-        if not code:
-            return None
-        description = (message.get("description") if isinstance(message, dict)
-                       else getattr(message, "description", None))
-        return str(code), str(description or "")
+        return is_error(message)
 
     @staticmethod
     def _raise_for_error(message: Any, context: str) -> None:
@@ -351,7 +347,7 @@ class CTraderDemoOpenApiTransport:
         return value.get(name, default) if isinstance(value, dict) else getattr(value, name, default)
 
     def _find_account(self, response: Any) -> Any:
-        accounts = [account for account in self._values(response, "ctidTraderAccount") if not bool(self._field(account, "isLive", True))]
+        accounts = demo_accounts(self._values(response, "ctidTraderAccount"))
         if self.config.account_id is not None:
             selected = next((account for account in accounts if self._field(account, "ctidTraderAccountId") == self.config.account_id), None)
             if selected is None:
@@ -362,13 +358,10 @@ class CTraderDemoOpenApiTransport:
         return accounts[0]
 
     def _find_symbol_id(self, response: Any) -> int:
-        matches = [symbol for symbol in self._values(response, "symbol") if self._field(symbol, "symbolName") == self.config.symbol]
-        if not matches:
+        resolved = resolve_symbol(self._values(response, "symbol"), self.config.symbol)
+        if resolved is None:
             raise CTraderDemoSafetyError("XAUUSD is unavailable for the configured cTrader account")
-        symbol = next((value for value in matches if bool(self._field(value, "enabled", False))), matches[0])
-        symbol_id = self._field(symbol, "symbolId")
-        if not isinstance(symbol_id, int) or isinstance(symbol_id, bool) or symbol_id <= 0:
-            raise CTraderDemoSafetyError("cTrader returned an invalid XAUUSD symbol id")
+        symbol_id, _ = resolved
         return symbol_id
 
     def _normalize(self, request: Any, response: Any) -> dict[str, Any]:
