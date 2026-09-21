@@ -261,12 +261,15 @@ def agent_controller(action: str) -> dict:
    runner.stop()
    stop.set()
   signal.signal(signal.SIGTERM,_terminate)
-  threading.Thread(target=_serve_agent_view,daemon=True).start()
+  # The live view is a dedicated always-on unit (xauusd-agent-view.service) that
+  # reads only the persisted stores; the bot process must never own the port so
+  # pausing/stopping it never takes the site down.
   try:
    runner.run_forever(stop=stop,on_tick=lambda result: print(f"[{runner.run_id}] tick {result.get('tick')} status={result.get('status')}",flush=True))
   except KeyboardInterrupt:
    runner.stop()
   return runner.status()
+ raise ValueError(f"unknown agent action: {action}")
  raise ValueError(f"unknown agent action: {action}")
 
 def main():

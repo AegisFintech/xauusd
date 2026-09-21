@@ -1,0 +1,19 @@
+[Unit]
+Description=XAUUSD live thinking view (always-on, independent of bot process)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/xauusd
+EnvironmentFile=/root/xauusd/.env
+ExecStart=/root/xauusd/.venv/bin/python -m xauusd.cli agent view
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=read-only
+ReadWritePaths=/root/xauusd/reports /root/xauusd/state
+
+[Install]
+WantedBy=multi-user.target
