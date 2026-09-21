@@ -191,9 +191,11 @@ async function refreshRuns(){
   }
   async function refreshHealth(){
    try{const h=await j('/api/health');const el=$('health');
-    el.textContent=(h.alerts&&h.alerts.length)?'ATTENTION: '+h.alerts.join('  ·  '):'healthy';
+    const du=h.data_update||{};const gap=du.age_seconds!=null?' · feed gap '+Math.round(du.age_seconds)+'s':'';
+    const bar=du.end?(' · last bar '+fmtBar(du.end).replace(/_Z/g,' UTC')):'';
+    el.textContent=(h.alerts&&h.alerts.length)?'ATTENTION: '+h.alerts.join('  ·  '):'healthy'+bar+gap;
     el.className=h.status==='ok'?'ok':'problem';}catch(e){}
-  }
+   }
  function paperHeadline(s, risk){
   const pnl=s.day_pl>=0?'pos':'neg';
   let line='<span class="badge '+(s.stopped?'stopped':'on')+'">'+(s.stopped?'STOPPED':'running')+'</span>'
