@@ -179,16 +179,25 @@ def _serve_agent_view() -> None:
  uvicorn_server.run(create_app(store=agent_transcript_store_from_env()),host=host,port=port,log_level="warning")
 
 def _agent_data_refresh_source(market_store: HistoricalDataStore, config: AgentConfig) -> Callable[[], dict]:
- """Bound data refresh for a stale agent tick. The downloader's auth errors fail loudly."""
- from .data import CTraderOpenApiConfig, CTraderOpenApiDownloader
- import pandas as pd
+ """Bound data refresh for a stale agent tick. Runs the one-shot downloader in a
+ fresh subprocess so its Twisted reactor never outlives a single invocation (the
+ long-lived agent must not restart a reactor): auth errors still fail loudly."""
+ import subprocess, sys, json as _json
+ from pathlib import Path
+ status_path=Path(os.getenv("CTRADER_DATA_UPDATE_STATUS_PATH","reports/data_update_status.json"))
  def refresh():
-  last=market_store.read().index.max()
-  start=last-pd.Timedelta(minutes=10)
-  result=CTraderOpenApiDownloader(CTraderOpenApiConfig.from_env(),market_store).download(start)
-  return {"ok":True,"downloaded_rows":int(result.get("downloaded_rows",0)),
-          "pages":int(result.get("pages",0)),"last_bar_utc":result.get("end"),
-          "symbol":result.get("symbol")}
+  proc=subprocess.run([sys.executable,"-m","xauusd.cli","data","update"],
+                      capture_output=True,text=True,timeout=config.data_refresh_timeout_seconds)
+  try: payload=_json.loads(status_path.read_text())
+  except (OSError,ValueError):
+   return {"ok":False,"error_type":"status_missing","returncode":proc.returncode}
+  if payload.get("state")!="ok":
+   return {"ok":False,"error_type":payload.get("error_type") or payload.get("state"),
+           "error_code":payload.get("error_code"),"description":payload.get("description"),
+           "returncode":proc.returncode}
+  return {"ok":True,"downloaded_rows":int(payload.get("downloaded_rows",0)),
+          "last_bar_utc":payload.get("end"),"symbol":payload.get("symbol"),
+          "returncode":proc.returncode}
  return refresh
 
 def agent_controller(action: str) -> dict:

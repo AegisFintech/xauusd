@@ -417,6 +417,7 @@ class ContinuousAgentRunner:
         self._now_provider = now_provider or (lambda: datetime.now(timezone.utc))
         self._started_at = datetime.now(timezone.utc)
         self.consecutive_errors = 0
+        self._refresh_failures = 0
         self.transcript.initialize()
         self.transcript.start_run(self.run_id)
         self._closed_orphans = self.transcript.reconcile_running_runs(self.run_id)
@@ -448,15 +449,25 @@ class ContinuousAgentRunner:
         return (datetime.now(timezone.utc) - market.observed_at.astimezone(timezone.utc)).total_seconds()
 
     def _refresh_if_stale(self, tick: int, age: float) -> bool:
-        """Blocking, bounded, opt-in refresh that never interrupts the tick loop."""
+        """Blocking, bounded, opt-in refresh that never interrupts the tick loop.
+
+        Consecutive failures back off exponentially so a silent feed (weekend gap,
+        broker outage) does not hammer the demo endpoint or churn transcript rows:
+        cooldown = min_interval * 2**failures, capped at 10 minutes.
+        """
         if self.refresh_source is None or not self.config.data_refresh_enabled:
             return False
         if age <= self.config.data_refresh_threshold_seconds:
             return False
         now = time.monotonic()
-        if self._last_refresh_at is not None and now - self._last_refresh_at < self.config.data_refresh_min_interval_seconds:
+        cooldown = self.config.data_refresh_min_interval_seconds
+        if self._refresh_failures:
+            cooldown = min(cooldown * (2 ** min(self._refresh_failures, 4)), 600)
+        if self._last_refresh_at is not None and now - self._last_refresh_at < cooldown:
             self.transcript.append(self.run_id, tick, "data_refresh", {
-                "ok": False, "skipped": "cooldown", "age_seconds": round(age, 1)})
+                "ok": False, "skipped": "cooldown",
+                "downloaded_rows": 0, "age_seconds": round(age, 1),
+                "refresh_failures": self._refresh_failures})
             return False
         executor = ThreadPoolExecutor(max_workers=1)
         future = executor.submit(self.refresh_source)
@@ -470,8 +481,10 @@ class ContinuousAgentRunner:
             executor.shutdown(wait=False, cancel_futures=True)
         self._last_refresh_at = time.monotonic()
         refreshed = bool(result.get("ok"))
+        self._refresh_failures = 0 if refreshed else self._refresh_failures + 1
         step = dict(result)
         step.setdefault("age_seconds", round(age, 1))
+        step.setdefault("refresh_failures", self._refresh_failures)
         self.transcript.append(self.run_id, tick, "data_refresh", step)
         return refreshed
 
@@ -497,6 +510,26 @@ class ContinuousAgentRunner:
             return outcome
         if self._refresh_if_stale(tick, self._age(market)):
             market = self.source.read()
+        age = self._age(market)
+        if age > self.config.max_market_data_age_seconds:
+            # Money gate: with data this stale nothing is actionable serious enough
+            # to justify a planner (LLM) call or any broker-side order. Back off,
+            # record the refusal, and leave reasoning for a tick when the feed lives.
+            self.transcript.append(self.run_id, tick, "tick_start", {
+                "price": float(market.price),
+                "bar_time_utc": market.observed_at.astimezone(timezone.utc).isoformat(),
+                "age_seconds": round(age, 1),
+                "fresh": False,
+                "market_open": True})
+            self.consecutive_errors = 0
+            self.transcript.append(self.run_id, tick, "tick_end", {
+                "summary": "market data stale; skipped reasoning", "steps": 0,
+                "age_seconds": round(age, 1), "refresh_failures": self._refresh_failures})
+            outcome = {"tick": tick, "status": "stale_data",
+                       "summary": "market data stale; skipped reasoning", "steps": 0,
+                       "age_seconds": round(age, 1)}
+            self._write_status("stale_data", age_seconds=round(age, 1))
+            return outcome
         self.transcript.append(self.run_id, tick, "tick_start", {
             "price": float(market.price),
             "bar_time_utc": market.observed_at.astimezone(timezone.utc).isoformat(),

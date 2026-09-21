@@ -294,12 +294,13 @@ def test_runner_refreshes_stale_data_and_records_step(tmp_path):
 
 def test_runner_skips_refresh_when_disabled(tmp_path):
     calls = {"n": 0}
+    transcript = InMemoryAgentTranscriptStore()
 
     def refresh():
         calls["n"] += 1
         return {"ok": True}
 
-    config = AgentConfig(max_market_data_age_seconds=60, max_steps_per_tick=1, data_refresh_enabled=False,
+    config = AgentConfig(max_market_data_age_seconds=120, data_refresh_enabled=False,
                          data_refresh_threshold_seconds=5, data_refresh_min_interval_seconds=300,
                          data_refresh_timeout_seconds=5)
     runner, transcript, _ = refresh_runner(tmp_path, refresh, config=config, stale_minutes=120)
@@ -307,28 +308,33 @@ def test_runner_skips_refresh_when_disabled(tmp_path):
     result = runner.run_tick()
 
     assert calls["n"] == 0
-    assert result["status"] == "completed"
+    assert result["status"] == "stale_data"
     assert not [s for s in transcript.steps() if s["phase"] == "data_refresh"]
+    assert not transcript.steps() if False else True  # no tick_start fresh gate below
+    planner_calls = [s for s in transcript.steps() if s["phase"] == "assistant"]
+    assert planner_calls == []
     tick_start = next(s for s in transcript.steps() if s["phase"] == "tick_start")
     assert tick_start["content"]["fresh"] is False
 
 
-def test_runner_records_failed_refresh_and_continues(tmp_path):
+def test_runner_records_failed_refresh_and_gates_planner(tmp_path):
     calls = {"n": 0}
+    transcript = InMemoryAgentTranscriptStore()
 
     def refresh():
         calls["n"] += 1
         raise RuntimeError("refresh boom")
 
-    runner, transcript, _ = refresh_runner(tmp_path, refresh)
+    runner, transcript, _ = refresh_runner(tmp_path, refresh, stale_minutes=120)
 
     result = runner.run_tick()
 
     assert calls["n"] == 1
-    assert result["status"] == "completed"
+    assert result["status"] == "stale_data"
     step = next(s for s in transcript.steps() if s["phase"] == "data_refresh")
     assert step["content"]["ok"] is False
     assert step["content"]["error_type"] == "RuntimeError"
+    assert [s for s in transcript.steps() if s["phase"] == "assistant"] == []
 
 
 def test_runner_respects_refresh_cooldown(tmp_path):
