@@ -87,7 +87,8 @@ def test_startup_reconciliation_failure_stops_paper_and_demo(tmp_path):
 
 
 def test_stale_market_data_and_no_decision_do_not_execute(tmp_path):
-    stale = MarketSource(MarketData(4000.0, NOW - timedelta(seconds=61)))
+    # Stamped at bar open: opened 121s before the clock, so it closed 61s ago — past the 60s gate.
+    stale = MarketSource(MarketData(4000.0, NOW - timedelta(seconds=121)))
     instance, _, adapter = runner(tmp_path, market=stale)
     assert instance.start()
     assert instance.run_cycle()["state"] == "stale_market_data"

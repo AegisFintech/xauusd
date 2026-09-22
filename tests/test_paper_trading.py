@@ -1,9 +1,11 @@
 import pytest
 from datetime import datetime, timedelta, timezone
 
-from xauusd.paper_trading import (ACCEPTED, DAILY_LOSS_LIMIT, KILL_SWITCH, MARKET_CLOSED, MAX_POSITION,
-                                  STALE_MARKET_DATA, InMemoryPaperTradingStore, PaperDecision,
-                                  PaperRiskConfig, PaperTrading, market_is_open)
+from xauusd.paper_trading import (ACCEPTED, BAR_INTERVAL_SECONDS, DAILY_LOSS_LIMIT,
+                                  DEFAULT_MAX_MARKET_DATA_AGE_SECONDS, KILL_SWITCH, MARKET_CLOSED,
+                                  MAX_POSITION, STALE_MARKET_DATA, InMemoryPaperTradingStore,
+                                  PaperDecision, PaperRiskConfig, PaperTrading, market_data_age_seconds,
+                                  market_is_open)
 
 
 NOW = datetime(2026, 9, 17, 12, tzinfo=timezone.utc)
@@ -31,10 +33,32 @@ def test_duplicate_decision_returns_persisted_outcome_without_second_fill():
 def test_position_freshness_and_daily_loss_gates_are_deterministic():
     config = PaperRiskConfig(daily_loss_limit=10, max_position=1, max_market_data_age_seconds=5)
     trading = PaperTrading(InMemoryPaperTradingStore(), config); trading.start("test")
-    assert trading.evaluate(decision("stale", age=6), NOW)["reason"] == STALE_MARKET_DATA
+    # age counts from the bar's open stamp, so 66s means it closed 6s ago: past the 5s gate.
+    assert trading.evaluate(decision("stale", age=66), NOW)["reason"] == STALE_MARKET_DATA
     assert trading.evaluate(decision("fill"), NOW)["reason"] == ACCEPTED
     assert trading.evaluate(decision("large", quantity=0.1), NOW)["reason"] == MAX_POSITION
     assert trading.evaluate(decision("loss", side="SELL", price=3980), NOW)["reason"] == DAILY_LOSS_LIMIT
+
+
+def test_market_data_age_counts_from_bar_close_not_bar_open():
+    assert market_data_age_seconds(NOW - timedelta(seconds=90), NOW) == 30
+    assert market_data_age_seconds(NOW - timedelta(seconds=60), NOW) == 0
+
+
+def test_market_data_age_clamps_a_still_forming_bar_to_zero():
+    assert market_data_age_seconds(NOW, NOW) == 0
+    assert market_data_age_seconds(NOW + timedelta(seconds=30), NOW) == 0
+
+
+def test_default_gate_accepts_the_newest_closed_m1_bar():
+    # Regression: persisted bars are stamped at their open time, so the newest
+    # closed M1 bar is always 60-120s old. The previous 60s default could never
+    # accept one, and every proposal was refused as STALE_MARKET_DATA.
+    trading = PaperTrading(InMemoryPaperTradingStore()); trading.start("test")
+
+    assert DEFAULT_MAX_MARKET_DATA_AGE_SECONDS > BAR_INTERVAL_SECONDS
+    assert trading.evaluate(decision("closed_110s_ago", age=110), NOW)["reason"] == ACCEPTED
+    assert trading.evaluate(decision("feed_died", age=600), NOW)["reason"] == STALE_MARKET_DATA
 
 
 def test_simulated_ledger_realizes_profit_when_position_is_closed():

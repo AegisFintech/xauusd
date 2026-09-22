@@ -7,7 +7,8 @@ from urllib import request
 import pytest
 
 from xauusd.agent_loop import InMemoryAgentTranscriptStore
-from xauusd.agent_view import create_app
+from xauusd.agent_status import write_status
+from xauusd.agent_view import STALE_TICK_ALERT_THRESHOLD, create_app
 from xauusd.paper_trading import InMemoryPaperTradingStore, PaperDecision, PaperRiskConfig, PaperTrading
 
 
@@ -155,3 +156,38 @@ def test_age_seconds_parses_timezone_aware_timestamps():
     assert _age_seconds(naive.isoformat()) is not None
     assert _age_seconds(None) is None
     assert _age_seconds("not-a-timestamp") is None
+
+
+def _write_heartbeat(path, stale_ticks):
+    now = datetime.now(timezone.utc).isoformat()
+    write_status({"run_id": "agent_stuck", "pid": 1, "status": "stale_data",
+                  "last_tick_status": "stale_data", "started_at": now, "last_tick_at": now,
+                  "tick": 900, "market_open": True, "consecutive_errors": 0, "stalled": False,
+                  "consecutive_stale_ticks": stale_ticks}, path)
+
+
+def test_health_degrades_when_ticks_never_reach_the_planner(server, paper_trading, tmp_path, monkeypatch):
+    # A stuck freshness gate keeps the heartbeat fresh and the feed downloading, so
+    # liveness checks alone reported "ok" while the agent never reasoned once.
+    paper_trading.start("test")
+    status_path = tmp_path / "agent_status.json"
+    monkeypatch.setenv("AGENT_STATUS_FILE", str(status_path))
+    _write_heartbeat(status_path, STALE_TICK_ALERT_THRESHOLD)
+
+    with request.urlopen(server + "/api/health") as response:
+        payload = json.loads(response.read())
+
+    assert payload["status"] == "degraded"
+    assert any("unproductive" in alert for alert in payload["alerts"])
+
+
+def test_health_does_not_alert_below_the_stale_tick_threshold(server, paper_trading, tmp_path, monkeypatch):
+    paper_trading.start("test")
+    status_path = tmp_path / "agent_status.json"
+    monkeypatch.setenv("AGENT_STATUS_FILE", str(status_path))
+    _write_heartbeat(status_path, STALE_TICK_ALERT_THRESHOLD - 1)
+
+    with request.urlopen(server + "/api/health") as response:
+        payload = json.loads(response.read())
+
+    assert not any("unproductive" in alert for alert in payload["alerts"])

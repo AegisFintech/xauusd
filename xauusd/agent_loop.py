@@ -26,7 +26,11 @@ from .demo_execution import NormalizedDecision, PaperToCTraderDemoCoordinator
 from .experiment_registry import PostgresConnection
 from .firecrawl_research import FirecrawlResearchClient, firecrawl_fetch_tool
 from .paper_trading import PaperTrading
-from .paper_trading import market_is_open
+from .paper_trading import (
+    DEFAULT_MAX_MARKET_DATA_AGE_SECONDS,
+    market_data_age_seconds,
+    market_is_open,
+)
 
 DEFAULT_AGENT_GOAL = (
     "Trade XAUUSD profitably on the safe local paper lifecycle. You see current and recent M1 "
@@ -46,9 +50,9 @@ class AgentConfig:
     poll_seconds: float = 60.0
     max_steps_per_tick: int = 4
     symbol: str = "XAUUSD"
-    max_market_data_age_seconds: float = 60.0
+    max_market_data_age_seconds: float = DEFAULT_MAX_MARKET_DATA_AGE_SECONDS
     data_refresh_enabled: bool = False
-    data_refresh_threshold_seconds: float = 60.0
+    data_refresh_threshold_seconds: float = DEFAULT_MAX_MARKET_DATA_AGE_SECONDS
     data_refresh_min_interval_seconds: float = 300.0
     data_refresh_timeout_seconds: float = 120.0
     transcript_content_limit: int = MAX_TRANSCRIPT_CONTENT_CHARS
@@ -68,7 +72,7 @@ class AgentConfig:
 
     @classmethod
     def from_env(cls) -> "AgentConfig":
-        max_age = _positive_float("AGENT_MAX_MARKET_DATA_AGE_SECONDS", 60.0)
+        max_age = _positive_float("AGENT_MAX_MARKET_DATA_AGE_SECONDS", DEFAULT_MAX_MARKET_DATA_AGE_SECONDS)
         return cls(
             goal=os.getenv("AGENT_GOAL", DEFAULT_AGENT_GOAL),
             poll_seconds=_positive_float("AGENT_POLL_SECONDS", 60.0),
@@ -278,7 +282,7 @@ def _redact_for_transcript(result: dict[str, Any], limit: int) -> dict[str, Any]
 def read_market_tool(source: LocalHistoricalMarketDataSource, config: AgentConfig) -> ToolSpec:
     def handler(value: dict[str, Any]) -> dict[str, Any]:
         market = source.read()
-        age_seconds = (datetime.now(timezone.utc) - market.observed_at.astimezone(timezone.utc)).total_seconds()
+        age_seconds = market_data_age_seconds(market.observed_at, datetime.now(timezone.utc))
         recent_closes: list[float] = []
         try:
             normalized = source.store.normalize(source.store.read())
@@ -418,6 +422,7 @@ class ContinuousAgentRunner:
         self._started_at = datetime.now(timezone.utc)
         self.consecutive_errors = 0
         self._refresh_failures = 0
+        self._stale_ticks = 0
         self.transcript.initialize()
         self.transcript.start_run(self.run_id)
         self._closed_orphans = self.transcript.reconcile_running_runs(self.run_id)
@@ -438,6 +443,7 @@ class ContinuousAgentRunner:
                    "tick": self._tick, "market_open": market_is_open(self._now()),
                    "consecutive_errors": self.consecutive_errors,
                    "stalled": self.consecutive_errors >= 5,
+                   "consecutive_stale_ticks": self._stale_ticks,
                    "closed_orphans": self._closed_orphans,
                    "paper_stopped": bool(paper.get("stopped")),
                    "kill_switch_reason": paper.get("kill_switch_reason")}
@@ -446,7 +452,8 @@ class ContinuousAgentRunner:
 
     @staticmethod
     def _age(market) -> float:
-        return (datetime.now(timezone.utc) - market.observed_at.astimezone(timezone.utc)).total_seconds()
+        # Seconds since the newest persisted bar *closed*, not since it opened.
+        return market_data_age_seconds(market.observed_at, datetime.now(timezone.utc))
 
     def _refresh_if_stale(self, tick: int, age: float) -> bool:
         """Blocking, bounded, opt-in refresh that never interrupts the tick loop.
@@ -497,6 +504,7 @@ class ContinuousAgentRunner:
             # Deterministic gate: never spend a planner call, tokens, or a data
             # refresh while the XAUUSD session is closed (weekends, 21:00-22:00 UTC).
             self.consecutive_errors = 0
+            self._stale_ticks = 0
             self.transcript.append(self.run_id, tick, "tick_start", {
                 "price": float(market.price),
                 "bar_time_utc": market.observed_at.astimezone(timezone.utc).isoformat(),
@@ -522,6 +530,7 @@ class ContinuousAgentRunner:
                 "fresh": False,
                 "market_open": True})
             self.consecutive_errors = 0
+            self._stale_ticks += 1
             self.transcript.append(self.run_id, tick, "tick_end", {
                 "summary": "market data stale; skipped reasoning", "steps": 0,
                 "age_seconds": round(age, 1), "refresh_failures": self._refresh_failures})
@@ -543,6 +552,7 @@ class ContinuousAgentRunner:
                 raw, action = self.planner.plan_with_raw(self.config.goal, self.registry, evidence)
             except Exception as exc:
                 self.consecutive_errors += 1
+                self._stale_ticks = 0
                 self.transcript.append(self.run_id, tick, "tick_end",
                                        {"summary": "planner error", "steps": step + 1, "error_type": type(exc).__name__})
                 self._write_status("planner_error", error_type=type(exc).__name__)
@@ -550,12 +560,14 @@ class ContinuousAgentRunner:
             self.transcript.append(self.run_id, tick, "assistant", _assistant_step(action, raw, self.config.transcript_content_limit))
             if action["action"] == "final":
                 self.consecutive_errors = 0
+                self._stale_ticks = 0
                 self.transcript.append(self.run_id, tick, "tick_end",
                                        {"summary": action["summary"], "steps": step + 1})
                 self._write_status("completed")
                 return {"tick": tick, "status": "completed", "summary": action["summary"], "steps": step + 1}
             if step >= self.config.max_steps_per_tick:
                 self.consecutive_errors = 0
+                self._stale_ticks = 0
                 self.transcript.append(self.run_id, tick, "tick_end", {"summary": "tick step limit", "steps": step + 1})
                 self._write_status("step_limit")
                 return {"tick": tick, "status": "step_limit", "summary": "tick step limit", "steps": step + 1}

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import math
 import os
@@ -42,6 +42,30 @@ def market_is_open(now: datetime) -> bool:
     return now.hour < 21 or now.hour >= 22  # Monday-Thursday: closed for the evening break
 
 
+# Persisted bars are M1 and stamped with their *open* time, so the newest bar in
+# the store is not a complete observation until one interval later.
+BAR_INTERVAL_SECONDS = 60.0
+
+# Three closed M1 bars. Tighter than one bar interval is unsatisfiable (see
+# market_data_age_seconds); three bars absorbs a late download without letting a
+# gate pass on a feed that has genuinely stopped advancing.
+DEFAULT_MAX_MARKET_DATA_AGE_SECONDS = 180.0
+
+
+def market_data_age_seconds(bar_time: datetime, now: datetime,
+                            bar_seconds: float = BAR_INTERVAL_SECONDS) -> float:
+    """Age of a persisted bar measured from when that bar *closed*.
+
+    Every freshness gate must use this instead of subtracting the bar timestamp
+    from the clock: a closed M1 bar stamped 01:09 is only knowable at 01:10, so
+    measuring from the open time makes the newest bar intrinsically older than
+    any per-minute threshold and the gate can never pass. The result is clamped
+    at zero because a bar still forming has a close time in the future.
+    """
+    closed_at = bar_time.astimezone(timezone.utc) + timedelta(seconds=bar_seconds)
+    return max(0.0, (now.astimezone(timezone.utc) - closed_at).total_seconds())
+
+
 def _positive_env_float(name: str, default: float) -> float:
     raw = os.getenv(name)
     if raw is None:
@@ -58,7 +82,7 @@ class PaperRiskConfig:
     max_drawdown: float = 0.10
     max_position: float = 1.0
     max_trades_per_day: int = 20
-    max_market_data_age_seconds: float = 60.0
+    max_market_data_age_seconds: float = DEFAULT_MAX_MARKET_DATA_AGE_SECONDS
 
     def validate(self) -> None:
         values = asdict(self)
@@ -77,7 +101,8 @@ class PaperRiskConfig:
             max_drawdown=_positive_env_float("PAPER_MAX_DRAWDOWN", 0.10),
             max_position=_positive_env_float("PAPER_MAX_POSITION", 1),
             max_trades_per_day=int(_positive_env_float("PAPER_MAX_TRADES_PER_DAY", 20)),
-            max_market_data_age_seconds=_positive_env_float("PAPER_MAX_MARKET_DATA_AGE_SECONDS", 60),
+            max_market_data_age_seconds=_positive_env_float(
+                "PAPER_MAX_MARKET_DATA_AGE_SECONDS", DEFAULT_MAX_MARKET_DATA_AGE_SECONDS),
         )
         config.validate()
         return config
@@ -318,8 +343,7 @@ class PaperTrading:
             return INVALID_DECISION if decision.symbol == "XAUUSD" else UNSUPPORTED_SYMBOL
         if not market_is_open(now):
             return MARKET_CLOSED
-        age = (now - decision.market_data_at.astimezone(timezone.utc)).total_seconds()
-        if age > self.config.max_market_data_age_seconds:
+        if market_data_age_seconds(decision.market_data_at, now) > self.config.max_market_data_age_seconds:
             return STALE_MARKET_DATA
         self._mark(state, decision.price, now)
         signed_quantity = decision.quantity if decision.side == "BUY" else -decision.quantity

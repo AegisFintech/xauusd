@@ -12,6 +12,7 @@ import time
 from typing import Any, Callable, Protocol
 
 from .demo_execution import NormalizedDecision, PaperToCTraderDemoCoordinator
+from .paper_trading import DEFAULT_MAX_MARKET_DATA_AGE_SECONDS, market_data_age_seconds
 
 
 @dataclass(frozen=True)
@@ -19,7 +20,7 @@ class DemoRunnerConfig:
     enabled: bool
     poll_seconds: float = 30.0
     max_consecutive_failures: int = 3
-    max_market_data_age_seconds: float = 60.0
+    max_market_data_age_seconds: float = DEFAULT_MAX_MARKET_DATA_AGE_SECONDS
     status_path: Path = Path("reports/demo_runner_status.json")
 
     @classmethod
@@ -28,7 +29,9 @@ class DemoRunnerConfig:
             enabled=os.getenv("CTRADER_AUTOMATION_ENABLED") == "true",
             poll_seconds=float(os.getenv("CTRADER_AUTOMATION_POLL_SECONDS", "30")),
             max_consecutive_failures=int(os.getenv("CTRADER_AUTOMATION_MAX_CONSECUTIVE_FAILURES", "3")),
-            max_market_data_age_seconds=float(os.getenv("CTRADER_AUTOMATION_MAX_MARKET_DATA_AGE_SECONDS", "60")),
+            max_market_data_age_seconds=float(os.getenv(
+                "CTRADER_AUTOMATION_MAX_MARKET_DATA_AGE_SECONDS",
+                str(DEFAULT_MAX_MARKET_DATA_AGE_SECONDS))),
             status_path=Path(os.getenv("CTRADER_AUTOMATION_STATUS_PATH", "reports/demo_runner_status.json")),
         )
 
@@ -165,7 +168,7 @@ class DemoAutomationRunner:
         return now.astimezone(timezone.utc)
 
     def _market_data_age(self, market_data: MarketData) -> float:
-        return (self._now() - market_data.observed_at.astimezone(timezone.utc)).total_seconds()
+        return market_data_age_seconds(market_data.observed_at, self._now())
 
     @staticmethod
     def _validate_market_data(market_data: MarketData) -> None:

@@ -16,6 +16,7 @@ from xauusd.agent_loop import (
     propose_trade_tool,
     read_market_tool,
 )
+from xauusd.agent_status import read_status
 from xauusd.canary_strategy import ConfirmedBreakoutCanarySource, LocalHistoricalMarketDataSource
 from xauusd.data import DataConfig, HistoricalDataStore
 from xauusd.demo_execution import PaperToCTraderDemoCoordinator
@@ -169,18 +170,19 @@ class ScriptedPlanner:
         return raw, action
 
 
-def agent_runner(tmp_path, script, transcript=None, config=None):
-    store = market_store(tmp_path)
+def agent_runner(tmp_path, script, transcript=None, config=None, store=None, status_path=None):
+    store = store or market_store(tmp_path)
     source = LocalHistoricalMarketDataSource(store)
     pt = fresh_paper()
     pt.start("test")
     coordinator = paper_only_coordinator(pt)
-    cfg = config or AgentConfig(max_market_data_age_seconds=120, max_steps_per_tick=2)
+    cfg = config or AgentConfig(max_steps_per_tick=2)
     registry = build_agent_registry(source, pt, coordinator, cfg,
                                     canary=ConfirmedBreakoutCanarySource(store, 1))
     transcript = transcript or InMemoryAgentTranscriptStore()
     runner = ContinuousAgentRunner(ScriptedPlanner(script), registry, transcript,
-                                   source, pt, coordinator, cfg, now_provider=lambda: OPEN_NOW)
+                                   source, pt, coordinator, cfg, now_provider=lambda: OPEN_NOW,
+                                   status_path=status_path)
     return runner, transcript
 
 
@@ -335,6 +337,55 @@ def test_runner_records_failed_refresh_and_gates_planner(tmp_path):
     assert step["content"]["ok"] is False
     assert step["content"]["error_type"] == "RuntimeError"
     assert [s for s in transcript.steps() if s["phase"] == "assistant"] == []
+
+
+def test_default_gate_reaches_the_planner_on_the_newest_closed_bar(tmp_path):
+    # Regression: market_store's newest bar is the last closed minute stamped at
+    # its open time, exactly what production persists. The old 60s open-based gate
+    # refused that bar on every tick, so the planner never ran and the paper
+    # account never traded.
+    runner, transcript = agent_runner(tmp_path, [
+        ("raw", {"action": "final", "summary": "observed a tradable bar"}),
+    ])
+
+    result = runner.run_tick()
+
+    assert result["status"] == "completed"
+    tick_start = next(s for s in transcript.steps() if s["phase"] == "tick_start")
+    assert tick_start["content"]["fresh"] is True
+    assert tick_start["content"]["age_seconds"] < 120
+    assert [s for s in transcript.steps() if s["phase"] == "assistant"]
+
+
+def test_dead_feed_is_still_refused_and_counted(tmp_path):
+    status_path = tmp_path / "agent_status.json"
+    runner, transcript = agent_runner(
+        tmp_path, [("raw", {"action": "final", "summary": "must not run"})],
+        config=AgentConfig(max_steps_per_tick=2, data_refresh_enabled=False),
+        store=stale_market_store(tmp_path, stale_minutes=10), status_path=str(status_path))
+
+    assert runner.run_tick()["status"] == "stale_data"
+    assert runner.run_tick()["status"] == "stale_data"
+
+    assert [s for s in transcript.steps() if s["phase"] == "assistant"] == []
+    assert read_status(status_path)["consecutive_stale_ticks"] == 2
+
+
+def test_stale_tick_counter_resets_when_the_feed_recovers(tmp_path):
+    store = stale_market_store(tmp_path, stale_minutes=10)
+    status_path = tmp_path / "agent_status.json"
+    runner, _ = agent_runner(
+        tmp_path, [("raw", {"action": "final", "summary": "traded on a fresh bar"})],
+        config=AgentConfig(max_steps_per_tick=2, data_refresh_enabled=False),
+        store=store, status_path=str(status_path))
+
+    assert runner.run_tick()["status"] == "stale_data"
+    assert read_status(status_path)["consecutive_stale_ticks"] == 1
+
+    write_new_bar(store)
+
+    assert runner.run_tick()["status"] == "completed"
+    assert read_status(status_path)["consecutive_stale_ticks"] == 0
 
 
 def test_runner_respects_refresh_cooldown(tmp_path):

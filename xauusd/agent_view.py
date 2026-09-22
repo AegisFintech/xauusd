@@ -16,6 +16,11 @@ from .paper_trading import PaperTrading, paper_from_env, state_backend
 DEFAULT_VIEW_HOST = "127.0.0.1"
 DEFAULT_VIEW_PORT = 8100
 
+# Ticks that never reached the planner are silent: the heartbeat stays fresh and
+# the feed keeps downloading, so liveness checks alone cannot see a stuck loop.
+# At the default 60s poll this fires after roughly ten unproductive minutes.
+STALE_TICK_ALERT_THRESHOLD = 10
+
 _PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>xauusd agent - live thinking</title>
 <style>
@@ -302,6 +307,9 @@ def create_app(store: AgentTranscriptStore | None = None,
             alerts.append(f"agent stalled ({heartbeat.get('consecutive_errors', 0)} consecutive errors)")
         elif heartbeat.get("status") in {"planner_error", "tick_error"}:
             alerts.append(f"agent last tick {heartbeat.get('status')}")
+        stale_ticks = int((heartbeat or {}).get("consecutive_stale_ticks") or 0)
+        if stale_ticks >= STALE_TICK_ALERT_THRESHOLD:
+            alerts.append(f"agent unproductive: {stale_ticks} consecutive stale-data ticks")
         if heartbeat_age is not None and heartbeat_age > 600:
             alerts.append(f"agent heartbeat stale ({int(heartbeat_age)}s)")
         if paper_state.get("stopped"):
