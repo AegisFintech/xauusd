@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 import os
 import re
 from typing import Any, Callable, Protocol
@@ -159,8 +160,11 @@ class OpenAICompatiblePlanner:
         key = os.getenv("OPENAI_API_KEY")
         if not key:
             raise RuntimeError("OPENAI_API_KEY is required")
+        timeout = float(os.getenv("OPENAI_TIMEOUT_SECONDS", "30"))
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("OPENAI_TIMEOUT_SECONDS must be a positive finite number")
         return cls(os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-                   os.getenv("OPENAI_MODEL", "gpt-4.1-mini"), key)
+                   os.getenv("OPENAI_MODEL", "gpt-4.1-mini"), key, timeout)
 
     def plan(self, goal: str, registry: ToolRegistry, evidence: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         _, action = self.plan_with_raw(goal, registry, evidence)

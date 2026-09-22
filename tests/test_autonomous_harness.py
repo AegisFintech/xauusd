@@ -108,3 +108,27 @@ def test_tool_timeout_is_bounded_and_persisted_as_failed():
     with pytest.raises(ToolExecutionError, match="tool research_note failed"):
         harness.run("research")
     assert list(store.calls.values())[0]["status"] == "failed"
+
+
+def test_planner_from_env_configures_model_and_timeout(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "not-a-real-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://planner.invalid/v1")
+    monkeypatch.setenv("OPENAI_MODEL", "grok-4.6")
+    monkeypatch.delenv("OPENAI_TIMEOUT_SECONDS", raising=False)
+
+    assert OpenAICompatiblePlanner.from_env().timeout_seconds == 30.0
+
+    # Reasoning models routinely exceed the 30s default, so it must be tunable.
+    monkeypatch.setenv("OPENAI_TIMEOUT_SECONDS", "90")
+    planner = OpenAICompatiblePlanner.from_env()
+    assert planner.timeout_seconds == 90.0
+    assert planner.model == "grok-4.6"
+
+
+def test_planner_from_env_rejects_a_non_positive_timeout(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "not-a-real-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://planner.invalid/v1")
+    monkeypatch.setenv("OPENAI_TIMEOUT_SECONDS", "0")
+
+    with pytest.raises(ValueError, match="OPENAI_TIMEOUT_SECONDS"):
+        OpenAICompatiblePlanner.from_env()
