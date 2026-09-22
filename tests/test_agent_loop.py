@@ -20,7 +20,8 @@ from xauusd.agent_status import read_status
 from xauusd.canary_strategy import ConfirmedBreakoutCanarySource, LocalHistoricalMarketDataSource
 from xauusd.data import DataConfig, HistoricalDataStore
 from xauusd.demo_execution import PaperToCTraderDemoCoordinator
-from xauusd.paper_trading import InMemoryPaperTradingStore, PaperRiskConfig, PaperTrading
+from xauusd.paper_trading import (ACCEPTED, MAX_POSITION, InMemoryPaperTradingStore, PaperRiskConfig,
+                                  PaperTrading)
 
 
 def market_store(tmp_path, periods=80):
@@ -123,6 +124,9 @@ def test_canary_signal_tool_returns_side(tmp_path):
 
     assert out["signal"] == "SELL"
     assert out["quantity"] == 1.0
+    # The planner must be able to see which bar triggered a recovered signal.
+    assert out["signal_bar_utc"].endswith("+00:00")
+    assert 0 <= out["signal_age_seconds"] < 120
 
 
 def test_propose_trade_tool_paper_only_gate(tmp_path):
@@ -133,10 +137,29 @@ def test_propose_trade_tool_paper_only_gate(tmp_path):
 
     result = tool.handler({"side": "BUY", "quantity": 0.5, "reason": "momentum test"})
 
-    assert result["paper_accept"] is True
-    assert result["accepted"] is False
+    # `filled` is the authoritative verdict; in paper-only mode no broker order
+    # exists, and that must not read as a refusal.
+    assert result["filled"] is True
+    assert result["gate_reason"] == ACCEPTED
     assert result["paper_only"] is True
+    assert result["sent_to_broker"] is False
     assert result["proposal_reason"] == "momentum test"
+    assert pt.state()["position"] == pytest.approx(0.5)
+
+
+def test_propose_trade_tool_reports_refusal_as_not_filled(tmp_path):
+    pt = fresh_paper()
+    pt.start("test")
+    tool = propose_trade_tool(paper_only_coordinator(pt), pt, fresh_source(tmp_path), AgentConfig(),
+                              now_provider=lambda: OPEN_NOW)
+
+    tool.handler({"side": "BUY", "quantity": 1.0, "reason": "fills max_position"})
+    # A different quantity, so this is a new decision rather than an idempotent replay.
+    result = tool.handler({"side": "BUY", "quantity": 0.5, "reason": "exceeds max_position"})
+
+    assert result["filled"] is False
+    assert result["gate_reason"] == MAX_POSITION
+    assert result["sent_to_broker"] is False
 
 
 def test_propose_trade_tool_duplicate_is_idempotent(tmp_path):
@@ -148,9 +171,9 @@ def test_propose_trade_tool_duplicate_is_idempotent(tmp_path):
     first = tool.handler({"side": "BUY", "quantity": 0.25, "reason": "a"})
     second = tool.handler({"side": "BUY", "quantity": 0.25, "reason": "b"})
 
-    assert first["paper_accept"] is True
+    assert first["filled"] is True
     assert second["decision_id"] == first["decision_id"]
-    assert second["paper_accept"] is True
+    assert second["filled"] is True
     assert pt.state()["position"] == pytest.approx(0.25)
 
 

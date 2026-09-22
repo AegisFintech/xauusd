@@ -55,6 +55,16 @@ def test_index_html_renders_live_view(server):
     assert 'id="paper"' in body
 
 
+def test_index_html_renders_times_in_gmt_plus_eight(server):
+    with request.urlopen(server + "/") as response:
+        body = response.read().decode()
+
+    # Display-only conversion: a fixed +08:00 offset, not the browser's own zone.
+    assert "DISPLAY_OFFSET_MINUTES=480" in body
+    assert "+08:00" in body
+    assert "' UTC'" not in body
+
+
 def test_steps_endpoint_defaults_to_newest_first(server):
     with request.urlopen(server + "/api/steps?run_id=agent_test_1") as response:
         payload = json.loads(response.read())

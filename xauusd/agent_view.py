@@ -66,8 +66,17 @@ h1{font-size:15px;color:#8ab4f8;margin:0 0 4px}
  const $=id=>document.getElementById(id);
  const esc=t=>String(t).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
  async function j(u){const r=await fetch(u);if(!r.ok)throw Error(r.status);return r.json();}
- function fmtTime(iso){if(!iso)return '?';const d=new Date(iso);return isNaN(d)?String(iso):d.toISOString().slice(11,19)+' UTC';}
- function fmtBar(iso){const m=/T(\\d\\d):(\\d\\d)/.exec(String(iso||''));return m?m[1]+':'+m[2]+' UTC':String(iso);}
+ // Display timezone only. Persisted timestamps, bar indices, and the market-hours
+ // gate all stay UTC; GMT+8 is a fixed offset here, never the browser's own zone.
+ const DISPLAY_OFFSET_MINUTES=480;
+ function parseWhen(iso){
+  const s=String(iso||'');if(!s)return null;
+  const d=new Date(/(Z|[+-]\\d\\d:?\\d\\d)$/.test(s)?s:s+'Z');  // a naive stamp is UTC
+  return isNaN(d)?null:d;
+ }
+ function shiftDisplay(d){return new Date(d.getTime()+DISPLAY_OFFSET_MINUTES*60000);}
+ function fmtTime(iso){if(!iso)return '?';const d=parseWhen(iso);return d?shiftDisplay(d).toISOString().slice(11,19)+' +08:00':String(iso);}
+ function fmtBar(iso){const d=parseWhen(iso);return d?shiftDisplay(d).toISOString().slice(11,16)+' +08:00':String(iso);}
  function stepNode(s){
   if(rendered.has(s.id))return null;rendered.add(s.id);
   const d=document.createElement('div');d.className='step '+s.phase;
@@ -197,7 +206,7 @@ async function refreshRuns(){
   async function refreshHealth(){
    try{const h=await j('/api/health');const el=$('health');
     const du=h.data_update||{};const gap=du.age_seconds!=null?' · feed gap '+Math.round(du.age_seconds)+'s':'';
-    const bar=du.end?(' · last bar '+fmtBar(du.end).replace(/_Z/g,' UTC')):'';
+    const bar=du.end?(' · last bar '+fmtBar(du.end)):'';
     el.textContent=(h.alerts&&h.alerts.length)?'ATTENTION: '+h.alerts.join('  ·  '):'healthy'+bar+gap;
     el.className=h.status==='ok'?'ok':'problem';}catch(e){}
    }

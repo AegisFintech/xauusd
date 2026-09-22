@@ -334,13 +334,21 @@ def canary_signal_tool(canary: ConfirmedBreakoutCanarySource) -> ToolSpec:
         decision = canary.read(_mock_market_for_read(canary))
         if decision is None:
             return {"signal": "NONE", "quantity": 0.0}
-        return {"signal": decision.side, "quantity": float(decision.quantity)}
+        bar_time = decision.market_data_at.astimezone(timezone.utc)
+        return {"signal": decision.side, "quantity": float(decision.quantity),
+                "signal_bar_utc": bar_time.isoformat(),
+                "signal_age_seconds": round(market_data_age_seconds(bar_time, datetime.now(timezone.utc)), 1)}
 
     input_schema = {"type": "object", "properties": {}, "required": [], "additionalProperties": False}
     output_schema = {"type": "object", "properties": {
         "signal": {"type": "string", "enum": ["NONE", "BUY", "SELL"]}, "quantity": {"type": "number"},
+        "signal_bar_utc": {"type": "string"}, "signal_age_seconds": {"type": "number"},
     }, "required": ["signal", "quantity"], "additionalProperties": False}
-    return ToolSpec("canary_signal", "Run the deterministic confirmed-breakout signal on closed M1 bars.", input_schema, output_schema, handler)
+    return ToolSpec("canary_signal",
+                    "Run the deterministic confirmed-breakout signal on closed M1 bars. Each new transition is "
+                    "emitted once. signal_bar_utc is the bar that triggered it and may sit a bar or two behind the "
+                    "newest bar when a tick was skipped, so check signal_age_seconds before treating it as current.",
+                    input_schema, output_schema, handler)
 
 
 def _mock_market_for_read(canary: ConfirmedBreakoutCanarySource):
@@ -364,21 +372,33 @@ def propose_trade_tool(coordinator: PaperToCTraderDemoCoordinator, paper_trading
         now = now_provider() if now_provider is not None else datetime.now(timezone.utc)
         outcome = coordinator.execute(decision, float(market.price), now)
         paper = outcome.get("paper", {})
-        return {"accepted": bool(outcome.get("accepted", False)), "decision_id": decision.decision_id,
-                "reason": paper.get("reason"), "paper_accept": bool(paper.get("accepted", False)),
-                "paper_reason": paper.get("reason"), "paper_only": bool(outcome.get("paper_only", False)),
+        paper_only = bool(outcome.get("paper_only", False))
+        paper_accepted = bool(paper.get("accepted", False))
+        if paper_only:
+            # The paper gate is the whole lifecycle: nothing is sent to a broker,
+            # so its verdict is the only verdict that exists.
+            filled, gate_reason = paper_accepted, paper.get("reason")
+        else:
+            filled = bool(outcome.get("accepted", False))
+            gate_reason = (paper.get("reason") if not paper_accepted
+                           else (outcome.get("demo") or {}).get("reason") or paper.get("reason"))
+        return {"filled": filled, "gate_reason": gate_reason, "paper_only": paper_only,
+                "sent_to_broker": not paper_only, "decision_id": decision.decision_id,
                 "proposal_reason": value.get("reason", "")}
 
     input_schema = {"type": "object", "properties": {
         "side": {"type": "string", "enum": ["BUY", "SELL"]}, "quantity": {"type": "number"}, "reason": {"type": "string"},
     }, "required": ["side", "quantity", "reason"], "additionalProperties": False}
     output_schema = {"type": "object", "properties": {
-        "accepted": {"type": "boolean"}, "decision_id": {"type": "string"}, "reason": {"type": "string"},
-        "paper_accept": {"type": "boolean"}, "paper_reason": {"type": "string"}, "paper_only": {"type": "boolean"},
+        "filled": {"type": "boolean"}, "gate_reason": {"type": "string"}, "paper_only": {"type": "boolean"},
+        "sent_to_broker": {"type": "boolean"}, "decision_id": {"type": "string"},
         "proposal_reason": {"type": "string"},
-    }, "required": ["accepted", "decision_id", "reason", "paper_accept", "paper_reason", "paper_only", "proposal_reason"],
+    }, "required": ["filled", "gate_reason", "paper_only", "sent_to_broker", "decision_id", "proposal_reason"],
         "additionalProperties": False}
-    return ToolSpec("propose_trade", "Propose a paper trade. The deterministic risk gates approve or refuse; their outcome is authoritative.",
+    return ToolSpec("propose_trade",
+                    "Propose a trade. The deterministic risk gates decide it and `filled` is their authoritative "
+                    "verdict: true means the position changed. In paper-only mode `sent_to_broker` is false "
+                    "because nothing reaches a broker, and `filled` reports the paper fill.",
                     input_schema, output_schema, handler)
 
 

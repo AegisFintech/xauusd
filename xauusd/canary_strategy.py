@@ -21,6 +21,11 @@ CONFIRMED_BREAKOUT_SPEC = StrategySpec(
     {"lookback": 30, "range_ratio": 1.5, "min_strength": 0.15, "direction": "both"},
 )
 
+# A consumer that samples once per minute against a per-minute bar cadence
+# inevitably skips bars. A transition landing on a skipped bar stays actionable
+# for this many bars, then is dropped rather than traded late.
+DEFAULT_MAX_BACKLOG_BARS = 2
+
 
 def _normalized_m1_bars(store: HistoricalDataStore) -> pd.DataFrame:
     if store.config.timeframe != "M1":
@@ -51,6 +56,7 @@ class LocalHistoricalMarketDataSource:
 class ConfirmedBreakoutCanaryConfig:
     quantity: float
     strategy: StrategySpec = CONFIRMED_BREAKOUT_SPEC
+    max_backlog_bars: int = DEFAULT_MAX_BACKLOG_BARS
 
     def validate(self) -> None:
         if (not isinstance(self.quantity, (int, float)) or isinstance(self.quantity, bool) or
@@ -58,10 +64,13 @@ class ConfirmedBreakoutCanaryConfig:
             raise ValueError("quantity must be finite and positive")
         if self.strategy != CONFIRMED_BREAKOUT_SPEC:
             raise ValueError("canary strategy must use the confirmed breakout specification")
+        if (not isinstance(self.max_backlog_bars, int) or isinstance(self.max_backlog_bars, bool) or
+                self.max_backlog_bars < 1):
+            raise ValueError("max_backlog_bars must be a positive integer")
 
 
 class ConfirmedBreakoutCanarySource:
-    """Emit only new confirmed-breakout transitions from closed local M1 bars."""
+    """Emit each new confirmed-breakout transition from closed local M1 bars once."""
 
     def __init__(self, store: HistoricalDataStore, quantity: float,
                  signal_generator: Callable[[pd.DataFrame, StrategySpec], pd.Series] = generate_signal):
@@ -69,7 +78,7 @@ class ConfirmedBreakoutCanarySource:
         self.config = ConfirmedBreakoutCanaryConfig(quantity)
         self.config.validate()
         self.signal_generator = signal_generator
-        self.last_emitted_bar_time: datetime | None = None
+        self.last_observed_bar_time: datetime | None = None
 
     def read(self, market_data: MarketData) -> NormalizedDecision | None:
         # Persisted historical bars are closed bars; the runner independently rejects stale observations.
@@ -82,25 +91,52 @@ class ConfirmedBreakoutCanarySource:
         signals = self.signal_generator(features, self.config.strategy)
         if signals.empty:
             return None
-        signal = int(signals.iloc[-1])
-        previous_signal = int(signals.iloc[-2]) if len(signals) > 1 else 0
-        if signal not in {-1, 0, 1} or previous_signal not in {-1, 0, 1}:
+        values = signals.astype(int)
+        if not set(values.unique()) <= {-1, 0, 1}:
             raise ValueError("signal generator must return -1, 0, or 1")
-        final_time = features.index[-1].to_pydatetime()
-        if (signal == 0 or signal == previous_signal or
-                final_time == self.last_emitted_bar_time):
+        pending = self._pending_transition(values)
+        self.last_observed_bar_time = values.index[-1].to_pydatetime()
+        if pending is None:
             return None
-        self.last_emitted_bar_time = final_time
+        transition_time, signal = pending
         side = "BUY" if signal == 1 else "SELL"
         return NormalizedDecision(
-            self._decision_id(final_time, side), self.store.config.symbol, side,
-            float(self.config.quantity), final_time,
+            self._decision_id(transition_time, side), self.store.config.symbol, side,
+            float(self.config.quantity), transition_time,
         )
 
-    def _decision_id(self, final_time: datetime, side: str) -> str:
+    def _pending_transition(self, values: pd.Series) -> tuple[datetime, int] | None:
+        """Most recent transition among the bars not yet observed, or None.
+
+        Inspecting only the newest bar loses any transition that lands on a bar
+        the consumer skipped: the following bar reads as "no change", so the
+        signal never surfaces again. Scanning the unobserved window recovers it,
+        bounded by max_backlog_bars so a signal too old to act on is dropped
+        rather than traded late. A cold start deliberately considers only the
+        newest bar, so a restart cannot resurrect an old breakout as a fresh
+        entry.
+        """
+        previous = values.shift(1).fillna(0).astype(int)
+        transitions = values[(values != 0) & (values != previous)]
+        if transitions.empty:
+            return None
+        if self.last_observed_bar_time is None:
+            if transitions.index[-1] != values.index[-1]:
+                return None
+        else:
+            window = values[values.index > self.last_observed_bar_time]
+            if window.empty:
+                return None
+            oldest_actionable = window.iloc[-self.config.max_backlog_bars:].index[0]
+            transitions = transitions[transitions.index >= oldest_actionable]
+            if transitions.empty:
+                return None
+        return transitions.index[-1].to_pydatetime(), int(transitions.iloc[-1])
+
+    def _decision_id(self, transition_time: datetime, side: str) -> str:
         payload = {
             "strategy": asdict(self.config.strategy),
-            "final_bar_time": final_time.astimezone(timezone.utc).isoformat(),
+            "transition_bar_time": transition_time.astimezone(timezone.utc).isoformat(),
             "side": side,
         }
         return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()

@@ -50,3 +50,76 @@ def test_canary_transition_has_stable_identity_and_side(tmp_path):
     assert first.side == "SELL"
     assert first.decision_id == second.decision_id
     assert first.market_data_at == store.read().index[-1].to_pydatetime()
+
+
+def transition_at(timestamp):
+    """Signal generator emitting one SELL transition at an absolute bar time.
+
+    The transition only exists once that bar is persisted: assigning to a label
+    outside the index would silently append a phantom bar to the series.
+    """
+    stamp = pd.Timestamp(timestamp, tz="UTC")
+
+    def generate(features, spec):
+        values = pd.Series(0, index=features.index, dtype=int)
+        if stamp in values.index:
+            values.loc[stamp] = -1
+        return values
+    return generate
+
+
+def append_bars(store, times):
+    # Bars need a real range: build_features drops any row where high == low,
+    # because body_fraction and range_ratio divide by it.
+    index = pd.DatetimeIndex([pd.Timestamp(time, tz="UTC") for time in times], name="timestamp", tz="UTC")
+    count = len(index)
+    bars = pd.DataFrame({"open": [180.0] * count, "high": [181.0] * count, "low": [179.0] * count,
+                         "close": [180.5] * count, "volume": [1] * count}, index=index)
+    store.write(bars, merge=True)
+
+
+def newest_market(store):
+    return MarketData(200.0, store.read().index[-1].to_pydatetime())
+
+
+def test_canary_cold_start_ignores_a_transition_it_never_observed(tmp_path):
+    store = store_with_bars(tmp_path)  # 10:00 .. 11:19 UTC
+    source = ConfirmedBreakoutCanarySource(store, 1, signal_generator=transition_at("2026-09-17 11:17"))
+
+    assert source.read(newest_market(store)) is None
+
+
+def test_canary_recovers_a_transition_on_a_bar_the_consumer_skipped(tmp_path):
+    store = store_with_bars(tmp_path)
+    source = ConfirmedBreakoutCanarySource(store, 1, signal_generator=transition_at("2026-09-17 11:20"))
+    assert source.read(newest_market(store)) is None  # 11:20 not persisted yet
+
+    append_bars(store, ["2026-09-17 11:20", "2026-09-17 11:21"])  # two bars arrive between reads
+
+    decision = source.read(newest_market(store))
+
+    # Reading only the newest bar would see 11:21 (no change) and lose the signal.
+    assert decision is not None
+    assert decision.side == "SELL"
+    assert decision.market_data_at == pd.Timestamp("2026-09-17 11:20", tz="UTC").to_pydatetime()
+
+
+def test_canary_drops_a_transition_beyond_the_backlog_bound(tmp_path):
+    store = store_with_bars(tmp_path)
+    source = ConfirmedBreakoutCanarySource(store, 1, signal_generator=transition_at("2026-09-17 11:20"))
+    assert source.read(newest_market(store)) is None
+
+    append_bars(store, ["2026-09-17 11:20", "2026-09-17 11:21", "2026-09-17 11:22"])
+
+    assert source.read(newest_market(store)) is None
+
+
+def test_canary_emits_each_transition_once(tmp_path):
+    store = store_with_bars(tmp_path)
+    source = ConfirmedBreakoutCanarySource(store, 1, signal_generator=transition_at("2026-09-17 11:20"))
+    assert source.read(newest_market(store)) is None
+
+    append_bars(store, ["2026-09-17 11:20"])
+
+    assert source.read(newest_market(store)) is not None
+    assert source.read(newest_market(store)) is None
