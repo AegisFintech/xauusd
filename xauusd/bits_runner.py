@@ -47,6 +47,8 @@ class BitsAgentRunner(ContinuousAgentRunner):
                 "tools": [tool for tool in self.registry.definitions()
                           if tool["name"] in {"read_market", "paper_state", "propose_trade"}],
                 "execution": "The server harness executes your JSON shell action; do not use Datadog sandbox tools. "
+                "The current paper.stopped boolean is authoritative: a historical kill_switch_reason "
+                "does not imply an active stop when stopped=false. Never clear a true operator stop. "
                 "Run existing trading tools with .venv/bin/python -m xauusd.cli agent-tool TOOL --input 'JSON'. "
                 "Available TOOL names and input schemas are in tools. Use propose_trade for every trade; "
                 "never bypass the deterministic gates. Shell cwd is /root/xauusd. "
@@ -57,8 +59,11 @@ class BitsAgentRunner(ContinuousAgentRunner):
                 "Finish with waiting/completed and a UTC next_review_at when no further action is useful."}
 
     def _submit(self, cycle, market, results=None):
+        if self._stop.is_set():
+            return self._outcome("stopped")
         invocation = {"protocol": PROTOCOL, "cycle_id": cycle["cycle_id"], "message_id": uuid4().hex,
                       "goal": self.config.goal, "context": self._context(market), "results": results or [],
+                      "previous_decision": cycle.get("reply"),
                       "steps_remaining": max(0, self.config.max_steps_per_tick - cycle.get("steps", 0))}
         if invocation["steps_remaining"] == 0:
             invocation["instruction"] = "Cycle action budget exhausted. Return a final summary with actions []."
@@ -141,6 +146,8 @@ class BitsAgentRunner(ContinuousAgentRunner):
             return self._outcome("stale_data")
         self._stale_ticks = 0
         if phase == "response":
+            if self._stop.is_set():
+                return self._outcome("stopped")
             # Old analysis is discarded across long pauses; do not execute delayed commands.
             age = (self._now() - datetime.fromisoformat(cycle["submitted_at"])).total_seconds()
             if cycle["steps"] >= self.config.max_steps_per_tick or age > self.config.max_market_data_age_seconds:

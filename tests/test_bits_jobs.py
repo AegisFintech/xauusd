@@ -65,3 +65,4 @@ def test_cancel_process_after_output_streams_close(jobs):
     time.sleep(.1)
     jobs.stop()
     assert jobs.store.job(job['job_id'])['status']=='cancelled'
+    with pytest.raises(BitsError): jobs.start('late',action('echo never'))

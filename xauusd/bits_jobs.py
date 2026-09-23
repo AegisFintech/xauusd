@@ -19,6 +19,10 @@ from .bits import BitsError, validate_shell_action
 from .experiment_registry import canonical_json
 
 
+class AgentAlreadyRunning(BitsError):
+    pass
+
+
 class AgentLock:
     """Single process per container; the lock is runtime coordination, not state."""
     def __init__(self, transcript):
@@ -30,7 +34,7 @@ class AgentLock:
             fcntl.flock(self.handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             self.handle.close()
-            raise BitsError("another Bits agent owns this container state") from None
+            raise AgentAlreadyRunning("another Bits agent owns this container state") from None
 
     def close(self):
         self.handle.close()
@@ -135,11 +139,14 @@ class ShellJobs:
         self.cancelled = Event()
 
     def start(self, cycle, action):
+        if self.cancelled.is_set():
+            raise BitsError("shell executor is stopping")
         validate_shell_action(action)
         if self.secrets.unsafe(canonical_json(action)):
             raise BitsError("command contains sensitive content")
         result, created = self.store.claim(cycle, action)
         if created:
+            self.workers = {key: thread for key, thread in self.workers.items() if thread.is_alive()}
             worker = Thread(target=self._run, args=(action["args"], result), daemon=True)
             self.workers[result["job_id"]] = worker
             worker.start()
@@ -153,7 +160,12 @@ class ShellJobs:
         deadline = time.monotonic() + args["timeout_sec"]
         state = "failed"
         try:
-            proc = subprocess.Popen(["/bin/bash", "-c", args["command"]], cwd=args["cwd"],
+            from dotenv import dotenv_values
+            env = dict(os.environ)
+            latest = dotenv_values(self.secrets.env_file)
+            for key in ("CTRADER_ACCESS_TOKEN", "CTRADER_REFRESH_TOKEN"):
+                if latest.get(key): env[key] = latest[key]
+            proc = subprocess.Popen(["/bin/bash", "-c", args["command"]], cwd=args["cwd"], env=env,
                                     stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                     stderr=subprocess.PIPE, start_new_session=True)
             with selectors.DefaultSelector() as sel:

@@ -186,12 +186,17 @@ def _agent_data_refresh_source(market_store: HistoricalDataStore, config: AgentC
  from pathlib import Path
  status_path=Path(os.getenv("CTRADER_DATA_UPDATE_STATUS_PATH","reports/data_update_status.json"))
  def refresh():
+  from dotenv import dotenv_values
+  env=dict(os.environ)
+  latest=dotenv_values(".env")
+  for key in ("CTRADER_ACCESS_TOKEN","CTRADER_REFRESH_TOKEN"):
+   if latest.get(key): env[key]=latest[key]
   command=[sys.executable,"-m","xauusd.cli","data","update"]
   if not market_store.path.exists():
    from datetime import timedelta
    command=[sys.executable,"-m","xauusd.cli","data","download","--start",
             (datetime.now(timezone.utc)-timedelta(days=7)).date().isoformat()]
-  proc=subprocess.run(command,
+  proc=subprocess.run(command,env=env,
                       capture_output=True,text=True,timeout=config.data_refresh_timeout_seconds)
   try: payload=_json.loads(status_path.read_text())
   except (OSError,ValueError):
@@ -269,9 +274,18 @@ def agent_controller(action: str) -> dict:
   planner=BitsClient.from_env()
  elif backend=="openai": planner=OpenAICompatiblePlanner.from_env()
  else: raise ValueError("AGENT_PLANNER must be datadog or openai")
- runner=runner_type(planner,registry,
-                              transcript_store,source,paper,coordinator,config,
-                              refresh_source=refresh_source,status_path=status_path)
+ try:
+  runner=runner_type(planner,registry,
+                    transcript_store,source,paper,coordinator,config,
+                    refresh_source=refresh_source,status_path=status_path)
+ except Exception as exc:
+  from .bits_jobs import AgentAlreadyRunning
+  if isinstance(exc,AgentAlreadyRunning):
+   return {"state":"refused","reason":"agent_already_running"}
+  if backend!="datadog": raise
+  paper.stop("recovery_failed")
+  write_status({"state":"stopped","reason":"recovery_failed","error_type":type(exc).__name__},status_path)
+  return {"state":"stopped","reason":"recovery_failed"}
  if action=="once":
   try: result=runner.run_tick()
   finally: runner.stop()
@@ -282,8 +296,8 @@ def agent_controller(action: str) -> dict:
   import threading
   stop=threading.Event()
   def _terminate(signum,frame):
-   runner.stop()
    stop.set()
+   runner._stop.set()
   signal.signal(signal.SIGTERM,_terminate)
   # The live view is a dedicated always-on unit (xauusd-agent-view.service) that
   # reads only the persisted stores; the bot process must never own the port so
@@ -291,6 +305,8 @@ def agent_controller(action: str) -> dict:
   try:
    runner.run_forever(stop=stop)
   except KeyboardInterrupt:
+   stop.set()
+  finally:
    runner.stop()
   return runner.status()
  raise ValueError(f"unknown agent action: {action}")

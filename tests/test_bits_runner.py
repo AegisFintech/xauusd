@@ -104,3 +104,16 @@ def test_stale_analysis_is_never_executed(tmp_path):
     assert agent.run_tick()['status']=='step_limit'
     assert agent.bits_store.get('cycle')['phase']=='idle'
     agent.stop()
+
+
+def test_stop_during_workflow_poll_never_starts_command(tmp_path):
+    agent=runner(tmp_path)
+    agent.run_tick()
+    original=agent.planner.poll
+    def stopping_poll(*args):
+        agent._stop.set()
+        return original(*args)
+    agent.planner.poll=stopping_poll
+    assert agent.run_tick()['status']=='stopped'
+    assert not agent.jobs.workers
+    agent.stop()

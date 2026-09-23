@@ -91,3 +91,24 @@ Completed commands are not replayed with the same cycle/action ID. Do not run
 multiple agent hosts against one state store; the runtime lock is container-local.
 
 See [the system prompt](bits-system-prompt.md) and the root README for commands.
+
+## Deployment validation — 2026-09-23
+
+- Full suite: 344 passed (one existing protobuf datetime deprecation warning).
+- Live strict JSON submission/polling and workflow-agent identity checks passed.
+- `scripts/bits_smoke.py` passed: Bits requested `printf 42`, the shell executed
+  it, and Bits acknowledged the returned result. It uses a temporary database,
+  does not trade, and consumes two workflow executions.
+- The deployed service completed a real repository-inspection/result-feedback
+  cycle, then scheduled a later review. No trade was forced for validation.
+- Market-data refresh, independent paper monitoring, and `/api/health` were
+  healthy with no alerts. The paper account was flat at verification time.
+- Graceful restart preserved the scheduled review, marked the prior transcript
+  run stopped, and started one new run. No automatic systemd restarts occurred.
+- The deployed agent unit matches `deploy/systemd/xauusd-agent.service`.
+- A verified SQLite backup was taken before deployment.
+
+This validates operation and recovery, not profitability, future model behavior,
+or broker fills. The deployed account remains paper-only. The previous historical
+kill-switch reason can remain in state after an explicit start; the active stop
+is determined by the current `stopped` boolean.
