@@ -379,6 +379,7 @@ def main():
  memory=sub.add_parser("bits-memory",help="read or replace compact research notes")
  memory.add_argument("action",choices=["show","write"])
  memory.add_argument("--input")
+ memory.add_argument("--notes-only",action="store_true",help="show structured working notes without conversation history")
  job=sub.add_parser("bits-job",help="retrieve a bounded page of stored command output")
  job.add_argument("job_id")
  job.add_argument("--stream",choices=["stdout","stderr"],default="stdout")
@@ -495,7 +496,7 @@ def main():
    store=BitsStore(agent_transcript_store_from_env())
    if a.cmd=="bits-memory":
     memory=BitsMemory(store)
-    result=memory.context() if a.action=="show" else memory.write_notes(json.loads(a.input or "null"))
+    result=(store.get("working_notes") if a.notes_only else memory.context()) if a.action=="show" else memory.write_notes(json.loads(a.input or "null"))
    else:
     if a.offset<0 or not 1<=a.limit<=65536: raise ValueError("invalid output page bounds")
     job=store.job(a.job_id); text=job[a.stream]; end=min(len(text),a.offset+a.limit)

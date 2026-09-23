@@ -95,3 +95,5 @@ monitoring or defer work while markets are closed.
 Preserve user changes and research data. Test code changes, update documentation
 and graphify, and commit/push completed milestones. Never commit secrets.
 ```
+
+Use `bits-memory show --notes-only` to retrieve research notes without duplicating conversation history.

@@ -167,3 +167,18 @@ def test_state_integrity_backup_restore_round_trip(tmp_path, monkeypatch, capsys
     monkeypatch.setattr(sys, "argv", ["xauusd", "state", "restore", "--backup", run_dir])
     cli.main()
     assert '"restored": true' in capsys.readouterr().out
+
+
+def test_bits_notes_only_does_not_repeat_history(tmp_path, monkeypatch, capsys):
+    import json
+    from xauusd.bits_jobs import BitsStore
+    from xauusd.local_state import SQLiteAgentTranscriptStore
+    path = str(tmp_path / 'state.db')
+    monkeypatch.setenv('XAUUSD_STATE_BACKEND', 'local')
+    monkeypatch.setenv('STATE_DB_PATH', path)
+    store = BitsStore(SQLiteAgentTranscriptStore(path))
+    store.put('memory', {'recent': ['irrelevant history'], 'digest': []})
+    store.put('working_notes', {'notes': {'findings': []}})
+    monkeypatch.setattr('sys.argv', ['xauusd', 'bits-memory', 'show', '--notes-only'])
+    cli.main()
+    assert json.loads(capsys.readouterr().out) == {'notes': {'findings': []}}

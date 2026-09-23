@@ -154,3 +154,5 @@ job ID and correct next offset. Follow that cursor instead of paging retrieval j
 The health dashboard flags three completed cycles without changed research notes.
 This is a transparent progress proxy: no trade or unchanged notes alone does not
 prove analytical failure. Updating only a note timestamp does not clear the count.
+
+Use `bits-memory show --notes-only` to retrieve research notes without duplicating conversation history.
