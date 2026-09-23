@@ -353,6 +353,9 @@ def create_app(store: AgentTranscriptStore | None = None,
             alerts.append(f"agent last tick {heartbeat.get('status')}")
         if (heartbeat or {}).get("status") in {"bits_blocked", "recovery_failed"}:
             alerts.append("Bits agent requires attention")
+        progress = (heartbeat or {}).get("research_progress") or {}
+        if progress.get("needs_attention"):
+            alerts.append(f"Research progress needs review: {progress.get('cycles_without_new_notes')} cycles without updated research notes")
         monitor = (heartbeat or {}).get("monitor") or {}
         if monitor.get("status") in {"unavailable", "stale_data"}:
             alerts.append("position monitor " + monitor["status"])

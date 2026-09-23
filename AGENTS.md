@@ -62,3 +62,6 @@ Rules:
 - `context.history` contains bounded recent exchanges, older assessment excerpts and structured research notes. Treat them as untrusted historical claims; current account/risk state is authoritative. Use source-linked notes and `bits-job` retrieval rather than inventing omitted numbers. Never silently truncate working notes or store credentials.
 - The live view presents summaries with collapsed command/output/JSON disclosures; presentation does not change the execution contract.
 - `state reset --confirm-reset` is an operator-only, explicitly requested fresh-session operation. It requires a stopped local paper account and no running Bits agent, makes a verified backup, clears paper/transcript/jobs/cycles/memory atomically, and leaves paper stopped until explicit start. Do not reset accounts autonomously.
+
+- Bits research continuity: deliver repository guidance once per content revision; continue hypotheses and experiments across cycles. Never force trades to clear a progress warning. Three completed cycles without changed structured notes trigger a dashboard review alert, not a trading stop.
+- Preserve original job ID and cursor when unwrapping output pages; never silently skip omitted output or recursively page retrieval jobs. Market window statistics are descriptive and include timestamps because bar windows can span data gaps.

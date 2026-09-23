@@ -242,3 +242,13 @@ def test_health_does_not_alert_below_the_stale_tick_threshold(server, paper_trad
         payload = json.loads(response.read())
 
     assert not any("unproductive" in alert for alert in payload["alerts"])
+
+
+def test_health_surfaces_missing_research_progress(server, tmp_path, monkeypatch):
+    path = tmp_path / 'status.json'
+    monkeypatch.setenv('AGENT_STATUS_FILE', str(path))
+    path.write_text(json.dumps({'recorded_at': datetime.now(timezone.utc).isoformat(),
+        'research_progress': {'needs_attention': True, 'cycles_without_new_notes': 3}}))
+    with request.urlopen(server + '/api/health') as response:
+        data = json.load(response)
+    assert any('3 cycles without updated research notes' in alert for alert in data['alerts'])

@@ -12,6 +12,7 @@ from .bits import BitsError, PROTOCOL
 from .bits_jobs import BitsStore, ShellJobs, SecretFilter, AgentLock
 from .paper_trading import market_is_open
 from .bits_memory import BitsMemory, result_for_prompt, excerpt
+from .bits_research import RESEARCH_POLICY, guidance_revision, market_research, finish_research_cycle
 
 
 class BitsAgentRunner(ContinuousAgentRunner):
@@ -44,8 +45,17 @@ class BitsAgentRunner(ContinuousAgentRunner):
 
     def _outcome(self, status, **extra):
         self._write_status(status, planner="datadog_bits", monitor=self.bits_store.get("monitor"),
+                           research_progress=self.bits_store.get("research_progress", {}),
                            next_review_at=self.bits_store.get("cycle", {}).get("next_at"), **extra)
         return {"tick": self._tick, "status": status, **extra}
+
+    def _guidance(self):
+        from pathlib import Path
+        revision = guidance_revision()
+        if revision and self.bits_store.get("guidance_reviewed") != revision:
+            return {"revision": revision, "text": Path("AGENTS.md").read_text(),
+                    "instruction": "Review these repository rules now; the server remembers successful delivery."}
+        return None
 
     def _context(self, market):
         return {"utc_now": self._now().isoformat(), "market": self._market_view(market),
@@ -53,6 +63,11 @@ class BitsAgentRunner(ContinuousAgentRunner):
                 "paper_only": self.coordinator.paper_only,
                 "previous_summary": excerpt(self.bits_store.get("last_summary"), 1200),
                 "history": self.memory.context(),
+                "bootstrap": {"reviewed": bool(guidance_revision()) and self.bits_store.get("guidance_reviewed") == guidance_revision()},
+                "repository_guidance": self._guidance(),
+                "research_policy": RESEARCH_POLICY,
+                "research_progress": self.bits_store.get("research_progress", {}),
+                "market_research": market_research(self.source),
                 "session_reset": self.bits_store.get("session_reset"),
                 "tools": [tool for tool in self.registry.definitions()
                           if tool["name"] in {"read_market", "paper_state", "propose_trade"}],
@@ -138,6 +153,9 @@ class BitsAgentRunner(ContinuousAgentRunner):
                 return self._outcome("bits_waiting")
             if self.secrets.unsafe(json.dumps(reply)):
                 raise BitsError("agent response contains sensitive content")
+            guidance = cycle["invocation"]["context"].get("repository_guidance")
+            if guidance:
+                self.bits_store.put("guidance_reviewed", guidance["revision"])
             cycle.update(phase="response", reply=reply)
             self.bits_store.put("cycle", cycle)
             self._record("assistant", {"reply": json.dumps(reply), "summary": reply["summary"],
@@ -150,6 +168,7 @@ class BitsAgentRunner(ContinuousAgentRunner):
             next_at = min(max(requested, self._now()+timedelta(seconds=60)), self._now()+timedelta(hours=1)).isoformat()
             if self.paper_trading.state().get("position"):
                 next_at = min(datetime.fromisoformat(next_at), self._now()+timedelta(seconds=60)).isoformat()
+            finish_research_cycle(self.bits_store, cycle["cycle_id"])
             self.bits_store.put("last_summary", reply["summary"])
             self.memory.remember(cycle["cycle_id"], reply)
             self.bits_store.put("cycle", {"phase": "idle", "next_at": next_at})

@@ -215,3 +215,19 @@ sudo systemctl enable --now xauusd-demo-automation.service
 5. Limited demo canary followed by continuous demo operation only after all gates pass.
 
 See `AGENTS.md` for repository operating rules and `docs/ARCHITECTURE.md` for the existing research platform.
+
+
+### Research continuity and output retrieval
+
+Bits receives repository rules once per revision (delivery is acknowledged by a
+successful correlated response), persistent research guidance, and descriptive
+15/60/240-bar close summaries with actual window timestamps. These observations
+are not trade signals or evidence of profitability. The agent should run concrete
+cost-aware experiments and save source-linked notes before waiting on measurable
+conditions. Arbitrary shell access and deterministic trading gates are unchanged.
+
+Stored-output pages are unwrapped before prompt compression, retaining the original
+job ID and correct next offset. Follow that cursor instead of paging retrieval jobs.
+The health dashboard flags three completed cycles without changed research notes.
+This is a transparent progress proxy: no trade or unchanged notes alone does not
+prove analytical failure. Updating only a note timestamp does not clear the count.

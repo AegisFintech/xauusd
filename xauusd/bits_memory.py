@@ -23,6 +23,19 @@ def excerpt(text, limit):
 
 def result_for_prompt(result):
     view = {k: v for k, v in result.items() if k not in {"stdout", "stderr"}}
+    # Unwrap a CLI page before excerpting; keep the original source and cursor.
+    try:
+        page = json.loads(result.get("stdout", ""))
+    except (ValueError, TypeError):
+        page = None
+    if (isinstance(page, dict) and set(("job_id", "stream", "text", "offset", "next_offset", "stored_characters", "capture_truncated")).issubset(page)
+            and isinstance(page["text"], str) and isinstance(page["offset"], int)):
+        text = page["text"][:2500]
+        view.update(stdout=text, stderr=excerpt(result.get("stderr"), 800),
+                    output_page={**page, "text": text,
+                                 "next_offset": page["offset"] + len(text) if len(text) < len(page["text"]) else page["next_offset"]},
+                    context_excerpt=len(text) < len(page["text"]), source="bits-job " + str(page["job_id"]))
+        return view
     view.update(stdout=excerpt(result.get("stdout"), 3200), stderr=excerpt(result.get("stderr"), 800))
     view["context_excerpt"] = len(result.get("stdout", "")) > 3200 or len(result.get("stderr", "")) > 800
     view["source"] = "bits-job " + result["job_id"]
