@@ -25,7 +25,7 @@ ACCEPTED = "ACCEPTED"
 # A persisted kill-switch reason in this set must never be cleared by an
 # unattended process restart (AGENTS.md: fail closed after state trouble).
 KILL_SWITCH_NO_AUTO_RESUME = frozenset({
-    "corrupt_state", "operator", "missing_credentials", "unknown_account_type", "recovery_failed",
+    "corrupt_state", "operator", "missing_credentials", "unknown_account_type", "recovery_failed", "risk_limit",
 })
 
 
@@ -318,6 +318,29 @@ class PaperTrading:
             "market_open": market_is_open(_now()),
             "recent_fills": fills,
         }
+
+    def monitor(self, price: float, observed_at: datetime, now: datetime | None = None) -> dict[str, Any]:
+        """Mark fresh observations and persist risk stops without an AI or order call."""
+        now = now or _now()
+        if not math.isfinite(price) or price <= 0:
+            return {"status": "invalid_price"}
+        if not market_is_open(now):
+            return {"status": "market_closed"}
+        if market_data_age_seconds(observed_at, now) > self.config.max_market_data_age_seconds:
+            return {"status": "stale_data"}
+        def transition(state):
+            self._mark(state, price, now)
+            equity = self._equity(state)
+            breached = (state["day_start_equity"] - equity >= self.config.daily_loss_limit or
+                        (state["high_water_equity"] - equity) / state["high_water_equity"] >= self.config.max_drawdown)
+            if breached and not state["stopped"]:
+                state["stopped"] = True
+                state["kill_switch_reason"] = "risk_limit"
+            return {"status": "stopped" if state["stopped"] else "ok", "equity": equity,
+                    "position": state["position"], "mark_price": price}
+        # The monitor is stateful but never places an order. One mark per observation.
+        key = "monitor:" + observed_at.isoformat() + ":" + str(price)
+        return self.store.run(key, transition)
 
     def evaluate(self, decision: PaperDecision, now: datetime | None = None) -> dict[str, Any]:
         now = (now or _now()).astimezone(timezone.utc)

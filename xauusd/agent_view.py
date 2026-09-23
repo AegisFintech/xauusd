@@ -316,6 +316,11 @@ def create_app(store: AgentTranscriptStore | None = None,
             alerts.append(f"agent stalled ({heartbeat.get('consecutive_errors', 0)} consecutive errors)")
         elif heartbeat.get("status") in {"planner_error", "tick_error"}:
             alerts.append(f"agent last tick {heartbeat.get('status')}")
+        if (heartbeat or {}).get("status") in {"bits_blocked", "recovery_failed"}:
+            alerts.append("Bits agent requires attention")
+        monitor = (heartbeat or {}).get("monitor") or {}
+        if monitor.get("status") in {"unavailable", "stale_data"}:
+            alerts.append("position monitor " + monitor["status"])
         stale_ticks = int((heartbeat or {}).get("consecutive_stale_ticks") or 0)
         if stale_ticks >= STALE_TICK_ALERT_THRESHOLD:
             alerts.append(f"agent unproductive: {stale_ticks} consecutive stale-data ticks")

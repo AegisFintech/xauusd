@@ -4,20 +4,25 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import json
 import os
+from threading import Thread
 from uuid import uuid4
 
 from .agent_loop import ContinuousAgentRunner, paper_state_tool
 from .bits import BitsError, PROTOCOL
-from .bits_jobs import BitsStore, ShellJobs, SecretFilter
+from .bits_jobs import BitsStore, ShellJobs, SecretFilter, AgentLock
 from .paper_trading import market_is_open
 
 
 class BitsAgentRunner(ContinuousAgentRunner):
     def __init__(self, *args, **kwargs):
+        transcript = kwargs.get("transcript") or args[2]
+        self.lock = AgentLock(transcript)
         super().__init__(*args, **kwargs)
         self.bits_store = BitsStore(self.transcript)
         self.secrets = SecretFilter()
         self.jobs = ShellJobs(self.bits_store, self.secrets)
+        self.monitor_thread = None
+        self.monitor_error = None
         self.workflow_timeout = float(os.getenv("DD_WORKFLOW_TIMEOUT_SECONDS", "300"))
         if not 1 <= self.workflow_timeout <= 3600:
             raise BitsError("invalid workflow timeout")
@@ -31,7 +36,7 @@ class BitsAgentRunner(ContinuousAgentRunner):
         self.transcript.append(self.run_id, self._tick, phase, self.secrets.clean(content))
 
     def _outcome(self, status, **extra):
-        self._write_status(status, planner="datadog_bits", **extra)
+        self._write_status(status, planner="datadog_bits", monitor=self.bits_store.get("monitor"), **extra)
         return {"tick": self._tick, "status": status, **extra}
 
     def _context(self, market):
@@ -119,7 +124,11 @@ class BitsAgentRunner(ContinuousAgentRunner):
             phase = "response"
         if phase == "response" and not cycle["reply"]["actions"]:
             reply = cycle["reply"]
-            next_at = reply["next_review_at"] or (self._now()+timedelta(seconds=self.config.poll_seconds)).isoformat()
+            requested = datetime.fromisoformat(reply["next_review_at"].replace("Z", "+00:00")) if reply["next_review_at"] else self._now()
+            # Bound credit consumption and never suppress reviews indefinitely.
+            next_at = min(max(requested, self._now()+timedelta(seconds=60)), self._now()+timedelta(hours=1)).isoformat()
+            if self.paper_trading.state().get("position"):
+                next_at = min(datetime.fromisoformat(next_at), self._now()+timedelta(seconds=60)).isoformat()
             self.bits_store.put("last_summary", reply["summary"])
             self.bits_store.put("cycle", {"phase": "idle", "next_at": next_at})
             self._record("tick_end", {"summary": reply["summary"], "steps": cycle["steps"]})
@@ -151,5 +160,39 @@ class BitsAgentRunner(ContinuousAgentRunner):
         return self._submit({"cycle_id": uuid4().hex, "steps": 0}, market)
 
     def stop(self):
+        self._stop.set()
         self.jobs.stop()
+        if self.monitor_thread:
+            self.monitor_thread.join(timeout=5)
         super().stop()
+        self.lock.close()
+
+    def monitor_once(self):
+        try:
+            market = self.source.read()
+            result = self.paper_trading.monitor(float(market.price), market.observed_at, self._now())
+        except Exception as exc:
+            result = {"status": "unavailable", "error_type": type(exc).__name__}
+        self.bits_store.put("monitor", {**result, "recorded_at": self._now().isoformat()})
+        if self.paper_trading.state().get("stopped"):
+            self.jobs.stop()
+        return result
+
+    def _monitor_forever(self):
+        while not self._stop.is_set():
+            try:
+                self.monitor_once()
+            except Exception:
+                self.monitor_error = "state_monitor_failed"
+                try: self.paper_trading.stop("recovery_failed")
+                finally: self._stop.set()
+            self._stop.wait(5)
+
+    def run_forever(self, stop=None, on_tick=None):
+        if stop is not None: self._stop = stop
+        self.monitor_thread = Thread(target=self._monitor_forever, daemon=True)
+        self.monitor_thread.start()
+        try:
+            super().run_forever(stop=self._stop, on_tick=on_tick)
+        finally:
+            self.stop()

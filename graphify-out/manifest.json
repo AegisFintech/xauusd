@@ -270,9 +270,9 @@
     "semantic_hash": ""
   },
   "xauusd/agent_view.py": {
-    "mtime": 1790043558.603794,
-    "seen": 1790044838.34437,
-    "ast_hash": "2e157c7acb0201317ef5c8f1a10342da",
+    "mtime": 1790154503.293005,
+    "seen": 1790154581.0664294,
+    "ast_hash": "a89ca217c6eb213a7e1bc4d13b02030a",
     "semantic_hash": ""
   },
   "xauusd/automation.py": {
@@ -294,9 +294,9 @@
     "semantic_hash": ""
   },
   "xauusd/cli.py": {
-    "mtime": 1790154381.196903,
-    "seen": 1790154385.505413,
-    "ast_hash": "5e5ede6fae70be07923ed48fe43e2f2c",
+    "mtime": 1790154503.293005,
+    "seen": 1790154581.0664375,
+    "ast_hash": "43cd001a3b7e2ee4d1ea18f08ce69e6b",
     "semantic_hash": ""
   },
   "xauusd/codex_workflow.py": {
@@ -396,9 +396,9 @@
     "semantic_hash": "86c724f31633318ad4f4c960beb54475"
   },
   "xauusd/paper_trading.py": {
-    "mtime": 1790040151.9266362,
-    "seen": 1790041503.6354525,
-    "ast_hash": "c7cb1bdffa29eb7f66ac772ecd08f8fd",
+    "mtime": 1790154503.293005,
+    "seen": 1790154581.066462,
+    "ast_hash": "be914421b5fcdc860073e8f2239aca1b",
     "semantic_hash": ""
   },
   "xauusd/portfolio_research.py": {
@@ -654,27 +654,27 @@
     "semantic_hash": ""
   },
   "tests/test_bits_jobs.py": {
-    "mtime": 1790154096.868559,
-    "seen": 1790154112.0366051,
-    "ast_hash": "9aba6577082d193da0b4a5d95729145f",
+    "mtime": 1790154539.9410233,
+    "seen": 1790154581.066381,
+    "ast_hash": "f7d07d5ea744acc493662e3e4a98bdb5",
     "semantic_hash": ""
   },
   "xauusd/bits_jobs.py": {
-    "mtime": 1790154096.868559,
-    "seen": 1790154112.0366578,
-    "ast_hash": "d5e52c5f707afcbbde9db277852299b7",
+    "mtime": 1790154503.293005,
+    "seen": 1790154581.0664341,
+    "ast_hash": "f5636459d101b3e4bbc26315121a69f4",
     "semantic_hash": ""
   },
   "tests/test_bits_runner.py": {
-    "mtime": 1790154359.7408772,
-    "seen": 1790154385.505356,
-    "ast_hash": "f611d451a018039a0bdb073181d527ad",
+    "mtime": 1790154539.9410233,
+    "seen": 1790154581.0663826,
+    "ast_hash": "ba1344f1829fb83d78a6d9907cc26910",
     "semantic_hash": ""
   },
   "xauusd/bits_runner.py": {
-    "mtime": 1790154381.196903,
-    "seen": 1790154385.5054107,
-    "ast_hash": "894c47d6d24d777eeb12c2efcf01d0ab",
+    "mtime": 1790154539.9410233,
+    "seen": 1790154581.066435,
+    "ast_hash": "17f3c240a129bb09a35e5caf951163c8",
     "semantic_hash": ""
   }
 }

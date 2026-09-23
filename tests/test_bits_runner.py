@@ -1,11 +1,13 @@
 from datetime import datetime, timezone
 from types import SimpleNamespace
 import time
+import pytest
 from xauusd.agent_loop import AgentConfig, build_agent_registry
 from xauusd.bits_runner import BitsAgentRunner
 from xauusd.demo_execution import PaperToCTraderDemoCoordinator
 from xauusd.local_state import SQLiteAgentTranscriptStore
 from xauusd.paper_trading import PaperTrading, InMemoryPaperTradingStore
+from xauusd.bits import BitsError
 
 NOW = datetime(2026, 9, 23, 10, tzinfo=timezone.utc)
 
@@ -70,3 +72,35 @@ def test_pending_workflow_survives_restart(tmp_path):
     assert second.run_tick()['status']=='shell_running'
     assert len(planner.invocations)==1
     second.stop()
+
+
+def test_second_process_refused_and_uncertain_submission_stops(tmp_path):
+    first=runner(tmp_path)
+    with pytest.raises(BitsError): runner(tmp_path)
+    first.bits_store.put('cycle',{'phase':'submitting'})
+    first.stop()
+    second=runner(tmp_path)
+    assert second.paper_trading.state()['kill_switch_reason']=='recovery_failed'
+    assert second.run_tick()['status']=='stopped'
+    second.stop()
+
+
+def test_monitor_stops_loss_without_planner_call(tmp_path):
+    from xauusd.paper_trading import PaperDecision
+    agent=runner(tmp_path)
+    agent.paper_trading.evaluate(PaperDecision('buy','XAUUSD','BUY',1,4000,NOW),NOW)
+    assert agent.monitor_once()['status']=='stopped'
+    assert agent.paper_trading.state()['kill_switch_reason']=='risk_limit'
+    assert not agent.paper_trading.maybe_resume('restart')['resumed']
+    assert agent.planner.invocations==[]
+    agent.stop()
+
+
+def test_stale_analysis_is_never_executed(tmp_path):
+    from datetime import timedelta
+    agent=runner(tmp_path)
+    agent.run_tick()
+    agent._now_provider=lambda: NOW+timedelta(seconds=200)
+    assert agent.run_tick()['status']=='step_limit'
+    assert agent.bits_store.get('cycle')['phase']=='idle'
+    agent.stop()

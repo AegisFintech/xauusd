@@ -10,12 +10,30 @@ import re
 import selectors
 import signal
 import subprocess
+import fcntl
 from threading import Event, Thread
 import time
 from uuid import uuid4
 
 from .bits import BitsError, validate_shell_action
 from .experiment_registry import canonical_json
+
+
+class AgentLock:
+    """Single process per container; the lock is runtime coordination, not state."""
+    def __init__(self, transcript):
+        database_path = getattr(transcript, "db_path", "state/xauusd_local.db")
+        path = Path(database_path).with_suffix(".bits.lock")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.handle = path.open("a")
+        try:
+            fcntl.flock(self.handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            self.handle.close()
+            raise BitsError("another Bits agent owns this container state") from None
+
+    def close(self):
+        self.handle.close()
 
 
 class SecretFilter:
@@ -160,11 +178,11 @@ class ShellJobs:
                         if remaining > 0:
                             buffers[key.data].extend(chunk[:remaining])
                 if state == "running":
-                    try:
-                        proc.wait(timeout=max(0.01, deadline - time.monotonic()))
-                        state = "succeeded" if proc.returncode == 0 else "failed"
-                    except subprocess.TimeoutExpired:
-                        state = "timed_out"
+                    while proc.poll() is None and not self.cancelled.is_set() and time.monotonic() < deadline:
+                        self.cancelled.wait(.1)
+                    if self.cancelled.is_set(): state = "cancelled"
+                    elif proc.poll() is None: state = "timed_out"
+                    else: state = "succeeded" if proc.returncode == 0 else "failed"
         except Exception as exc:
             buffers["stderr"] = bytearray(type(exc).__name__.encode())
         finally:

@@ -314,6 +314,24 @@ def agent_tool(name: str, raw: str) -> dict:
  _validate_json(value,tool.input_schema)
  return SecretFilter().clean(tool.handler(value))
 
+def bits_recover(reason: str) -> dict:
+ """Explicit operator acknowledgement after reconciling uncertain side effects."""
+ from .agent_loop import agent_transcript_store_from_env
+ from .bits_jobs import AgentLock, BitsStore, SecretFilter
+ if not reason.strip() or SecretFilter().unsafe(reason): raise ValueError("safe recovery reason required")
+ paper=_paper_from_env()
+ if not paper.state().get("stopped"): raise ValueError("paper stop is required before recovery")
+ transcript=agent_transcript_store_from_env()
+ lock=AgentLock(transcript)
+ try:
+  store=BitsStore(transcript)
+  store.recover()
+  store.put("last_recovery",{"reason":reason,"recorded_at":datetime.now(timezone.utc).isoformat(),
+                             "previous_phase":store.get("cycle",{}).get("phase")})
+  store.put("cycle",{"phase":"idle"})
+ finally: lock.close()
+ return {"status":"reconciled","paper_stopped":True,"next":"paper start --reason operator_reconciled"}
+
 def main():
  load_dotenv(".env")
  p=argparse.ArgumentParser(); sub=p.add_subparsers(dest="cmd"); c=sub.add_parser("campaign"); c.add_argument("--synthetic",action="store_true")
@@ -340,6 +358,8 @@ def main():
  tool=sub.add_parser("agent-tool",help="invoke deterministic tools from a Bits shell action")
  tool.add_argument("name",choices=["read_market","paper_state","propose_trade"])
  tool.add_argument("--input",default="{}")
+ recover=sub.add_parser("bits-recover",help="acknowledge reconciled interrupted commands; leaves paper stopped")
+ recover.add_argument("--reason",required=True)
  paper=sub.add_parser("paper",help="manage the deterministic paper trading lifecycle (kill switch)")
  paper.add_argument("action",choices=["status","start","stop"])
  paper.add_argument("--reason",default="operator")
@@ -438,6 +458,10 @@ def main():
   try: result=agent_tool(a.name,a.input)
   except Exception as exc: result={"status":"failed","error_type":type(exc).__name__}
   print(json.dumps(result,allow_nan=False))
+ if a.cmd=="bits-recover":
+  try: result=bits_recover(a.reason)
+  except Exception as exc: p.error(type(exc).__name__)
+  print(json.dumps(result))
  if a.cmd=="paper":
   pt=_paper_from_env()
   if a.action=="stop": pt.stop(a.reason)

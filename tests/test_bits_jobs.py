@@ -58,3 +58,10 @@ def test_interrupted_job_never_replayed(jobs):
     original, created = jobs.store.claim("cycle",action("echo side-effect"))
     assert created and jobs.store.recover() == 1
     assert jobs.start("cycle",action("echo side-effect"))["status"] == "unknown"
+
+
+def test_cancel_process_after_output_streams_close(jobs):
+    job=jobs.start('closed-streams',action('exec >/dev/null 2>&1; sleep 60',timeout_sec=60))
+    time.sleep(.1)
+    jobs.stop()
+    assert jobs.store.job(job['job_id'])['status']=='cancelled'
