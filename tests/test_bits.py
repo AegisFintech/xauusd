@@ -54,3 +54,16 @@ def test_transport_submission_and_polling(monkeypatch):
     assert client.poll("instance", "cycle", "message") is None
     monkeypatch.setattr(client, "_request", lambda *a: {"data":{"attributes":{"instanceStatus":{"detailsKind":"FAILED"}}}})
     with pytest.raises(BitsError): client.poll("instance", "cycle", "message")
+
+
+def test_workflow_agent_identity_is_verified(monkeypatch):
+    client = object.__new__(BitsClient)
+    spec = {"data":{"attributes":{"published":True,"spec":{
+        "steps":[{"actionId":"com.datadoghq.dd.bitsai.customagent.customAgentExecute",
+                  "parameters":[{"name":"customAgentId","value":"expected-agent"}]}],
+        "outputSchema":{"parameters":[{"name":"output","value":"{{ Steps.agent.finalResponse }}"}]}}}}}
+    monkeypatch.setattr(client,"_request",lambda: spec)
+    client.verify_agent("expected-agent")
+    with pytest.raises(BitsError): client.verify_agent("other-agent")
+    spec['data']['attributes']['spec']['outputSchema']['parameters'][0]['value']=''
+    with pytest.raises(BitsError): client.verify_agent("expected-agent")

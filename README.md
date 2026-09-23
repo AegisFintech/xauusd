@@ -12,22 +12,21 @@ An auditable XAUUSD research system being extended with an autonomous AI harness
 ## Architecture
 
 ```text
-read-only market data + Firecrawl sources
-              |
-              v
-autonomous planner -> allow-listed tools -> evidence store
-              |                                  |
-              v                                  v
-       AI proposal review                 deterministic gates
+market data + paper state -> Datadog workflow -> Bits xauusd/1 JSON
+           ^                                      |
+           |                                      v
+           +-------- persisted results <- arbitrary shell jobs
                                                   |
-                                                  v
-                                  paper state -> demo-only adapter
+                                    existing gated trading CLI
                                                   |
-                                                  v
-                              audit, dashboard, alerts, kill switch
+                                     paper / cTrader demo adapter
 ```
 
-The planner can only request tools registered by the application. Model and web responses are untrusted evidence. They cannot activate execution, change risk limits, expose secrets, or add new tools.
+Bits selects arbitrary shell commands in the user-authorized container. The
+execution wrapper persists intent, bounds runtime/output, and suppresses detected
+secrets. It is not a security sandbox: arbitrary shell access can alter local
+code and controls. The agent is instructed to use the existing deterministic
+trade interface and never bypass demo-only restrictions or risk gates.
 
 ## Demo-Only Controls
 
@@ -47,10 +46,10 @@ On uncertainty, restart recovery failure, data staleness, or API failure, the sy
 
 Credentials belong in `.env` with mode `0600`; never commit them. Current historical-data settings and the demo-only assertion are documented in `.env.example`.
 
-`.env.sample` links to `.env.example`. The `DD_*` settings prepare the Datadog Bits
-workflow connection; they do not switch the running planner. See
+`.env.sample` links to `.env.example`. Set `AGENT_PLANNER=datadog` and the `DD_*` settings to use the Bits workflow. See
 [Datadog connection status](docs/datadog-connection.md) for the verified invocation
-path, successful JSON response smoke test, and remaining harness integration.
+path, protocol, recovery, and deployment checks. The ready-to-paste
+[Bits system prompt](docs/bits-system-prompt.md) defines the server-executed JSON contract.
 
 ## Demo Automation
 
@@ -82,12 +81,12 @@ Every `data update/download` run records `reports/data_update_status.json` (`sta
 
 ## Autonomous Agent
 
-`agent` runs one continuously trading AI plan-tool loop whose thinking is visible in a live web view. It is paper-first and reads `OPENAI_*`, `AGENT_*`, and (optionally) `FIRECRAWL_*` settings.
+`agent` runs one continuously trading AI plan-tool loop whose thinking is visible in a live web view. It is paper-first and reads `DD_*` and `AGENT_*` settings. The workflow returns one correlated `xauusd/1` envelope per invocation.
 
 ```bash
 .venv/bin/python -m xauusd.cli agent status   # paper + recent transcript runs, no network
 .venv/bin/python -m xauusd.cli agent once     # a single tick, then exit
-.venv/bin/python -m xauusd.cli agent run      # continuous loop + live view (Ctrl-C to stop)
+.venv/bin/python -m xauusd.cli agent run      # continuous loop (view is a separate service)
 .venv/bin/python -m xauusd.cli agent view     # live view only
 ```
 
@@ -104,11 +103,40 @@ The paper lifecycle and local state store have their own explicit commands:
 
 `paper stop` persists a kill switch across restarts, and the agent refuses to auto-resume it; `paper start` is the explicit override. `state backup` snapshots the live SQLite file (verifies it with `quick_check`, gzips it, records a sha256 in a manifest), and `state restore` refuses any archive whose checksum or database integrity does not verify. A daily `xauusd-state-backup.timer` (midnight + randomized delay) keeps one verified snapshot per day under `backups/local-state`.
 
-Every tick the planner may call a fixed allow-list of read-only tools (`read_market`, `paper_state`, `canary_signal`, `firecrawl_fetch`) and `propose_trade`. A proposal is only a proposal: the same deterministic paper risk, idempotency, freshness, and duplicate-order gates decide, and the coordinator reports exactly what the gates did. `propose_trade` returns `filled` as the authoritative verdict with `gate_reason` explaining it; in paper-only mode `sent_to_broker` is false because nothing reaches a broker, while `filled` still reports the paper fill. `canary_signal` emits each confirmed-breakout transition once and recovers a transition that landed on a bar the tick skipped — bounded by `max_backlog_bars` (default 2) so an old breakout is dropped rather than traded late — reporting `signal_bar_utc`/`signal_age_seconds` for the bar that fired. The planner's raw output, each tool call and result, and the final tick summary are appended to the agent transcript, rendered by the live view at `http://127.0.0.1:8100/`. Web content and model output are untrusted data; they can never expand the tool allow-list or change risk settings.
+The Bits loop persists its workflow instance, cycle IDs, shell jobs, and results
+in the selected state database. It polls an outstanding workflow after restart
+instead of submitting it again. Shell commands can invoke the deterministic tools:
+
+```bash
+.venv/bin/python -m xauusd.cli agent-tool read_market
+.venv/bin/python -m xauusd.cli agent-tool paper_state
+# propose_trade accepts side, quantity, and reason in --input JSON.
+```
+
+The `propose_trade` tool preserves the existing risk gates. The agent transcript
+records sanitized decisions and command results. An independent monitor marks
+fresh paper prices every five seconds and persists a `risk_limit` stop if daily
+loss or drawdown is breached; it does not liquidate positions or place orders.
+Uncertain, timed-out or interrupted commands require operator reconciliation:
+
+```bash
+.venv/bin/python -m xauusd.cli paper stop
+# Reconcile external side effects first and ensure the agent service has exited.
+.venv/bin/python -m xauusd.cli bits-recover --reason 'effects checked and reconciled'
+.venv/bin/python -m xauusd.cli paper start --reason operator_reconciled
+systemctl restart xauusd-agent.service
+```
+
+`agent once` advances one state-machine step and exits; use the service for complete
+cycles. Do not run it concurrently with the service. Shell timeouts are 1–3600s,
+output limits 1–1048576 bytes, and truncation is explicit. Keep large results in
+files and request smaller selections. Completed cycles wait at least 60 seconds;
+open positions cap requested review delays at 60 seconds, otherwise at one hour.
+
 
 Paper account and transcript state live in a **local SQLite file** (`STATE_DB_PATH`, default `state/xauusd_local.db`) by default, so the running agent needs no external database or `DATABASE_URL`. Set `XAUUSD_STATE_BACKEND=cockroach` to return to the Cockroach-backed stores. The view serves the same transcript and paper endpoints from this store.
 
-The view listens on `AGENT_VIEW_PORT` (default `8100`). It shows the transcript newest-first with the AI's plain-English reasons, a paper-account strip (equity, position, day/realized P&L, drawdown, recent fills from `/api/paper`), and a recent-runs line with per-run tick counts and duration. Times render in GMT+8, labelled `+08:00`; that is display-only — persisted timestamps, bar indices, and the market-hours gate stay UTC. Each `agent_<uuid12>` is one process start: a graceful SIGTERM marks the old run stopped, so a restart cadence legitimately produces many short "runs" — this is one process, not many agents., so a restart cadence legitimately produces many short "runs" — this is one process, not many agents.
+The view listens on `AGENT_VIEW_PORT` (default `8100`). It shows the transcript newest-first with the AI's plain-English reasons, a paper-account strip (equity, position, day/realized P&L, drawdown, recent fills from `/api/paper`), and a recent-runs line with per-run tick counts and duration. Times render in GMT+8, labelled `+08:00`; that is display-only — persisted timestamps, bar indices, and the market-hours gate stay UTC. Each `agent_<uuid12>` is one process start: a graceful SIGTERM marks the old run stopped, so a restart cadence legitimately produces many short "runs" — this is one process, not many agents.
 
 `agent run` and `agent once` are inert unless `CTRADER_AUTOMATION_ENABLED=true`. On every launch the agent verifies database integrity and then consults the paper kill switch: it auto-resumes a clean paper account, but a stop left behind by `paper stop`, corrupt state, missing credentials, an unknown account type, or a failed recovery stays stopped (fail closed) until `paper start`. Each tick also writes a heartbeat to `AGENT_STATUS_FILE` (default `reports/agent_status.json`); the live view's `/api/health` turns that heartbeat, stall/error counts, consecutive ticks that never reached the planner, paper-stop state, and data-update failures into a healthy/degraded status with `alerts`.
 
@@ -122,9 +150,20 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now xauusd-agent.service
 ```
 
-The unit captures the view port and `.env`; there is nothing to follow in the journal (see the observability note above). Use `/api/paper`, `/api/runs`, and the transcript to confirm activity.
+The view runs in its own `xauusd-agent-view.service`. Use `/api/paper`, `/api/runs`,
+the transcript, and `/api/health` to confirm activity.
 
-The service reads only `EnvironmentFile=/root/xauusd/.env` (it inherits no shell exports), so `OPENAI_BASE_URL`, `OPENAI_MODEL`, `OPENAI_API_KEY`, `CTRADER_AUTOMATION_ENABLED=true`, `CTRADER_PAPER_ONLY=true`, and the local-state keys (`XAUUSD_STATE_BACKEND=local`, `STATE_DB_PATH`) must all be set there. With in-loop refresh desired, also set `AGENT_DATA_REFRESH_ENABLED=true`, `AGENT_DATA_REFRESH_MAX_AGE_SECONDS=30`, and `AGENT_DATA_REFRESH_MIN_INTERVAL_SECONDS=60` (the example ships these values). `OPENAI_*` must point at an OpenAI-compatible HTTP endpoint; that endpoint sits behind a Cloudflare WAF that rejects urllib's default `User-Agent` with `403 error code: 1010`, so the planner always sends a browser-grade `User-Agent`. Restart it (`systemctl restart xauusd-agent.service`) after editing `.env`. SIGTERM finishes the transcript run cleanly before the process stops.
+The agent reads `.env` through `EnvironmentFile`. Configure `AGENT_PLANNER=datadog`,
+`DD_REGION`, `DD_API_KEY`, `DD_APP_KEY`, `DD_AGENT_ID`, `DD_BITS_WORKFLOW_ID`,
+`CTRADER_AUTOMATION_ENABLED=true`, and the selected paper/state settings.
+`CTRADER_PAPER_ONLY=true` keeps broker orders disabled. Data refresh uses the
+cTrader demo OAuth credentials and downloads an initial seven days if no local
+file exists. Restart the service after configuration changes. Graceful termination
+cancels shell process groups and leaves pending workflow IDs available for restart.
+
+The former OpenAI endpoint and credentials have been removed from the deployment
+and template. Legacy `AGENT_PLANNER=openai` code remains for compatibility tests;
+using it requires independently configuring its `OPENAI_*` settings.
 
 The service writes no console or journald logs; the transcript, state store, and the live view (including `/api/health` at `http://127.0.0.1:8100/api/health`) are the only observability.
 

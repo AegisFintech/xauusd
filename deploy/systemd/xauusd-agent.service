@@ -1,5 +1,5 @@
 [Unit]
-Description=XAUUSD autonomous agent (paper-only, live thinking view)
+Description=XAUUSD Datadog Bits agent (demo-only harness)
 After=network-online.target
 Wants=network-online.target
 
@@ -10,11 +10,12 @@ EnvironmentFile=/root/xauusd/.env
 ExecStart=/root/xauusd/.venv/bin/python -m xauusd.cli agent run
 Restart=on-failure
 RestartSec=30
-NoNewPrivileges=yes
-PrivateTmp=yes
-ProtectHome=read-only
-# Local SQLite state (STATE_DB_PATH), in-loop market-data refresh, and heartbeat writes.
-ReadWritePaths=/root/xauusd/reports /root/xauusd/state /root/xauusd/data /root/xauusd/backups
+# The operator authorizes arbitrary shell execution in this container.
+# Commands share the service filesystem/network privileges; this is not isolation.
+KillMode=control-group
+TimeoutStopSec=30
+StandardOutput=null
+StandardError=null
 
 [Install]
 WantedBy=multi-user.target

@@ -144,6 +144,20 @@ class BitsClient:
             raise BitsError("missing workflow instance ID")
         return instance
 
+    def verify_agent(self, agent_id):
+        """Pin the workflow to the configured agent before starting the service."""
+        attrs = self._request().get("data", {}).get("attributes", {})
+        spec = attrs.get("spec", {})
+        steps = spec.get("steps", [])
+        if not attrs.get("published") or len(steps) != 1:
+            raise BitsError("expected published single-agent workflow")
+        params = {p.get("name"): p.get("value") for p in steps[0].get("parameters", [])}
+        if (steps[0].get("actionId") != "com.datadoghq.dd.bitsai.customagent.customAgentExecute" or
+                not agent_id or params.get("customAgentId") != agent_id):
+            raise BitsError("workflow agent does not match DD_AGENT_ID")
+        if not any(p.get("name") == "output" and p.get("value") for p in spec.get("outputSchema", {}).get("parameters", [])):
+            raise BitsError("workflow output mapping is missing")
+
     def poll(self, instance, cycle_id, message_id):
         if not re.fullmatch(r"[A-Za-z0-9-]{1,128}", instance):
             raise BitsError("invalid workflow instance ID")

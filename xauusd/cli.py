@@ -234,7 +234,7 @@ def agent_controller(action: str) -> dict:
  if os.getenv("AGENT_PLANNER","openai")=="datadog":
   try:
    from .bits import BitsClient
-   BitsClient.from_env()
+   BitsClient.from_env().verify_agent(os.getenv("DD_AGENT_ID"))
    if config.data_refresh_enabled: CTraderOpenApiConfig.from_env()
   except Exception as exc:
    paper.stop("missing_credentials")

@@ -31,7 +31,9 @@ Use the placeholders in `.env.example` (also available as `.env.sample`):
 | `DD_AGENT_ID` | Custom Bits agent selected by the workflow |
 | `DD_BITS_WORKFLOW_ID` | Published, API-triggered workflow ID |
 
-These settings are preparatory; the current trading planner still uses `OPENAI_*`.
+Set `AGENT_PLANNER=datadog` to use these settings. The workflow identity is checked
+against `DD_AGENT_ID` on startup. `DD_HTTP_TIMEOUT_SECONDS` defaults to 20 and
+`DD_WORKFLOW_TIMEOUT_SECONDS` to 300. The active deployment no longer needs `OPENAI_*`.
 Do not copy actual keys or identifiers into templates or documentation.
 
 ## Verified transport and remaining integration
@@ -48,9 +50,44 @@ The workflow accepts a STRING `input` used by its agent prompt. Its STRING `outp
 is now mapped to the agent's final response. Read `outputs.output` from the
 completed instance and validate it as the `xauusd/1` envelope before considering
 any action. The connectivity test verified that invocation IDs survive this
-round trip. A production adapter, durable action handling, and execution/result
-feedback loop still need implementation.
+round trip. The adapter, durable jobs and feedback loop are implemented in
+`xauusd/bits.py`, `xauusd/bits_jobs.py`, and `xauusd/bits_runner.py`.
 
 This API path can carry server-initiated requests and results without a public
-shell HTTP endpoint. Model availability, credit coverage, sustained JSON contract
-fidelity, and continuous trading integration were not established by this test.
+shell HTTP endpoint. A subsequent live test requested `printf 42`, executed it
+through the durable shell wrapper, and returned its successful result to Bits,
+which acknowledged it with a valid completed envelope.
+
+The operator reports **sol GPT-5.6** selected in the Datadog agent. This is an operator-reported setting, not a model
+identity verified from API metadata. Credit eligibility and tariff remain
+unverified; every decision/result exchange is a workflow execution.
+
+## Runtime and recovery
+
+The existing `xauusd-agent.service` owns the loop. It downloads initial data if
+missing, refreshes stale observations, submits Bits context, polls the workflow,
+runs one returned shell command, and feeds its persisted result into the next
+invocation. A cycle has at most `AGENT_MAX_STEPS_PER_TICK` executed actions.
+Responses with invalid JSON, mismatched IDs, unknown fields, or excessive limits
+never reach execution. Workflow POSTs have no automatic retry. Pending workflow
+IDs resume after restart; uncertain submissions or shell outcomes fail closed.
+
+`bits_state` and `bits_jobs` live in the configured state database alongside the
+paper account and transcript. Runtime output is bounded, explicitly marked when
+truncated, and sensitive content is withheld. This filter is not protection from
+an intentionally obfuscated command or credential exfiltration: the operator has
+authorized unrestricted container shell access. Do not describe local risk gates
+as tamper-proof under this permission model.
+
+The independent paper monitor runs every five seconds. It marks fresh prices and
+persists stops on daily-loss or drawdown breaches. It never liquidates positions.
+Existing demo execution requires its separate verified-account/reconciliation
+lifecycle; enabling Bits does not override it. The current deployment stays
+paper-only.
+
+After checking effects of an uncertain command, stop the agent and use
+`bits-recover --reason ...`, then explicitly `paper start` and restart the service.
+Completed commands are not replayed with the same cycle/action ID. Do not run
+multiple agent hosts against one state store; the runtime lock is container-local.
+
+See [the system prompt](bits-system-prompt.md) and the root README for commands.

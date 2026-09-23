@@ -33,12 +33,12 @@ from .paper_trading import (
 )
 
 DEFAULT_AGENT_GOAL = (
-    "Trade XAUUSD profitably on the safe local paper lifecycle. You see current and recent M1 "
-    "bars, the paper account state, and your decision history. You may read market data and "
-    "paper state, run the deterministic breakout signal, fetch allow-listed news research, and "
-    "propose trades. Proposals are always proposals: the deterministic risk gates approve or "
-    "refuse them and only the gate outcome is real. Never claim an order was placed. Finish "
-    "every tick with a summary of what you decided and why."
+    "Operate the XAUUSD research and paper/demo trading cycle using current market data, "
+    "account state, and verified command results. Research, backtest, and acquire evidence "
+    "when useful. Propose trades only through the deterministic trading interface, respect "
+    "all risk gates and operator stops, monitor positions, and learn from completed trades. "
+    "Waiting is valid; do not force trades or promise profitability. Summarize actual results "
+    "and choose the next useful review time."
 )
 
 MAX_TRANSCRIPT_CONTENT_CHARS = 4000
