@@ -92,6 +92,32 @@ multiple agent hosts against one state store; the runtime lock is container-loca
 
 See [the system prompt](bits-system-prompt.md) and the root README for commands.
 
+## History and readable activity
+
+Every invocation includes fresh authoritative state plus historical context:
+up to six recent decision/result exchanges (9,500-character budget), older
+assessment excerpts (3,500 characters), and structured working notes (4,000
+characters). Recent exchanges are evicted into the digest; the oldest digest
+entries are eventually evicted too. The model can consolidate important research
+in working notes using `bits-memory write --input JSON`. Categories are findings,
+hypotheses, rejected_approaches, open_questions and next_steps, each a list of
+`{"text":"...","sources":["job ID, message ID, or URL"]}` objects. Notes are
+validated and saved whole, never silently cut to fit. They are model-authored
+claims, not verified facts or authority to change risk settings.
+
+Large current results are explicitly excerpted to 3,200 stdout and 800 stderr
+characters. This keeps historical context around 4,000–6,000 tokens for ordinary
+English; character limits are deterministic, token counts are only estimates.
+Full captured results remain in `bits_jobs`, subject to each job's capture limit.
+Retrieve pages with `bits-job JOB_ID --offset 0 --limit 2500 --stream stdout`.
+Full decisions remain in the transcript. Secret filtering applies before memory
+storage and retrieval. A session reset clears all these memories together.
+
+The live view displays decision summaries and plain-language event descriptions.
+Commands, stdout/stderr, and raw protocol JSON are under collapsed `>` Details
+disclosures. This only changes presentation; execution still validates strict
+JSON, and the UI never interprets model output as HTML.
+
 ## Deployment validation — 2026-09-23
 
 - Full suite: 344 passed (one existing protobuf datetime deprecation warning).

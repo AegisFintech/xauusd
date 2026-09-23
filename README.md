@@ -167,6 +167,22 @@ using it requires independently configuring its `OPENAI_*` settings.
 
 The service writes no console or journald logs; the transcript, state store, and the live view (including `/api/health` at `http://127.0.0.1:8100/api/health`) are the only observability.
 
+## Live history and session reset
+
+The activity feed shows plain-English decisions and keeps tool calls visible.
+Open a `>` Details disclosure for commands, output, errors and raw JSON. The
+protocol used for execution remains unchanged. Bits receives bounded recent
+history and source-linked working memory; see [memory details](docs/datadog-connection.md#history-and-readable-activity).
+
+For an explicitly requested fresh local paper session, stop the paper account
+and agent service, then run `state reset --confirm-reset`. This verifies a backup
+and atomically clears paper fills/decisions, agent runs/transcripts, Bits jobs,
+cycle state and memory. It resets cash to `PAPER_INITIAL_CASH` (default $100,000)
+and leaves the account stopped. Market data, credentials and research tables are
+preserved. Explicitly `paper start --reason operator_reset`, then restart the
+agent service. Reset is refused unless `CTRADER_PAPER_ONLY=true` and no Bits agent
+holds the local runtime lock. Never use a reset to hide or bypass a risk stop.
+
 ## Development
 
 ```bash

@@ -21,6 +21,63 @@ DEFAULT_VIEW_PORT = 8100
 # At the default 60s poll this fires after roughly ten unproductive minutes.
 STALE_TICK_ALERT_THRESHOLD = 10
 
+
+def step_display(step: dict[str, Any]) -> dict[str, str]:
+    """Presentation only: never turns an assessment into a confirmed execution."""
+    c = step.get("content") or {}
+    phase = step.get("phase", "event")
+    titles = {"assistant": "Decision", "tool_call": "Tool call", "tool_result": "Tool result",
+              "tick_start": "Market check", "tick_end": "Review complete", "data_refresh": "Market data",
+              "bits_submit": "Analyzing", "tick_error": "Needs attention", "planner_error": "Needs attention",
+              "session_start": "Fresh start"}
+    title = titles.get(phase, "System update")
+    text = "An update was recorded. Expand details to inspect it."
+    if phase == "assistant":
+        reply = c
+        for key in ("reply", "content"):
+            try:
+                parsed = json.loads(c.get(key, ""))
+                if isinstance(parsed, dict): reply = parsed; break
+            except (ValueError, TypeError): pass
+        text = reply.get("summary") or c.get("summary") or reply.get("reason") or c.get("reason")
+        if not text:
+            text = c.get("content") if reply is c and not c.get("action") else "Preparing the next action."
+        if reply.get("status") == "blocked": title = "Waiting for help"
+        elif reply.get("status") == "waiting": title = "Waiting"
+        elif reply.get("actions") or reply.get("action") == "tool": title = "Next action"
+    elif phase == "tool_call":
+        text = c.get("description") or ("Running a shell command on the trading server." if c.get("tool") == "shell"
+                                       else "Running " + str(c.get("tool", "a tool")).replace("_", " ") + ".")
+    elif phase == "tool_result":
+        status = c.get("status")
+        if c.get("filled") is True:
+            text = "Paper trade filled." if c.get("paper_only") else "Demo trade confirmed."
+        elif c.get("filled") is False:
+            text = "Trade was not placed: " + str(c.get("gate_reason", "risk gate refusal")).replace("_", " ").lower() + "."
+        elif status in {"succeeded", "completed"}:
+            text = "Command completed successfully." if "exit_code" in c else "Tool completed successfully."
+        elif status == "running": text = "Command is still running."
+        elif status == "timed_out": text = "Command exceeded its time limit. Its effects need to be checked before retrying."
+        elif status in {"cancelled", "unknown"}: text = "Command was interrupted. Its effects need to be checked before retrying."
+        else: text = "Tool did not complete successfully. Expand details for the error."
+        if c.get("total_bytes"):
+            text += f" Returned {c['total_bytes']:,} bytes of output."
+        if c.get("truncated"): text += " Captured output was shortened."
+    elif phase == "bits_submit":
+        text = "Sent the latest market information, account state, and relevant history to Bits for analysis."
+    elif phase == "data_refresh":
+        if c.get("ok"): text = f"Market data updated with {c.get('downloaded_rows', 0):,} downloaded bars."
+        elif c.get("skipped"): text = "Waiting before the next market-data refresh."
+        else: text = "Market data could not be refreshed. Trading requires a fresh feed."
+    elif phase == "tick_start":
+        text = f"Gold is ${c['price']:,.2f}." if isinstance(c.get("price"), (int, float)) else "Checking the market."
+        if c.get("market_open") is False: text += " The market is closed; no new trade will be placed."
+        elif c.get("fresh") is False: text += " The data is stale; waiting for an update."
+        elif c.get("fresh") is True: text += " Market data is fresh."
+    elif phase in {"tick_end", "tick_error", "planner_error", "session_start"}:
+        text = c.get("summary") or "This check could not complete. The next check will retry safely."
+    return {"title": title, "text": str(text or "The agent recorded a decision; expand details to inspect it.")}
+
 _PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>xauusd agent - live thinking</title>
 <style>
@@ -40,7 +97,11 @@ h1{font-size:15px;color:#8ab4f8;margin:0 0 4px}
  .step b{display:block;color:#8ab4f8;margin-bottom:3px;font-weight:700}
  .step .human{margin:0;white-space:pre-wrap}
  .step details{margin-top:3px}
- .step summary{color:#7f8ea3;cursor:pointer;font-size:12px}
+ .step summary{color:#7f8ea3;cursor:pointer;font-size:12px;list-style:none}
+ .step summary::-webkit-details-marker{display:none}
+ .step summary::before{content:'>';display:inline-block;margin-right:8px;transition:transform .15s}
+ .step details[open]>summary::before{transform:rotate(90deg)}
+ .step h3{font-size:12px;color:#8ab4f8;margin:12px 0 3px}
  .step pre{margin:4px 0 0;color:#9aa8bd;white-space:pre-wrap}
  #more{text-align:center;color:#7f8ea3;padding:10px}
  #end{text-align:center;color:#57637a;padding:10px;font-size:12px}
@@ -56,7 +117,8 @@ h1{font-size:15px;color:#8ab4f8;margin:0 0 4px}
 <div id="meta">connecting&hellip;</div>
 <div id="health">checking&hellip;</div>
 <div id="paper">paper &mdash; checking&hellip;</div>
-<div id="runs"></div>
+<div id="session" style="color:#8ab4f8;margin-bottom:8px"></div>
+<details><summary>Run history</summary><div id="runs"></div></details>
 <div id="log"></div>
 <div id="more">load older decisions&hellip;</div>
 <div id="end" style="display:none">end of history</div>
@@ -81,62 +143,22 @@ h1{font-size:15px;color:#8ab4f8;margin:0 0 4px}
   if(rendered.has(s.id))return null;rendered.add(s.id);
   const d=document.createElement('div');d.className='step '+s.phase;
   const b=document.createElement('b');
-  b.textContent=s.phase.replace('_',' ').toUpperCase()+'  ·  tick '+s.tick+'  ·  '+fmtTime(s.occurred_at);
+  b.textContent=(s.display?s.display.title:s.phase.replaceAll('_',' '))+'  ·  '+fmtTime(s.occurred_at);
   d.appendChild(b);
-  const hu=document.createElement('div');hu.className='human';hu.textContent=humanize(s);d.appendChild(hu);
+  const hu=document.createElement('div');hu.className='human';hu.textContent=s.display?s.display.text:'Activity recorded. Expand details to inspect it.';d.appendChild(hu);
   const det=document.createElement('details');
-  const sm=document.createElement('summary');sm.textContent='raw json';det.appendChild(sm);
-  const pre=document.createElement('pre');pre.textContent=JSON.stringify(s.content,null,2);det.appendChild(pre);
+  const sm=document.createElement('summary');sm.textContent='Details';det.appendChild(sm);
+  const c=s.content||{};
+  function section(label,text){if(text===undefined||text===null||text==='')return;
+   const h=document.createElement('h3');h.textContent=label;det.appendChild(h);
+   const p=document.createElement('pre');p.textContent=String(text);det.appendChild(p);}
+  if(c.input&&c.input.command){section('Command',c.input.command);section('Working directory',c.input.cwd);}
+  section('Output',c.stdout);section('Errors',c.stderr);
+  const raw=document.createElement('details');const rs=document.createElement('summary');rs.textContent='Technical data (raw json)';raw.appendChild(rs);
+  const pre=document.createElement('pre');pre.textContent=JSON.stringify(c,null,2);raw.appendChild(pre);det.appendChild(raw);
   d.appendChild(det);return d;
  }
  function addNode(n,atTop){if(!n)return;if(atTop&&$('log').firstChild)$('log').insertBefore(n,$('log').firstChild);else $('log').appendChild(n);}
- function pairs(o){
-  const out=[];
-  for(const k of Object.keys(o||{})){
-   const v=o[k];
-   if(v===undefined||v===null||v===''||(Array.isArray(v)&&v.length===0)||(typeof v==='object'&&Object.keys(v).length===0))continue;
-   out.push(typeof v==='object'?k+'='+JSON.stringify(v):k+': '+v);
-  }
-  return out.join('  ·  ');
- }
- function priceFmt(p){const n=Number(p);return Number.isFinite(n)?n.toFixed(2):String(p);}
- function humanize(s){
-  const c=s.content||{};
-  switch(s.phase){
-   case 'tick_start':
-    return (c.bar_time_utc?'bar '+fmtBar(c.bar_time_utc):'market watch')+(c.price!=null?'  ·  price '+priceFmt(c.price):'');
-   case 'tick_end':
-    if(c.error_type)return 'error - '+(c.summary||c.error_type);
-    return (c.summary?'summary: '+(c.summary||''):'done')+(c.steps!=null?'  ·  '+c.steps+' steps':'');
-   case 'assistant':
-    return humanizeAssistant(c);
-   case 'tool_call':
-    return 'executing '+c.tool+(c.input&&Object.keys(c.input).length?'  ('+pairs(c.input)+')':'');
-   case 'tool_result':
-    return pairs(c)||JSON.stringify(c);
-   case 'planner_error':
-    return c.summary||JSON.stringify(c);
-   default:
-    return JSON.stringify(c);
-  }
- }
- function firstSentence(s){if(!s)return '';const t=String(s).trim();const i=t.search(/[.!?]/);return i>0?t.slice(0,i+1):t;}
- function humanizeAssistant(c){
-  if(!c||typeof c!=='object')return JSON.stringify(c);
-  if(typeof c.content==='string'){
-   try{const p=JSON.parse(c.content);if(p&&typeof p==='object'&&p.action)return humanizeAssistant(p);}catch(e){}
-   return String(c.content).slice(0,400);
-  }
-  const reason=firstSentence(c.reason);
-  if(c.action==='final')return 'decision  -  '+(c.summary||'')+(reason?'  ('+reason+')':'');
-  if(c.action==='tool'){
-   let line='decided to run '+c.tool;
-   if(c.input&&Object.keys(c.input).length)line+='  ·  '+pairs(c.input);
-   if(reason)line+='  -  '+reason;
-   return line;
-  }
-  return JSON.stringify(c);
- }
  function markEnded(){ended=true;$('more').style.display='none';$('end').style.display='block';}
  async function loadTop(){
   const st=await j('/api/steps?run_id='+encodeURIComponent(cur)+'&limit=100');
@@ -162,6 +184,8 @@ h1{font-size:15px;color:#8ab4f8;margin:0 0 4px}
  async function pull(){
   try{
    const st=await j('/api/status');
+   $('session').textContent=st.session_reset?'Fresh session · started '+fmtTime(st.session_reset.recorded_at)+
+    ' · starting paper balance $'+fmtMoney(st.session_reset.initial_cash):'';
    if(st.latest_run_id!==cur){
     cur=st.latest_run_id;topId=0;bottomId=0;loading=false;ended=false;rendered.clear();
     $('log').innerHTML='';
@@ -184,8 +208,8 @@ await refreshRuns();
    }catch(e){/* transient; next poll retries */}
  }
  function updateMeta(status){
-  const detail=(cur?cur:'no run yet')+(status?'  ·  '+status:'');
-  $('meta').textContent=detail+'  ·  '+rendered.size+' steps';
+  const detail=cur?('Agent '+(status||'running')):'Waiting for the agent to start';
+  $('meta').textContent=detail+'  ·  '+rendered.size+' activity updates';
  }
  function fmtMoney(v){const n=Number(v);if(!Number.isFinite(n))return String(v);return n.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});}
  function fmtPnl(v){const n=Number(v);if(!Number.isFinite(n))return String(v);return (n>=0?'+':'')+n.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});}
@@ -208,6 +232,11 @@ async function refreshRuns(){
     const du=h.data_update||{};const gap=du.age_seconds!=null?' · feed gap '+Math.round(du.age_seconds)+'s':'';
     const bar=du.end?(' · last bar '+fmtBar(du.end)):'';
     el.textContent=(h.alerts&&h.alerts.length)?'ATTENTION: '+h.alerts.join('  ·  '):'healthy'+bar+gap;
+    const beat=(h.agent||{}).heartbeat||{};
+    const states={bits_waiting:'Bits is analyzing',shell_running:'A command is running',waiting:'Waiting for the next review',
+     completed:'Review complete',market_closed:'Market closed',stopped:'Agent stopped',starting:'Starting up'};
+    if(cur)$('meta').textContent=(states[beat.status]||'Monitoring the market')+
+     (beat.next_review_at?' · next review '+fmtTime(beat.next_review_at):'')+' · '+rendered.size+' activity updates';
     el.className=h.status==='ok'?'ok':'problem';}catch(e){}
    }
  function paperHeadline(s, risk){
@@ -231,7 +260,7 @@ async function refreshRuns(){
   const sig=JSON.stringify(p);
   if(sig===refreshPaper.last)return;refreshPaper.last=sig;
   const s=p.paper.summary, risk=p.paper.risk;
-  let html=paperHeadline(s,risk);
+  let html='<div class="k">'+(p.mode==='demo'?'CTRADER DEMO':'PAPER TRADING · simulated orders')+'</div>'+paperHeadline(s,risk);
   if(s.recent_fills.length)html+='<div class="fills">fills: '+s.recent_fills.map(renderFill).join('  ·  ')+'</div>';
   $('paper').innerHTML=html;
  }
@@ -267,8 +296,12 @@ def create_app(store: AgentTranscriptStore | None = None,
     @app.get("/api/status")
     def status() -> dict[str, Any]:
         runs = transcript.runs(limit=1)
+        reset = None
+        if hasattr(transcript, "connect"):
+            from .bits_jobs import BitsStore
+            reset = BitsStore(transcript).get("session_reset")
         return {"latest_run_id": runs[0]["run_id"] if runs else None,
-                "latest_run_status": runs[0]["status"] if runs else None}
+                "latest_run_status": runs[0]["status"] if runs else None, "session_reset": reset}
 
     @app.get("/api/runs")
     def runs(limit: int = Query(default=20, ge=1, le=100)) -> dict[str, Any]:
@@ -280,6 +313,7 @@ def create_app(store: AgentTranscriptStore | None = None,
               limit: int = Query(default=100, ge=1, le=500)) -> dict[str, Any]:
         desc = before is not None or after is None
         rows = transcript.steps(run_id, after_id=after or 0, before_id=before, desc=desc, limit=limit)
+        rows = [{**row, "display": step_display(row)} for row in rows]
         run_status = transcript.run_status(run_id) if run_id else None
         return {"run_id": run_id, "run_status": run_status, "order": "desc" if desc else "asc",
                 "after": after, "before": before, "count": len(rows), "steps": rows}
@@ -287,7 +321,8 @@ def create_app(store: AgentTranscriptStore | None = None,
     @app.get("/api/paper")
     def paper_endpoint() -> dict[str, Any]:
         pt = paper_or_default()
-        return {"paper": {"summary": pt.summary(), "risk": {
+        return {"mode": "paper" if os.getenv("CTRADER_PAPER_ONLY") == "true" else "demo",
+                "paper": {"summary": pt.summary(), "risk": {
             key: getattr(pt.config, key) for key in ("daily_loss_limit", "max_drawdown", "max_position",
                                                      "max_trades_per_day", "max_market_data_age_seconds")}}}
 

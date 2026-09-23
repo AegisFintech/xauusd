@@ -11,6 +11,7 @@ from .agent_loop import ContinuousAgentRunner, paper_state_tool
 from .bits import BitsError, PROTOCOL
 from .bits_jobs import BitsStore, ShellJobs, SecretFilter, AgentLock
 from .paper_trading import market_is_open
+from .bits_memory import BitsMemory, result_for_prompt, excerpt
 
 
 class BitsAgentRunner(ContinuousAgentRunner):
@@ -20,6 +21,12 @@ class BitsAgentRunner(ContinuousAgentRunner):
         super().__init__(*args, **kwargs)
         self.bits_store = BitsStore(self.transcript)
         self.secrets = SecretFilter()
+        self.memory = BitsMemory(self.bits_store, self.secrets)
+        reset = self.bits_store.get("session_reset")
+        if reset and not self.bits_store.get("session_start_recorded"):
+            self._record("session_start", {"summary": f"Starting a fresh paper session with ${reset['initial_cash']:,.2f}. "
+                                          "Previous decisions, trades and working memory have been cleared."})
+            self.bits_store.put("session_start_recorded", {"run_id": self.run_id})
         self.jobs = ShellJobs(self.bits_store, self.secrets)
         self.monitor_thread = None
         self.monitor_error = None
@@ -36,14 +43,17 @@ class BitsAgentRunner(ContinuousAgentRunner):
         self.transcript.append(self.run_id, self._tick, phase, self.secrets.clean(content))
 
     def _outcome(self, status, **extra):
-        self._write_status(status, planner="datadog_bits", monitor=self.bits_store.get("monitor"), **extra)
+        self._write_status(status, planner="datadog_bits", monitor=self.bits_store.get("monitor"),
+                           next_review_at=self.bits_store.get("cycle", {}).get("next_at"), **extra)
         return {"tick": self._tick, "status": status, **extra}
 
     def _context(self, market):
         return {"utc_now": self._now().isoformat(), "market": self._market_view(market),
                 "paper": paper_state_tool(self.paper_trading).handler({}),
                 "paper_only": self.coordinator.paper_only,
-                "previous_summary": self.bits_store.get("last_summary"),
+                "previous_summary": excerpt(self.bits_store.get("last_summary"), 1200),
+                "history": self.memory.context(),
+                "session_reset": self.bits_store.get("session_reset"),
                 "tools": [tool for tool in self.registry.definitions()
                           if tool["name"] in {"read_market", "paper_state", "propose_trade"}],
                 "execution": "The server harness executes your JSON shell action; do not use Datadog sandbox tools. "
@@ -56,14 +66,19 @@ class BitsAgentRunner(ContinuousAgentRunner):
                 "A shell job is already async: do not daemonize or background commands. "
                 "No command allow-list or per-command approval is required. Return strict xauusd/1 JSON. "
                 "Maximum one shell action per response; timeout_sec 1..3600, max_output_bytes 1..1048576. "
+                "Write summary as a short plain-English decision for the human live view: what you observed, "
+                "why the next action is useful, or why you are waiting. No JSON, shell code or internal IDs in summary. "
                 "Finish with waiting/completed and a UTC next_review_at when no further action is useful."}
 
     def _submit(self, cycle, market, results=None):
         if self._stop.is_set():
             return self._outcome("stopped")
         invocation = {"protocol": PROTOCOL, "cycle_id": cycle["cycle_id"], "message_id": uuid4().hex,
-                      "goal": self.config.goal, "context": self._context(market), "results": results or [],
-                      "previous_decision": cycle.get("reply"),
+                      "goal": self.config.goal, "context": self._context(market),
+                      "results": [result_for_prompt(r) for r in results or []],
+                      "previous_decision": ({"status": cycle["reply"]["status"],
+                                             "summary": excerpt(cycle["reply"]["summary"], 900)}
+                                            if cycle.get("reply") else None),
                       "steps_remaining": max(0, self.config.max_steps_per_tick - cycle.get("steps", 0))}
         if invocation["steps_remaining"] == 0:
             invocation["instruction"] = "Cycle action budget exhausted. Return a final summary with actions []."
@@ -109,6 +124,7 @@ class BitsAgentRunner(ContinuousAgentRunner):
                 self._record("tool_result", result)
                 return self._outcome("recovery_failed")
             self._record("tool_result", result)
+            self.memory.remember(cycle["cycle_id"], cycle["reply"], result)
             cycle.update(phase="feedback", results=[result])
             self.bits_store.put("cycle", cycle)
             phase = "feedback"
@@ -135,6 +151,7 @@ class BitsAgentRunner(ContinuousAgentRunner):
             if self.paper_trading.state().get("position"):
                 next_at = min(datetime.fromisoformat(next_at), self._now()+timedelta(seconds=60)).isoformat()
             self.bits_store.put("last_summary", reply["summary"])
+            self.memory.remember(cycle["cycle_id"], reply)
             self.bits_store.put("cycle", {"phase": "idle", "next_at": next_at})
             self._record("tick_end", {"summary": reply["summary"], "steps": cycle["steps"]})
             self.consecutive_errors = 0
@@ -155,7 +172,8 @@ class BitsAgentRunner(ContinuousAgentRunner):
                 self._record("tick_end", {"summary": "action not executed: budget or response age limit"})
                 return self._outcome("step_limit")
             action = cycle["reply"]["actions"][0]
-            self._record("tool_call", {"tool": "shell", "input": action["args"]})
+            self._record("tool_call", {"tool": "shell", "input": action["args"],
+                                       "description": cycle["reply"]["summary"]})
             result = self.jobs.start(cycle["cycle_id"], action)
             cycle.update(phase="job", job_id=result["job_id"], steps=cycle["steps"]+1)
             self.bits_store.put("cycle", cycle)

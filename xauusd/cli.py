@@ -376,11 +376,20 @@ def main():
  tool.add_argument("--input",default="{}")
  recover=sub.add_parser("bits-recover",help="acknowledge reconciled interrupted commands; leaves paper stopped")
  recover.add_argument("--reason",required=True)
+ memory=sub.add_parser("bits-memory",help="read or replace compact research notes")
+ memory.add_argument("action",choices=["show","write"])
+ memory.add_argument("--input")
+ job=sub.add_parser("bits-job",help="retrieve a bounded page of stored command output")
+ job.add_argument("job_id")
+ job.add_argument("--stream",choices=["stdout","stderr"],default="stdout")
+ job.add_argument("--offset",type=int,default=0)
+ job.add_argument("--limit",type=int,default=2500)
  paper=sub.add_parser("paper",help="manage the deterministic paper trading lifecycle (kill switch)")
  paper.add_argument("action",choices=["status","start","stop"])
  paper.add_argument("--reason",default="operator")
  pst=sub.add_parser("state",help="local state database integrity, backup, and restore")
- pst.add_argument("action",choices=["integrity","backup","restore"])
+ pst.add_argument("action",choices=["integrity","backup","restore","reset"])
+ pst.add_argument("--confirm-reset",action="store_true",help="explicitly discard stopped paper/session history after backup")
  pst.add_argument("--backup",help="backup directory or state.db.gz to restore")
  pst.add_argument("--root",default="backups/local-state")
  sub.add_parser("adaptive-analytics")
@@ -478,6 +487,23 @@ def main():
   try: result=bits_recover(a.reason)
   except Exception as exc: p.error(type(exc).__name__)
   print(json.dumps(result))
+ if a.cmd in {"bits-memory","bits-job"}:
+  from .agent_loop import agent_transcript_store_from_env
+  from .bits_jobs import BitsStore,SecretFilter
+  from .bits_memory import BitsMemory
+  try:
+   store=BitsStore(agent_transcript_store_from_env())
+   if a.cmd=="bits-memory":
+    memory=BitsMemory(store)
+    result=memory.context() if a.action=="show" else memory.write_notes(json.loads(a.input or "null"))
+   else:
+    if a.offset<0 or not 1<=a.limit<=65536: raise ValueError("invalid output page bounds")
+    job=store.job(a.job_id); text=job[a.stream]; end=min(len(text),a.offset+a.limit)
+    result={"job_id":a.job_id,"status":job["status"],"exit_code":job["exit_code"],"stream":a.stream,
+            "text":text[a.offset:end],"offset":a.offset,"next_offset":end if end<len(text) else None,
+            "stored_characters":len(text),"capture_truncated":job["truncated"]}
+   print(json.dumps(SecretFilter().clean(result),allow_nan=False))
+  except Exception as exc: p.error(type(exc).__name__)
  if a.cmd=="paper":
   pt=_paper_from_env()
   if a.action=="stop": pt.stop(a.reason)
@@ -499,6 +525,14 @@ def main():
   elif a.action=="backup":
    from .state_backup import backup_local_state
    print(json.dumps(backup_local_state(dest_root=a.root),indent=2,allow_nan=False,default=str))
+  elif a.action=="reset":
+   if not a.confirm_reset: p.error("--confirm-reset is required to discard paper/session history")
+   if os.getenv("CTRADER_PAPER_ONLY")!="true": p.error("reset is only allowed with CTRADER_PAPER_ONLY=true")
+   from .session_reset import reset_paper_session
+   result=reset_paper_session(_paper_from_env(),agent_transcript_store_from_env(),a.root)
+   from .agent_status import write_status
+   write_status({"status":"stopped","paper_stopped":True,"reason":"session_reset","tick":0})
+   print(json.dumps(result,indent=2))
   else:
    if not a.backup: p.error("--backup is required (backup directory or state.db.gz)")
    from .state_backup import restore_local_state

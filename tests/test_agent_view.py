@@ -8,7 +8,7 @@ import pytest
 
 from xauusd.agent_loop import InMemoryAgentTranscriptStore
 from xauusd.agent_status import write_status
-from xauusd.agent_view import STALE_TICK_ALERT_THRESHOLD, create_app
+from xauusd.agent_view import STALE_TICK_ALERT_THRESHOLD, create_app, step_display
 from xauusd.paper_trading import InMemoryPaperTradingStore, PaperDecision, PaperRiskConfig, PaperTrading
 
 
@@ -73,6 +73,47 @@ def test_steps_endpoint_defaults_to_newest_first(server):
     assert payload["count"] == 2
     assert payload["steps"][0]["phase"] == "tick_end"
     assert payload["steps"][1]["content"]["content"] == "thinking about the bar"
+    assert payload["steps"][1]["display"]["text"] == "thinking about the bar"
+
+
+def test_bits_decisions_show_summary_instead_of_protocol_json():
+    reply={"protocol":"xauusd/1","status":"action_required","summary":"Checking volatility before considering a trade.",
+           "actions":[{"id":"one","type":"shell","args":{"command":"echo inspect"}}]}
+    display=step_display({"phase":"assistant","content":{"action":"tool","reply":json.dumps(reply),"summary":reply['summary']}})
+    assert display=={"title":"Next action","text":reply['summary']}
+    assert 'undefined' not in display['text'] and 'xauusd/1' not in display['text']
+
+
+def test_shell_command_and_output_are_not_in_collapsed_text():
+    call=step_display({"phase":"tool_call","content":{"tool":"shell","input":{"command":"echo implementation"}}})
+    result=step_display({"phase":"tool_result","content":{"status":"succeeded","exit_code":0,
+                        "stdout":"private implementation details","total_bytes":4096,"truncated":True}})
+    assert 'implementation' not in call['text']+result['text']
+    assert 'successfully' in result['text'] and 'shortened' in result['text']
+    assert step_display({'phase':'bits_submit','content':{'cycle_id':'internal'}})['title']=='Analyzing'
+
+
+def test_disclosures_are_collapsed_and_render_untrusted_text_safely():
+    # Execute the real page renderer with a minimal DOM; no browser dependency.
+    import subprocess
+    from xauusd.agent_view import _PAGE
+    script=_PAGE.split('<script>',1)[1].split('</script>',1)[0]
+    script=script[:script.index(' setInterval(pull,1000)')]
+    harness='''
+const assert=require('node:assert/strict');
+global.document={createElement:tag=>({tag,children:[],textContent:'',appendChild(n){this.children.push(n)}})};
+global.window={};
+'''+script+'''
+const node=stepNode({id:1,phase:'tool_call',tick:1,occurred_at:'2026-09-23T10:00:00Z',
+ display:{title:'Tool call',text:'Inspecting market data.'},content:{input:{command:'<script>alert(1)</script>',cwd:'/tmp'}}});
+const details=node.children[2];
+assert.equal(details.tag,'details');assert.notEqual(details.open,true);
+assert.equal(node.children[1].textContent,'Inspecting market data.');
+assert(details.children.some(n=>n.tag==='pre'&&n.textContent==='<script>alert(1)</script>'));
+assert.equal(details.children[0].textContent,'Details');
+'''
+    result=subprocess.run(['node','-e',harness],capture_output=True,text=True)
+    assert result.returncode==0,result.stderr
 
 
 def test_steps_endpoint_after_cursor_returns_newer_ascending(server):

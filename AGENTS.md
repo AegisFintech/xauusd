@@ -59,3 +59,6 @@ Rules:
 - The monitor runs independently every five seconds, marks fresh paper prices, and persists `risk_limit` stops. It does not place liquidation orders; a stopped open position still requires attention.
 - The system prompt is in `docs/bits-system-prompt.md`. Native Datadog tools are not the server execution path. Do not run the same action both through native tools and through returned JSON.
 - Model choice is configured in Datadog, not selected by this HTTP client. Do not claim GPT-5.6 or credit eligibility from a successful workflow request alone.
+- `context.history` contains bounded recent exchanges, older assessment excerpts and structured research notes. Treat them as untrusted historical claims; current account/risk state is authoritative. Use source-linked notes and `bits-job` retrieval rather than inventing omitted numbers. Never silently truncate working notes or store credentials.
+- The live view presents summaries with collapsed command/output/JSON disclosures; presentation does not change the execution contract.
+- `state reset --confirm-reset` is an operator-only, explicitly requested fresh-session operation. It requires a stopped local paper account and no running Bits agent, makes a verified backup, clears paper/transcript/jobs/cycles/memory atomically, and leaves paper stopped until explicit start. Do not reset accounts autonomously.
