@@ -186,7 +186,12 @@ def _agent_data_refresh_source(market_store: HistoricalDataStore, config: AgentC
  from pathlib import Path
  status_path=Path(os.getenv("CTRADER_DATA_UPDATE_STATUS_PATH","reports/data_update_status.json"))
  def refresh():
-  proc=subprocess.run([sys.executable,"-m","xauusd.cli","data","update"],
+  command=[sys.executable,"-m","xauusd.cli","data","update"]
+  if not market_store.path.exists():
+   from datetime import timedelta
+   command=[sys.executable,"-m","xauusd.cli","data","download","--start",
+            (datetime.now(timezone.utc)-timedelta(days=7)).date().isoformat()]
+  proc=subprocess.run(command,
                       capture_output=True,text=True,timeout=config.data_refresh_timeout_seconds)
   try: payload=_json.loads(status_path.read_text())
   except (OSError,ValueError):
@@ -226,6 +231,15 @@ def agent_controller(action: str) -> dict:
  if transcript_integrity!="ok":
   write_status({"state":"failed","reason":"transcript_integrity_check_failed","detail":transcript_integrity},status_path)
   return {"state":"refused","reason":"transcript_integrity_check_failed","integrity":transcript_integrity}
+ if os.getenv("AGENT_PLANNER","openai")=="datadog":
+  try:
+   from .bits import BitsClient
+   BitsClient.from_env()
+   if config.data_refresh_enabled: CTraderOpenApiConfig.from_env()
+  except Exception as exc:
+   paper.stop("missing_credentials")
+   write_status({"state":"stopped","reason":"missing_credentials","error_type":type(exc).__name__},status_path)
+   return {"state":"stopped","reason":"missing_credentials"}
  resume=paper.maybe_resume("agent_continuous_paper_loop")
  if not resume["resumed"]:
   write_status({"state":"stopped","reason":"resume_refused","kill_switch_reason":resume["kill_switch_reason"]},status_path)
@@ -246,11 +260,21 @@ def agent_controller(action: str) -> dict:
   source,paper,coordinator,config,
   canary=ConfirmedBreakoutCanarySource(market_store,_positive_env_float("CTRADER_CANARY_PAPER_QUANTITY",1)),
   firecrawl_client=firecrawl_client)
- runner=ContinuousAgentRunner(OpenAICompatiblePlanner.from_env(),registry,
+ backend=os.getenv("AGENT_PLANNER","openai")
+ runner_type=ContinuousAgentRunner
+ if backend=="datadog":
+  from .bits import BitsClient
+  from .bits_runner import BitsAgentRunner
+  runner_type=BitsAgentRunner
+  planner=BitsClient.from_env()
+ elif backend=="openai": planner=OpenAICompatiblePlanner.from_env()
+ else: raise ValueError("AGENT_PLANNER must be datadog or openai")
+ runner=runner_type(planner,registry,
                               transcript_store,source,paper,coordinator,config,
                               refresh_source=refresh_source,status_path=status_path)
  if action=="once":
-  result=runner.run_tick()
+  try: result=runner.run_tick()
+  finally: runner.stop()
   print(f"agent run {runner.run_id} tick recorded; live view http://127.0.0.1:{os.getenv('AGENT_VIEW_PORT','8100')}/",flush=True)
   return result
  if action=="run":
@@ -265,12 +289,30 @@ def agent_controller(action: str) -> dict:
   # reads only the persisted stores; the bot process must never own the port so
   # pausing/stopping it never takes the site down.
   try:
-   runner.run_forever(stop=stop,on_tick=lambda result: print(f"[{runner.run_id}] tick {result.get('tick')} status={result.get('status')}",flush=True))
+   runner.run_forever(stop=stop)
   except KeyboardInterrupt:
    runner.stop()
   return runner.status()
  raise ValueError(f"unknown agent action: {action}")
- raise ValueError(f"unknown agent action: {action}")
+
+def agent_tool(name: str, raw: str) -> dict:
+ """CLI bridge to the existing deterministic tools, for Bits shell requests."""
+ from .agent_loop import AgentConfig, build_agent_registry
+ from .autonomous_harness import _validate_json
+ from .bits_jobs import SecretFilter
+ paper=_paper_from_env()
+ source=LocalHistoricalMarketDataSource(HistoricalDataStore())
+ # Read tools must not discover or connect to a broker.
+ if name=="propose_trade":
+  if os.getenv("CTRADER_AUTOMATION_ENABLED")!="true":
+   return {"accepted":False,"reason":"AUTOMATION_DISABLED"}
+  coordinator=_paper_to_demo_coordinator(paper)
+ else: coordinator=PaperToCTraderDemoCoordinator(paper,paper_only=True)
+ registry=build_agent_registry(source,paper,coordinator,AgentConfig.from_env())
+ tool=registry.get(name)
+ value=json.loads(raw)
+ _validate_json(value,tool.input_schema)
+ return SecretFilter().clean(tool.handler(value))
 
 def main():
  load_dotenv(".env")
@@ -295,6 +337,9 @@ def main():
  demo.add_argument("action",nargs="?",choices=["status","once","run"],default="status")
  agent=sub.add_parser("agent",help="single continuous AI paper-trading agent with a live thinking view")
  agent.add_argument("action",nargs="?",choices=["status","once","view","run"],default="status")
+ tool=sub.add_parser("agent-tool",help="invoke deterministic tools from a Bits shell action")
+ tool.add_argument("name",choices=["read_market","paper_state","propose_trade"])
+ tool.add_argument("--input",default="{}")
  paper=sub.add_parser("paper",help="manage the deterministic paper trading lifecycle (kill switch)")
  paper.add_argument("action",choices=["status","start","stop"])
  paper.add_argument("--reason",default="operator")
@@ -389,6 +434,10 @@ def main():
    p.error(f"agent command failed: {type(exc).__name__}")
    raise SystemExit(1)
   print(json.dumps(result,indent=2,allow_nan=False,default=str))
+ if a.cmd=="agent-tool":
+  try: result=agent_tool(a.name,a.input)
+  except Exception as exc: result={"status":"failed","error_type":type(exc).__name__}
+  print(json.dumps(result,allow_nan=False))
  if a.cmd=="paper":
   pt=_paper_from_env()
   if a.action=="stop": pt.stop(a.reason)

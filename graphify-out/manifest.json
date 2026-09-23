@@ -294,9 +294,9 @@
     "semantic_hash": ""
   },
   "xauusd/cli.py": {
-    "mtime": 1789972930.7839713,
-    "seen": 1789974450.8828819,
-    "ast_hash": "a6cfbb92b1092a5ad5e5a7b2bec011d6",
+    "mtime": 1790154381.196903,
+    "seen": 1790154385.505413,
+    "ast_hash": "5e5ede6fae70be07923ed48fe43e2f2c",
     "semantic_hash": ""
   },
   "xauusd/codex_workflow.py": {
@@ -663,6 +663,18 @@
     "mtime": 1790154096.868559,
     "seen": 1790154112.0366578,
     "ast_hash": "d5e52c5f707afcbbde9db277852299b7",
+    "semantic_hash": ""
+  },
+  "tests/test_bits_runner.py": {
+    "mtime": 1790154359.7408772,
+    "seen": 1790154385.505356,
+    "ast_hash": "f611d451a018039a0bdb073181d527ad",
+    "semantic_hash": ""
+  },
+  "xauusd/bits_runner.py": {
+    "mtime": 1790154381.196903,
+    "seen": 1790154385.5054107,
+    "ast_hash": "894c47d6d24d777eeb12c2efcf01d0ab",
     "semantic_hash": ""
   }
 }
