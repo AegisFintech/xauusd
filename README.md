@@ -50,7 +50,7 @@ Credentials belong in `.env` with mode `0600`; never commit them. Current histor
 `.env.sample` links to `.env.example`. The `DD_*` settings prepare the Datadog Bits
 workflow connection; they do not switch the running planner. See
 [Datadog connection status](docs/datadog-connection.md) for the verified invocation
-path and the remaining response mapping requirement.
+path, successful JSON response smoke test, and remaining harness integration.
 
 ## Demo Automation
 
