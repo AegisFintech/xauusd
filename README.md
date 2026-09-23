@@ -47,6 +47,11 @@ On uncertainty, restart recovery failure, data staleness, or API failure, the sy
 
 Credentials belong in `.env` with mode `0600`; never commit them. Current historical-data settings and the demo-only assertion are documented in `.env.example`.
 
+`.env.sample` links to `.env.example`. The `DD_*` settings prepare the Datadog Bits
+workflow connection; they do not switch the running planner. See
+[Datadog connection status](docs/datadog-connection.md) for the verified invocation
+path and the remaining response mapping requirement.
+
 ## Demo Automation
 
 `demo-automation` is explicit and defaults to a no-network status check. It uses only the local normalized M1 data file, the fixed confirmed-breakout canary, CockroachDB paper/demo state, and the demo-only cTrader adapter.

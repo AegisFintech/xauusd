@@ -40,6 +40,7 @@ build/
 .env
 .env.*
 !.env.example
+!.env.sample
 
 # Package manager caches and metadata
 .npm/
