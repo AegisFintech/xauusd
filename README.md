@@ -252,3 +252,16 @@ preserved. Resumption requires explicit operator action and reconciliation of
 that job; changing the shell timeout does not replay it.
 
 The [2026-09-24 handoff audit](docs/local-handoff-audit-2026-09-24.md) records local validation and remaining demo blockers (#14–#16). Audit completion does not authorize deployment resumption.
+
+## Local Python environment
+
+Create the environment on each host; never commit `.venv` or a link to another
+host’s temporary directory. Python bytecode is generated locally and ignored.
+
+```sh
+python3 -m venv .venv
+.venv/bin/pip install -e '.[dev]'
+.venv/bin/python -m pytest tests -q -p no:cacheprovider
+```
+
+Rebuilding the environment does not authorize starting paused services.

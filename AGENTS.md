@@ -23,6 +23,8 @@ This repository develops an XAUUSD research, paper-trading, and cTrader demo-acc
 
 ## Engineering
 
+- Keep `.venv/`, `__pycache__/`, and Python bytecode untracked. Build virtual environments locally; never commit host-specific environment symlinks.
+
 - Prefer small, tested changes. Keep source code, tests, and documentation aligned.
 - Run focused tests, the complete suite, and `git diff --check` before committing.
 - Treat the state store as the authoritative application state; local files are recovery artifacts only. The agent's paper account and transcript use the backend selected by `XAUUSD_STATE_BACKEND` (`local` default → `STATE_DB_PATH` SQLite, `cockroach` → `DATABASE_URL`); both stores are schema-compatible and `paper_from_env()` / `agent_transcript_store_from_env()` are the single selection points.
