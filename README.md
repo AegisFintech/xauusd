@@ -250,3 +250,5 @@ state-backup timer are stopped and disabled. No XAUUSD cron entries were found.
 Credentials, datasets, existing backups and the unresolved timed-out job are
 preserved. Resumption requires explicit operator action and reconciliation of
 that job; changing the shell timeout does not replay it.
+
+The [2026-09-24 handoff audit](docs/local-handoff-audit-2026-09-24.md) records local validation and remaining demo blockers (#14–#16). Audit completion does not authorize deployment resumption.

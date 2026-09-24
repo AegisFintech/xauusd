@@ -71,22 +71,15 @@ The tool-call audit and stored job request record the effective timeout. This is
 separate from the Datadog workflow HTTP timeout. Existing recovery-stop behaviour
 is unchanged; changing this limit does not clear a persistent stop.
 
-## Local agent handoff (remote review, 2026-09-24)
+## Local agent handoff — completed 2026-09-24
 
-A remote Bits Code session made the change "Fail closed on restarts, broker errors and DST" (restart-policy allowlist, `demo-automation start`, cTrader order outcomes, New York market hours). It had no network access, no project `.venv`, no systemd, no cTrader and no graphify CLI. Once that change is merged into the server checkout, a local agent there must finish the items below. These items only run tests, read host state and documentation, edit the repository, and install dependencies that `pyproject.toml` declares into `.venv`. Do not start, enable or restart services, change a kill switch, or send broker requests. Delete each item when it is done and report the result in that commit.
-
-Local validation, timezone, graph and deployment-template tasks completed; see
-[the audit](docs/local-handoff-audit-2026-09-24.md). Remaining review items:
-
-5. Measure planner latency from the state database transcript (`STATE_DB_PATH`, table `agent_transcript`), read-only.
-   - Measure the time from each `bits_submit` row to the matching `assistant` row, and count `tick_end` rows that say `action not executed: budget or response age limit`.
-   - Why it matters: a reply with an action is discarded once `AGENT_MAX_MARKET_DATA_AGE_SECONDS` (180 s) have passed since submission, although the workflow may take up to `DD_WORKFLOW_TIMEOUT_SECONDS` (300 s).
-   - Report p50/p95 latency and the count so that gap can be fixed.
-6. Before any demo stage, confirm these cTrader Open API facts from the installed `ctrader_open_api` package and the official documentation, without connecting to cTrader:
-   - Which reply resolves a `ProtoOANewOrderReq` (acceptance, fill or error). Also confirm that `ProtoOAOrderErrorEvent`, `ProtoOAErrorRes` and rejected `ProtoOAExecutionEvent` replies carry a non-empty `errorCode`. The adapter records `BROKER_REJECTED` only when `errorCode` is set; any other reply counts as accepted.
-   - The maximum length of `clientOrderId`. Orders send the 64-character sha256 decision ID, so a lower limit (reportedly 50) would get every demo order rejected. Report it rather than changing the ID scheme, which also keys idempotency and reconciliation.
-   - Which `ProtoOAReconcileRes` position fields (`ProtoOAPosition`/`ProtoOATradeData`, such as `label` or `comment`) can tie a broker position to a request. Reconciling broker positions against the paper position depends on this.
-   - That `demo.ctraderapi.com` cannot authorize a live account. With `CTRADER_CTID_TRADER_ACCOUNT_ID` set, the account list and its `isLive` flag are skipped. The demo-only boundary then rests on the demo host refusing live accounts.
+The six remote-review handoff tasks are complete. See
+[the local audit](docs/local-handoff-audit-2026-09-24.md) for the 388-test result,
+timezone and unchanged operator-stop verification, deployment inventory, measured
+Bits latency and offline SDK/official-documentation findings. Issues #14–#16 track
+remaining broker ID, order-lifecycle and position-reconciliation blockers before
+demo execution. No broker calls or service activation were performed. Preserve
+the paused deployment and do not treat audit completion as permission to resume.
 
 Operator-only. Never do these autonomously, and never implement them without explicit operator approval:
 - Resuming the paused deployment, reconciling its timed-out job (`bits-recover`), `paper start`, `demo-automation start`, `state reset`, `state restore`, and enabling or restarting units.

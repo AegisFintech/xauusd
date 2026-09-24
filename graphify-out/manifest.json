@@ -522,15 +522,15 @@
     "semantic_hash": ""
   },
   "AGENTS.md": {
-    "mtime": 1790221335.6126106,
-    "seen": 1790221339.2996848,
-    "ast_hash": "ac015de621ee259a5c62a1f99e49812d",
+    "mtime": 1790221460.9007807,
+    "seen": 1790221482.973352,
+    "ast_hash": "3c4aa48b4a9a2506704fe0d8d465872e",
     "semantic_hash": ""
   },
   "README.md": {
-    "mtime": 1790221335.6126106,
-    "seen": 1790221339.299686,
-    "ast_hash": "6efb654d0000fbee243616716f473c07",
+    "mtime": 1790221460.9007807,
+    "seen": 1790221482.9733536,
+    "ast_hash": "1ef70d13c6880f612c21a4cb27c2c8b0",
     "semantic_hash": ""
   },
   "docker-compose.yml": {
@@ -726,9 +726,9 @@
     "semantic_hash": ""
   },
   "docs/local-handoff-audit-2026-09-24.md": {
-    "mtime": 1790221335.6846106,
-    "seen": 1790221339.299694,
-    "ast_hash": "e6a0d92b28ecefbc8402a8217ef23d09",
+    "mtime": 1790221460.8767807,
+    "seen": 1790221482.973362,
+    "ast_hash": "af2bced347262b04a63798d7300bf6a9",
     "semantic_hash": ""
   }
 }
