@@ -18,6 +18,12 @@ def _field(value: Any, name: str, default: Any = None) -> Any:
 def is_error(message: Any) -> tuple[str, str] | None:
     """Return ``(code, description)`` when a cTrader message carries an error, else None."""
     code = _field(message, "errorCode")
+    message_type = type(message).__name__
+    if isinstance(message, dict):
+        message_type = message.get("type", message_type)
+    rejected = _field(message, "executionType") in (7, "ORDER_REJECTED")
+    if not code and (message_type in {"ProtoOAErrorRes", "ProtoOAOrderErrorEvent", "ProtoErrorRes"} or rejected):
+        code = "ORDER_REJECTED" if rejected else "BROKER_ERROR"
     if not code:
         return None
     return str(code), str(_field(message, "description") or "")

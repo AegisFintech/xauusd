@@ -156,3 +156,11 @@ Broker IDs (#14): new long/non-ASCII IDs use an ASCII SHA-256 representation
 within the 50-character limit. The full internal ID and broker ID are persisted
 before submission. Reconciliation maps through persisted request records; older
 records retain their original broker identity and are never automatically resent.
+
+Order lifecycle (#15): the transport listens beyond SDK acceptance for a
+correlated terminal event, retaining bounded partial-fill/deal receipts. Only an
+explicit full fill matching the request ID and volume counts as success. Empty
+error codes on error message types and rejection events fail closed. Timeout,
+partial-only, malformed, and ambiguous outcomes remain pending and stop execution;
+late events require reconciliation and never trigger automatic resubmission.
+Broker-free acceptance/partial/fill/reject/timeout tests pass; full suite: 399.

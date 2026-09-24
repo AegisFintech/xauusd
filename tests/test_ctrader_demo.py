@@ -40,6 +40,8 @@ def test_duplicate_request_never_sends_a_second_transport_call(monkeypatch):
     instance, store, transport = adapter(monkeypatch)
     assert instance.reconcile_after_restart()
     instance.start("operator approved")
+    transport.response = {"execution_type": 3, "filled_volume": 100, "order_id": 1,
+                          "position_id": 2, "broker_client_order_id": "request-1"}
     first = instance.execute(CTraderOrder("request-1", "BUY", 100))
     duplicate = instance.execute(CTraderOrder("request-1", "BUY", 100))
     assert first == duplicate

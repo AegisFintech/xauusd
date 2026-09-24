@@ -9,6 +9,7 @@ import json
 import math
 import os
 import threading
+import uuid
 from typing import Any, Callable, Protocol
 
 from .ctrader_auth import DEMO_HOST, demo_accounts, is_error, resolve_symbol
@@ -157,6 +158,7 @@ class CTraderDemoOpenApiTransport:
         self._symbol_metadata: CTraderSymbolMetadata | None = None
         self._reactor_thread: threading.Thread | None = None
         self._service_started = False
+        self._order_lock = threading.Lock()
 
     @classmethod
     def from_env(cls, **kwargs: Any) -> "CTraderDemoOpenApiTransport":
@@ -171,6 +173,8 @@ class CTraderDemoOpenApiTransport:
         if not isinstance(timeout_seconds, (int, float)) or not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be finite and positive")
         self._ensure_authenticated()
+        if (request.get("type") if isinstance(request, dict) else type(request).__name__) == "ProtoOANewOrderReq":
+            return self._request_order(request, float(timeout_seconds))
         response = self._request(request, float(timeout_seconds))
         return self._normalize(request, response)
 
@@ -304,6 +308,72 @@ class CTraderDemoOpenApiTransport:
             raise TimeoutError("cTrader request timed out")
         return result["value"]
 
+    def _request_order(self, request: Any, timeout_seconds: float) -> dict[str, Any]:
+        """The SDK resolves on acceptance; keep listening for the correlated terminal event."""
+        with self._order_lock:
+            client = self._connect()
+            if not hasattr(client, "setMessageReceivedCallback"):
+                # Injectable synchronous transports still pass through strict receipt validation.
+                return self._order_receipt(self._extract_message(self._request(request, timeout_seconds)))
+            completed = threading.Event()
+            result: dict[str, Any] = {}
+            receipts: list[dict[str, Any]] = []
+            correlation = "xau-" + uuid.uuid4().hex
+            broker_id = self._field(request, "clientOrderId")
+            account_id = self._field(request, "ctidTraderAccountId")
+
+            def observe(envelope: Any, correlated: bool = False) -> None:
+                if completed.is_set():
+                    return
+                try:
+                    message = self._extract_message(envelope)
+                    order = self._field(message, "order")
+                    matches = (self._field(envelope, "clientMsgId") == correlation or
+                               (order is not None and self._field(order, "clientOrderId") == broker_id))
+                    if not correlated and not matches:
+                        return
+                    if self._field(message, "ctidTraderAccountId", account_id) != account_id:
+                        return
+                    receipt = self._order_receipt(message)
+                    if receipt not in receipts:
+                        receipts.append(receipt)
+                    if len(receipts) > 256:
+                        raise CTraderDemoSafetyError("too many order lifecycle events")
+                    if receipt.get("execution_type") in (2, 11) and not receipt.get("error_code"):
+                        return
+                    result.update(receipt)
+                    result["events"] = receipts.copy()
+                    completed.set()
+                except Exception:
+                    result.update(status="invalid_order_event", events=receipts.copy())
+                    completed.set()
+
+            def failed(_failure: Any) -> None:
+                if not completed.is_set():
+                    result.update(status="order_transport_failure", events=receipts.copy())
+                    completed.set()
+
+            def issue() -> None:
+                try:
+                    client.setMessageReceivedCallback(lambda _client, envelope: observe(envelope))
+                    if not self._service_started:
+                        client.startService()
+                        self._service_started = True
+                    client.send(request, clientMsgId=correlation,
+                                responseTimeoutInSeconds=timeout_seconds).addCallbacks(
+                                    lambda envelope: observe(envelope, correlated=True), failed)
+                except Exception as exc:
+                    failed(exc)
+
+            reactor = self._get_reactor()
+            self._ensure_reactor_running(reactor)
+            reactor.callFromThread(issue)
+            if not completed.wait(timeout_seconds):
+                result.update(status="order_timeout", events=receipts.copy())
+                completed.set()
+            # The callback ignores late events; recovery must reconcile them, never replay.
+            return result
+
     def _get_reactor(self) -> Any:
         if self._reactor is None:
             from twisted.internet import reactor
@@ -399,6 +469,15 @@ class CTraderDemoOpenApiTransport:
         position_id = self._field(position, "positionId") if position is not None else None
         if isinstance(order_id, int): receipt["order_id"] = order_id
         if isinstance(position_id, int): receipt["position_id"] = position_id
+        execution_type = self._field(message, "executionType")
+        if isinstance(execution_type, int): receipt["execution_type"] = execution_type
+        volume = self._field(order, "executedVolume")
+        if isinstance(volume, int): receipt["filled_volume"] = volume
+        client_id = self._field(order, "clientOrderId")
+        if isinstance(client_id, str) and client_id: receipt["broker_client_order_id"] = client_id
+        deal = self._field(message, "deal")
+        deal_id = self._field(deal, "dealId")
+        if isinstance(deal_id, int) and deal_id > 0: receipt["deal_id"] = deal_id
         return receipt
 
 
@@ -451,7 +530,7 @@ class InMemoryCTraderDemoStore:
         return True, None
 
     def finish(self, request_id: str, outcome: dict[str, Any]) -> None:
-        self.requests[request_id].update(status="completed", outcome=outcome)
+        self.requests[request_id].update(status="pending" if outcome.get("reason") == OUTCOME_UNKNOWN else "completed", outcome=outcome)
         self.audit("request_finished", {"request_id": request_id, "accepted": outcome["accepted"]})
 
     def request_records(self) -> dict[str, dict[str, Any]]:
@@ -535,7 +614,7 @@ class CockroachCTraderDemoStore:
 
     def finish(self, request_id: str, outcome: dict[str, Any]) -> None:
         with self.connect() as db:
-            db.execute("UPDATE ctrader_demo_requests SET status='completed',outcome_json=?,finished_at=? WHERE request_id=?", (_canonical_json(outcome), _now(), request_id))
+            db.execute("UPDATE ctrader_demo_requests SET status=?,outcome_json=?,finished_at=? WHERE request_id=?", ("pending" if outcome.get("reason") == OUTCOME_UNKNOWN else "completed", _canonical_json(outcome), _now(), request_id))
             self._audit(db, "request_finished", {"request_id": request_id, "accepted": outcome["accepted"]})
 
     def request_records(self) -> dict[str, dict[str, Any]]:
@@ -642,11 +721,20 @@ class CTraderDemoAdapter:
             self.store.stop("transport_failure")
         else:
             receipt = _safe_response(response)
-            if receipt.get("error_code"):
+            if receipt.get("error_code") and not any(
+                    event.get("filled_volume", 0) > 0 or event.get("execution_type") in (3, 11)
+                    for event in [receipt, *receipt.get("events", [])]):
                 outcome = {"accepted": False, "reason": BROKER_REJECTED, "request_id": order.request_id,
                            "response": receipt}
-            else:
+            elif (receipt.get("execution_type") == 3 and not receipt.get("error_code") and
+                  receipt.get("filled_volume") == order.volume and
+                  receipt.get("order_id", 0) > 0 and receipt.get("position_id", 0) > 0 and
+                  receipt.get("broker_client_order_id") == broker_client_order_id(order.request_id)):
                 outcome = {"accepted": True, "request_id": order.request_id, "response": receipt}
+            else:
+                outcome = {"accepted": False, "reason": OUTCOME_UNKNOWN, "request_id": order.request_id,
+                           "response": receipt}
+                self.store.stop("order_outcome_unknown")
         self.store.finish(order.request_id, outcome)
         return outcome
 
@@ -686,7 +774,8 @@ def _safe_response(response: Any) -> dict[str, Any]:
     """Persist a minimal non-secret receipt, not arbitrary transport objects."""
     if isinstance(response, dict):
         return {key: value for key, value in response.items()
-                if key in {"order_id", "position_id", "status", "error_code"}}
+                if key in {"order_id", "position_id", "status", "error_code", "execution_type",
+                           "filled_volume", "broker_client_order_id", "deal_id", "events"}}
     return {"status": type(response).__name__}
 
 

@@ -78,8 +78,9 @@ is unchanged; changing this limit does not clear a persistent stop.
 The six remote-review handoff tasks are complete. See
 [the local audit](docs/local-handoff-audit-2026-09-24.md) for the 388-test result,
 timezone and unchanged operator-stop verification, deployment inventory, measured
-Bits latency and offline SDK/official-documentation findings. Broker ID mapping (#14) is implemented; issues #15–#16 track
-remaining order-lifecycle and position-reconciliation blockers before demo execution. No broker calls or service activation were performed. Preserve
+Bits latency and offline SDK/official-documentation findings. Broker ID mapping (#14) and order lifecycle (#15) are implemented; issue #16
+tracks position reconciliation before demo execution. Unknown order outcomes stay
+pending and require reconciliation; acceptance alone is never a successful fill. No broker calls or service activation were performed. Preserve
 the paused deployment and do not treat audit completion as permission to resume.
 
 Operator-only. Never do these autonomously, and never implement them without explicit operator approval:
