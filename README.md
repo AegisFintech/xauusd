@@ -199,7 +199,7 @@ An unscoped `pytest` from the repo root hangs while collecting `reports/` and `d
 
 ## Demo Automation Service
 
-The legacy research dashboard, coordinator, and timers have been retired and their templates removed. The only deployment template is `deploy/systemd/xauusd-demo-automation.service`.
+Deployment templates under `deploy/systemd/` cover the Bits agent, live view, data update, state backup, and optional demo automation. Legacy host-only units remain installed but disabled; see [the local handoff audit](docs/local-handoff-audit-2026-09-24.md) for the inventory. The demo template grants write access to `reports/` and the default SQLite `state/` directory. A custom database path requires an explicit unit-path review before deployment.
 
 The service is deliberately disabled by default. It exits without broker activity unless `.env` sets `CTRADER_AUTOMATION_ENABLED=true`; it requires a successful demo reconciliation, fresh M1 data, a confirmed-breakout transition, and all paper risk gates. A persisted paper or demo stop makes it record `resume_refused` and exit cleanly on every restart until the matching explicit start. Install and enable it only after a validated demo canary:
 
