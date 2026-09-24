@@ -83,11 +83,12 @@ broker IDs (#14), order lifecycle (#15), and position reconciliation (#16) are n
 implemented with offline tests. Unknown outcomes remain pending; the live-position
 snapshot cannot establish historical fills. Missing history, manual exposure, and
 paper/broker mismatches keep execution stopped. Production reconciliation reads
-paper exposure using the configured volume conversion. No broker calls or service
-activation were performed. Preserve the paused deployment; these fixes are not
-permission to resume.
+paper exposure using the configured volume conversion. The fixes were validated offline. On 2026-09-24 the operator explicitly requested
+resumption of the existing Datadog paper deployment. That authorizes the agent,
+live view, demo-host data refresh and backup timers; cTrader order execution remains
+disabled by paper-only mode. Historical pause notes describe the earlier audit.
 
 Operator-only. Never do these autonomously, and never implement them without explicit operator approval:
-- Resuming the paused deployment, reconciling its timed-out job (`bits-recover`), `paper start`, `demo-automation start`, `state reset`, `state restore`, and enabling or restarting units.
+- Future deployment recovery, reconciling a timed-out job (`bits-recover`), `paper start`, `demo-automation start`, `state reset`, `state restore`, and enabling or restarting units.
 - Changing the Bits shell permission model, such as running it as an unprivileged user or restoring systemd hardening.
 - Changing risk-gate semantics. Examples: letting position-reducing trades through the daily-loss, drawdown or trade-count gates, or moving the daily-loss day from UTC midnight to the New York session.

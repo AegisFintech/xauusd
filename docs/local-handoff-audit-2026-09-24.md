@@ -189,3 +189,21 @@ passed. All xauusd services/timers remain inactive and disabled. Paper state is
 stopped with reason `operator`, position zero, equity 100000. Generated package
 metadata was also removed from Git tracking while preserving the local files.
 History-backed recovery is tracked in GitHub issue #19.
+
+## Operator-authorized paper resumption — 2026-09-24
+
+The operator requested resumption after the fixes. The prior RSI job was verified
+terminated (exit -9), with no report and no paper position; its script contained
+research and memory updates, not order submission. A verified state backup was
+created at `backups/local-state/20260924T070027Z`, then `bits-recover` acknowledged
+the old cycle without replay. Paper was explicitly started.
+
+Agent, live view, data-update timer and state-backup timer are enabled and active.
+Installed units match their repository templates. Fresh data refresh succeeded;
+the health endpoint reports no alerts and database integrity is OK. New run
+`agent_5e120ca84ef0` received a Datadog reply and completed shell job
+`8f1d3246a91a46d88b4d0a45407c33ce` with exit 0 before feeding results back.
+`CTRADER_PAPER_ONLY=true` remains in force; the cTrader order service is inactive.
+The public URL returned Cloudflare HTTP 403 to the unauthenticated server probe;
+the local dashboard API is responding. Browser access through Cloudflare was not
+verified. Full suite before resumption: 415 passed, one existing warning.
