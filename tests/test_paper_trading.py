@@ -5,7 +5,7 @@ from xauusd.paper_trading import (ACCEPTED, BAR_INTERVAL_SECONDS, DAILY_LOSS_LIM
                                   DEFAULT_MAX_MARKET_DATA_AGE_SECONDS, KILL_SWITCH, MARKET_CLOSED,
                                   MAX_POSITION, STALE_MARKET_DATA, InMemoryPaperTradingStore,
                                   PaperDecision, PaperRiskConfig, PaperTrading, market_data_age_seconds,
-                                  market_is_open)
+                                  market_is_open, restart_policy)
 
 
 NOW = datetime(2026, 9, 17, 12, tzinfo=timezone.utc)
@@ -112,6 +112,54 @@ def test_market_is_open_session_matrix():
         assert market_is_open(moment) is expected, f"{moment}: expected {expected}"
 
 
+def utc(year, month, day, hour, minute=0):
+    return datetime(year, month, day, hour, minute, tzinfo=timezone.utc)
+
+
+def test_market_is_open_follows_the_new_york_close_in_us_standard_time():
+    # From 2026-11-01 to 2027-03-14 New York is UTC-5, so the 17:00 New York close and
+    # break move to 22:00-23:00 UTC; a fixed 21:00-22:00 UTC window would be wrong both ways.
+    cases = [
+        (utc(2027, 1, 13, 21, 30), True),   # Wednesday 16:30 New York: still trading
+        (utc(2027, 1, 13, 22, 0), False),   # Wednesday 17:00 New York: daily break
+        (utc(2027, 1, 13, 22, 59), False),  # Wednesday 17:59 New York: daily break
+        (utc(2027, 1, 13, 23, 0), True),    # Wednesday 18:00 New York: reopened
+        (utc(2027, 1, 15, 21, 59), True),   # Friday 16:59 New York: before the weekly close
+        (utc(2027, 1, 15, 22, 0), False),   # Friday 17:00 New York: weekly close
+        (utc(2027, 1, 16, 2, 0), False),    # Friday 21:00 New York, already Saturday in UTC
+        (utc(2027, 1, 17, 22, 30), False),  # Sunday 17:30 New York: before the weekly open
+        (utc(2027, 1, 17, 23, 0), True),    # Sunday 18:00 New York: weekly open
+        (utc(2027, 1, 18, 3, 0), True),     # Sunday 22:00 New York, already Monday in UTC
+    ]
+    for moment, expected in cases:
+        assert market_is_open(moment) is expected, f"{moment}: expected {expected}"
+
+
+def test_market_is_open_across_both_us_daylight_saving_transitions():
+    cases = [
+        (utc(2026, 10, 30, 20, 59), True),   # last daylight-time Friday: open until 21:00 UTC
+        (utc(2026, 10, 30, 21, 0), False),
+        (utc(2026, 11, 1, 22, 0), False),    # clocks fell back: Sunday open moves to 23:00 UTC
+        (utc(2026, 11, 1, 23, 0), True),
+        (utc(2027, 3, 12, 21, 30), True),    # last standard-time Friday: open until 22:00 UTC
+        (utc(2027, 3, 12, 22, 0), False),
+        (utc(2027, 3, 14, 21, 59), False),   # clocks sprang forward: Sunday open back at 22:00 UTC
+        (utc(2027, 3, 14, 22, 0), True),
+        (utc(2027, 3, 17, 21, 30), False),   # the break is 21:00-22:00 UTC again
+    ]
+    for moment, expected in cases:
+        assert market_is_open(moment) is expected, f"{moment}: expected {expected}"
+
+
+def test_gate_accepts_the_winter_hour_after_21_utc_and_refuses_the_real_break():
+    trading = PaperTrading(InMemoryPaperTradingStore()); trading.start("test")
+    trading_hour = utc(2027, 1, 13, 21, 30)   # 16:30 New York
+    break_hour = utc(2027, 1, 13, 22, 30)     # 17:30 New York
+    fresh = lambda identifier, moment: PaperDecision(identifier, "XAUUSD", "BUY", 0.1, 4000.0, moment)
+    assert trading.evaluate(fresh("winter-open", trading_hour), trading_hour)["reason"] == ACCEPTED
+    assert trading.evaluate(fresh("winter-break", break_hour), break_hour)["reason"] == MARKET_CLOSED
+
+
 def test_gate_returns_market_closed_outside_trading_hours():
     trading = PaperTrading(InMemoryPaperTradingStore()); trading.start("test")
     saturday = xtime(19, 12, 0)
@@ -173,10 +221,34 @@ def test_maybe_resume_refuses_corrupt_state():
     assert result["kill_switch_reason"] == "corrupt_state"
 
 
-def test_maybe_resume_continues_after_benign_stop_reason():
+@pytest.mark.parametrize("reason", [
+    "maintenance",                    # custom `paper stop --reason`
+    "agent_continuous_paper_loop",    # even the agent's own start reason, once used to stop
+    "broker_execution_failed",        # coordinator after a rejected or unknown broker outcome
+    "max_consecutive_failures",       # demo automation loop
+    "startup_reconciliation_failed",  # demo automation start-up
+    "transport_failure",
+    "risk_limit", "recovery_failed", "missing_credentials", "unknown_account_type",
+])
+def test_maybe_resume_preserves_every_persisted_stop_except_fresh_state(reason):
     store = InMemoryPaperTradingStore()
     trading = PaperTrading(store); trading.start("agent_continuous_paper_loop")
-    trading.stop("agent_continuous_paper_loop")
+    trading.stop(reason)
     result = trading.maybe_resume("agent_continuous_paper_loop")
-    assert result["resumed"] is True
+    assert result["resumed"] is False
+    assert result["blocked"] is True
+    assert result["kill_switch_reason"] == reason
+    assert trading.state()["stopped"] is True
+    assert trading.state()["kill_switch_reason"] == reason
+    trading.start("operator investigated")  # the explicit override still works
     assert trading.state()["stopped"] is False
+
+
+def test_restart_policy_is_an_allowlist_that_fails_closed():
+    assert restart_policy({"stopped": False, "kill_switch_reason": "operator_resume"}) == "running"
+    assert restart_policy({"stopped": True, "kill_switch_reason": "missing_state"}) == "resume"
+    assert restart_policy({"stopped": True, "kill_switch_reason": "a_reason_added_later"}) == "refuse"
+    assert restart_policy({"stopped": True, "kill_switch_reason": None}) == "refuse"
+    # Without an explicit boolean the state cannot prove it is running or fresh.
+    assert restart_policy({"kill_switch_reason": "missing_state"}) == "refuse"
+    assert restart_policy({"stopped": None, "kill_switch_reason": "missing_state"}) == "refuse"

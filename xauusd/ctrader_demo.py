@@ -13,6 +13,10 @@ from .ctrader_auth import DEMO_HOST, demo_accounts, is_error, resolve_symbol
 
 KILL_SWITCH = "KILL_SWITCH"
 DUPLICATE_REQUEST = "DUPLICATE_REQUEST"
+# The broker answered the order with an error: nothing was executed.
+BROKER_REJECTED = "BROKER_REJECTED"
+# The transport failed or timed out after sending: the order may or may not have executed.
+OUTCOME_UNKNOWN = "OUTCOME_UNKNOWN"
 
 
 class CTraderDemoSafetyError(RuntimeError):
@@ -369,6 +373,8 @@ class CTraderDemoOpenApiTransport:
         message = self._extract_message(response)
         if request_type == "ProtoOAReconcileReq":
             assert self._account is not None
+            # An error reply must fail reconciliation, never pass as an empty (clean) broker state.
+            self._raise_for_error(message, "reconcile")
             outcomes = {}
             for order in self._values(message, "order"):
                 request_id = self._field(order, "clientOrderId")
@@ -383,6 +389,10 @@ class CTraderDemoOpenApiTransport:
         order = self._field(message, "order", message)
         position = self._field(message, "position", None)
         receipt = {"status": type(message).__name__}
+        error = self._error_fields(message)
+        if error is not None:
+            # Order errors arrive as ordinary reply messages, not transport failures.
+            receipt["error_code"] = error[0]
         order_id = self._field(order, "orderId")
         position_id = self._field(position, "positionId") if position is not None else None
         if isinstance(order_id, int): receipt["order_id"] = order_id
@@ -566,6 +576,10 @@ class CTraderDemoAdapter:
             raise ValueError("stop reason is required")
         self.store.stop(reason)
 
+    def state(self) -> dict[str, Any]:
+        """Persisted execution kill switch, consulted by the shared restart policy."""
+        return self.store.state()
+
     def reconcile_after_restart(self) -> bool:
         """Verify broker account identity before an operator may start execution."""
         try:
@@ -597,10 +611,20 @@ class CTraderDemoAdapter:
             return prior or {"accepted": False, "reason": DUPLICATE_REQUEST, "request_id": order.request_id}
         try:
             response = self.transport.send(build_new_order_request(self.account, order), self.timeout_seconds)
-            outcome = {"accepted": True, "request_id": order.request_id, "response": _safe_response(response)}
         except Exception as exc:
-            outcome = {"accepted": False, "reason": "TRANSPORT_FAILURE", "request_id": order.request_id, "error_type": type(exc).__name__}
+            # The order may have reached the broker, so this is not a rejection. Stop with a
+            # reason the restart policy never auto-resumes: an operator must check broker
+            # exposure before an explicit `demo-automation start`.
+            outcome = {"accepted": False, "reason": OUTCOME_UNKNOWN, "request_id": order.request_id,
+                       "error_type": type(exc).__name__}
             self.store.stop("transport_failure")
+        else:
+            receipt = _safe_response(response)
+            if receipt.get("error_code"):
+                outcome = {"accepted": False, "reason": BROKER_REJECTED, "request_id": order.request_id,
+                           "response": receipt}
+            else:
+                outcome = {"accepted": True, "request_id": order.request_id, "response": receipt}
         self.store.finish(order.request_id, outcome)
         return outcome
 
@@ -631,7 +655,8 @@ def build_reconcile_request(account_id: int) -> Any:
 def _safe_response(response: Any) -> dict[str, Any]:
     """Persist a minimal non-secret receipt, not arbitrary transport objects."""
     if isinstance(response, dict):
-        return {key: value for key, value in response.items() if key in {"order_id", "position_id", "status"}}
+        return {key: value for key, value in response.items()
+                if key in {"order_id", "position_id", "status", "error_code"}}
     return {"status": type(response).__name__}
 
 

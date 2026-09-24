@@ -522,7 +522,8 @@ class ContinuousAgentRunner:
         market = self.source.read()
         if not market_is_open(now_utc):
             # Deterministic gate: never spend a planner call, tokens, or a data
-            # refresh while the XAUUSD session is closed (weekends, 21:00-22:00 UTC).
+            # refresh while the XAUUSD session is closed (weekends and the daily
+            # 17:00-18:00 New York break; see paper_trading.market_is_open).
             self.consecutive_errors = 0
             self._stale_ticks = 0
             self.transcript.append(self.run_id, tick, "tick_start", {

@@ -1,3 +1,4 @@
+import json
 import sys
 from datetime import datetime, timezone
 
@@ -5,6 +6,89 @@ import pytest
 
 from xauusd import cli
 from xauusd.paper_trading import InMemoryPaperTradingStore, PaperRiskConfig, PaperTrading
+
+
+def no_broker():
+    raise AssertionError("network setup")
+
+
+class DemoTransport:
+    def __init__(self, is_demo=True):
+        self.is_demo = is_demo
+
+    def send(self, request, timeout_seconds):
+        return {"account_id": 7, "is_demo": self.is_demo, "symbol": "XAUUSD", "symbol_id": 99}
+
+
+def stopped_demo_adapter(monkeypatch, reason, is_demo=True):
+    from xauusd.ctrader_demo import CTraderDemoAccount, CTraderDemoAdapter, InMemoryCTraderDemoStore
+    monkeypatch.setenv("CTRADER_DEMO_ONLY", "true")
+    adapter = CTraderDemoAdapter(CTraderDemoAccount(7, 99), InMemoryCTraderDemoStore(), DemoTransport(is_demo))
+    adapter.stop(reason)
+    return adapter
+
+
+def test_demo_automation_start_requires_a_reason(monkeypatch):
+    monkeypatch.setenv("CTRADER_AUTOMATION_ENABLED", "true")
+    monkeypatch.setattr(cli, "_ctrader_demo_adapter", no_broker)
+    monkeypatch.setattr(sys, "argv", ["xauusd", "demo-automation", "start"])
+
+    with pytest.raises(SystemExit):
+        cli.main()
+
+
+def test_demo_automation_start_reconciles_then_clears_only_the_demo_switch(monkeypatch, capsys):
+    monkeypatch.setenv("CTRADER_AUTOMATION_ENABLED", "true")
+    monkeypatch.delenv("CTRADER_PAPER_ONLY", raising=False)
+    adapter = stopped_demo_adapter(monkeypatch, "transport_failure")
+    monkeypatch.setattr(cli, "_ctrader_demo_adapter", lambda: adapter)
+    monkeypatch.setattr(cli, "_paper_from_env", lambda: (_ for _ in ()).throw(AssertionError("paper touched")))
+    monkeypatch.setattr(sys, "argv", ["xauusd", "demo-automation", "start", "--reason", "broker exposure checked"])
+
+    cli.main()
+
+    assert json.loads(capsys.readouterr().out) == {"state": "demo_started", "demo_started": True, "stopped": False,
+                                                   "kill_switch_reason": "broker exposure checked"}
+    assert adapter.state()["stopped"] is False
+
+
+def test_demo_automation_start_keeps_the_switch_stopped_when_reconciliation_fails(monkeypatch):
+    monkeypatch.setenv("CTRADER_AUTOMATION_ENABLED", "true")
+    monkeypatch.delenv("CTRADER_PAPER_ONLY", raising=False)
+    adapter = stopped_demo_adapter(monkeypatch, "transport_failure", is_demo=False)
+    monkeypatch.setattr(cli, "_ctrader_demo_adapter", lambda: adapter)
+
+    result = cli.demo_automation("start", "broker exposure checked")
+
+    assert result["state"] == "refused" and result["demo_started"] is False
+    assert adapter.state()["stopped"] is True
+    assert adapter.state()["kill_switch_reason"] == "reconciliation_failed"
+
+
+def test_demo_automation_once_reports_a_refused_restart(tmp_path, monkeypatch, capsys):
+    from xauusd.demo_execution import PaperToCTraderDemoCoordinator
+    from xauusd.demo_runner import DemoAutomationRunner
+    monkeypatch.setenv("CTRADER_AUTOMATION_ENABLED", "true")
+    monkeypatch.setenv("CTRADER_AUTOMATION_STATUS_PATH", str(tmp_path / "status.json"))
+    paper = PaperTrading(InMemoryPaperTradingStore(), PaperRiskConfig())
+    paper.stop("maintenance")
+    monkeypatch.setattr(cli, "_demo_automation_runner", lambda config: DemoAutomationRunner(
+        PaperToCTraderDemoCoordinator(paper, paper_only=True), None, None, config))
+    monkeypatch.setattr(sys, "argv", ["xauusd", "demo-automation", "once"])
+
+    cli.main()
+
+    printed = json.loads(capsys.readouterr().out)
+    assert (printed["state"], printed["kill_switch"], printed["kill_switch_reason"]) == ("resume_refused", "paper", "maintenance")
+    assert paper.state()["stopped"] is True
+
+
+def test_demo_automation_start_in_paper_only_mode_contacts_no_broker(monkeypatch):
+    monkeypatch.setenv("CTRADER_AUTOMATION_ENABLED", "true")
+    monkeypatch.setenv("CTRADER_PAPER_ONLY", "true")
+    monkeypatch.setattr(cli, "_ctrader_demo_adapter", no_broker)
+
+    assert cli.demo_automation("start", "operator")["state"] == "paper_only"
 
 
 def test_demo_automation_disabled_returns_status_without_constructing_clients(monkeypatch, capsys):

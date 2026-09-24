@@ -12,7 +12,9 @@ import time
 from typing import Any, Callable, Protocol
 
 from .demo_execution import NormalizedDecision, PaperToCTraderDemoCoordinator
-from .paper_trading import DEFAULT_MAX_MARKET_DATA_AGE_SECONDS, market_data_age_seconds
+from .paper_trading import DEFAULT_MAX_MARKET_DATA_AGE_SECONDS, market_data_age_seconds, restart_policy
+
+AUTOMATION_START_REASON = "explicit demo automation enabled"
 
 
 @dataclass(frozen=True)
@@ -68,6 +70,7 @@ class DemoLifecycle(Protocol):
     def start(self, reason: str) -> None: ...
     def stop(self, reason: str) -> None: ...
     def reconcile_after_restart(self) -> bool: ...
+    def state(self) -> dict[str, Any]: ...
 
 
 class DemoAutomationRunner:
@@ -86,6 +89,7 @@ class DemoAutomationRunner:
         self.sleeper = sleeper
         self.running = False
         self.consecutive_failures = 0
+        self.last_record: dict[str, Any] | None = None
 
     @property
     def demo_adapter(self) -> DemoLifecycle:
@@ -96,23 +100,54 @@ class DemoAutomationRunner:
         return self.coordinator.paper_only
 
     def start(self) -> bool:
-        """Reconcile first, then make the explicitly enabled paper/demo pair runnable."""
+        """Reconcile first, then resume only the kill switches the restart policy allows.
+
+        A stop left by an operator, a risk limit, a broker or reconciliation failure, or corrupt
+        state survives restarts: the runner records ``resume_refused`` and changes neither kill
+        switch. ``paper start`` and ``demo-automation start`` are the explicit overrides.
+        """
         if not self.config.enabled:
             self._record("disabled")
             return False
         try:
-            if not self.paper_only:
-                if not self.demo_adapter.reconcile_after_restart():
-                    raise RuntimeError("startup_reconciliation_failed")
-                self.demo_adapter.start("explicit demo automation enabled")
-            self.coordinator.paper_trading.start("explicit demo automation enabled")
+            refused = self._resume_kill_switches()
         except Exception:
             self._stop("startup_reconciliation_failed")
+            return False
+        if refused is not None:
+            kill_switch, reason = refused
+            self.running = False
+            self._record("resume_refused", kill_switch=kill_switch, kill_switch_reason=reason)
             return False
         self.running = True
         self.consecutive_failures = 0
         self._record("running")
         return True
+
+    def _resume_kill_switches(self) -> tuple[str, Any] | None:
+        """Apply the shared restart policy; return ``(switch, reason)`` when a stop must hold.
+
+        Both switches are checked before any broker contact, so a refusal neither reconciles
+        nor overwrites the persisted reason. Only a fresh demo switch is started, and only after
+        a successful reconciliation; one that was already running stays running.
+        """
+        paper = self.coordinator.paper_trading
+        paper_state = paper.state()
+        if restart_policy(paper_state) == "refuse":
+            return "paper", paper_state.get("kill_switch_reason")
+        if not self.paper_only:
+            demo_state = self.demo_adapter.state()
+            demo_decision = restart_policy(demo_state)
+            if demo_decision == "refuse":
+                return "demo", demo_state.get("kill_switch_reason")
+            if not self.demo_adapter.reconcile_after_restart():
+                raise RuntimeError("startup_reconciliation_failed")
+            if demo_decision == "resume":
+                self.demo_adapter.start(AUTOMATION_START_REASON)
+        resumed = paper.maybe_resume(AUTOMATION_START_REASON)
+        if not resumed["resumed"]:
+            return "paper", resumed["kill_switch_reason"]
+        return None
 
     def run_cycle(self) -> dict[str, Any]:
         if not self.running:
@@ -179,8 +214,9 @@ class DemoAutomationRunner:
 
     def _record(self, state: str, **details: Any) -> dict[str, Any]:
         status = {"state": state, "recorded_at": self._now().isoformat(), **self.status(), **details}
+        self.last_record = status
         self._write_status(status)
-        if state in {"stopped", "cycle_failure"} and self.alert_sink:
+        if state in {"stopped", "cycle_failure", "resume_refused"} and self.alert_sink:
             try:
                 self.alert_sink(status)
             except Exception:

@@ -6,7 +6,7 @@ from xauusd.demo_execution import (CTraderVolumeConversion, CTraderVolumePolicy,
                                    NormalizedDecision, PaperToCTraderDemoCoordinator)
 from xauusd.ctrader_demo import (CTraderDemoAccount, CTraderDemoAdapter,
                                  CTraderSymbolMetadata, InMemoryCTraderDemoStore)
-from xauusd.paper_trading import InMemoryPaperTradingStore, PaperTrading
+from xauusd.paper_trading import InMemoryPaperTradingStore, PaperTrading, restart_policy
 
 
 NOW = datetime(2026, 9, 17, 12, tzinfo=timezone.utc)
@@ -115,6 +115,36 @@ def test_broker_error_stops_paper_and_demo_kill_switches():
     assert result["demo"]["reason"] == "BROKER_ERROR"
     assert paper.state()["stopped"]
     assert adapter.stop_reasons == ["broker_execution_failed"]
+
+
+class SequencedTransport:
+    """Replies in call order: the reconciliation first, then the order."""
+    def __init__(self, *responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def send(self, request, timeout_seconds):
+        self.calls.append(request)
+        return self.responses.pop(0)
+
+
+def test_broker_error_reply_stops_both_switches_and_restart_keeps_them_stopped(monkeypatch):
+    monkeypatch.setenv("CTRADER_DEMO_ONLY", "true")
+    store = InMemoryCTraderDemoStore()
+    transport = SequencedTransport({"account_id": 7, "is_demo": True, "symbol": "XAUUSD", "symbol_id": 99},
+                                   {"status": "ProtoOAOrderErrorEvent", "error_code": "MARKET_CLOSED"})
+    adapter = CTraderDemoAdapter(CTraderDemoAccount(7, 99), store, transport)
+    assert adapter.reconcile_after_restart()
+    adapter.start("operator approved")
+    instance, paper = coordinator(adapter)
+
+    result = instance.execute(decision(), 4000.0, NOW)
+
+    assert result["accepted"] is False  # previously any reply, even an error, counted as accepted
+    assert result["demo"]["reason"] == "BROKER_REJECTED"
+    assert paper.state()["kill_switch_reason"] == "broker_execution_failed"
+    assert paper.maybe_resume("unattended restart")["resumed"] is False
+    assert restart_policy(store.state()) == "refuse"
 
 
 def test_adapter_store_audits_the_broker_outcome(monkeypatch):

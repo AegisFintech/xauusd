@@ -35,12 +35,12 @@ The cTrader demo adapter requires all of the following before it can send a requ
 - `CTRADER_DEMO_ONLY=true`
 - cTrader host exactly `demo.ctraderapi.com`
 - verified demo account metadata and the configured XAUUSD symbol
-- successful account and pending-order reconciliation after restart, followed by an explicit operator start
+- successful account and pending-order reconciliation after restart; only a fresh (never-stopped) execution switch starts automatically, every persisted stop needs `demo-automation start --reason ...`
 - fresh market data and a healthy state store
 - a clear persistent kill switch
 - deterministic risk and idempotency checks
 
-On uncertainty, restart recovery failure, data staleness, or API failure, the system will stop and alert rather than act.
+On uncertainty, restart recovery failure, data staleness, or API failure, the system will stop and alert rather than act. A broker error reply is recorded as `BROKER_REJECTED`. A transport failure or timeout after sending is recorded as `OUTCOME_UNKNOWN`, because the order may still have executed. Either one stops paper (`broker_execution_failed`) and demo execution, and neither switch resumes on its own. Check the account's broker positions before restarting.
 
 ## Configuration
 
@@ -59,9 +59,12 @@ path, protocol, recovery, and deployment checks. The ready-to-paste
 .venv/bin/python -m xauusd.cli demo-automation status
 .venv/bin/python -m xauusd.cli demo-automation once
 .venv/bin/python -m xauusd.cli demo-automation run
+.venv/bin/python -m xauusd.cli demo-automation start --reason 'broker exposure checked'  # explicit override
 ```
 
 `once` and `run` do nothing beyond returning disabled status unless `CTRADER_AUTOMATION_ENABLED=true`. When enabled, they require `CTRADER_DEMO_ONLY=true`, the demo cTrader settings, `DATABASE_URL`, and a positive integer `CTRADER_VOLUME_PER_PAPER_UNIT`. Set paper risk limits and the canary quantity explicitly in `.env`; `status` never opens a database or broker connection.
+
+On start, `once` and `run` apply the same restart policy as the agent to both kill switches. They reconcile and then start only a fresh account. If either the paper or the demo execution switch holds a persisted stop (operator, risk limit, broker/transport/reconciliation failure, corrupt state), the runner does not reconcile or clear anything. It records `resume_refused` with the blocking switch and reason in `reports/demo_runner_status.json` and exits. Clear the paper switch with `paper start` and the demo execution switch with `demo-automation start --reason ...`, which reconciles first and changes nothing if reconciliation fails.
 
 A broker-free **paper-only** stage runs the deterministic paper pipeline without any cTrader credentials or volumes: set `CTRADER_PAPER_ONLY=true` and `CTRADER_AUTOMATION_ENABLED=true` (the cTrader demo settings become unnecessary). It exercises the same paper risk, idempotency, and decision records, records `PAPER_ONLY_MODE` for the demo leg, and never touches a kill switch beyond the paper lifecycle.
 
@@ -101,7 +104,7 @@ The paper lifecycle and local state store have their own explicit commands:
 .venv/bin/python -m xauusd.cli state restore --backup <dir|state.db.gz>  # verified restore
 ```
 
-`paper stop` persists a kill switch across restarts, and the agent refuses to auto-resume it; `paper start` is the explicit override. `state backup` snapshots the live SQLite file (verifies it with `quick_check`, gzips it, records a sha256 in a manifest), and `state restore` refuses any archive whose checksum or database integrity does not verify. A daily `xauusd-state-backup.timer` (midnight + randomized delay) keeps one verified snapshot per day under `backups/local-state`.
+`paper stop` persists a kill switch across restarts, whatever `--reason` it is given, and neither the agent nor `demo-automation` auto-resumes it; `paper start` is the explicit override. `state backup` snapshots the live SQLite file (verifies it with `quick_check`, gzips it, records a sha256 in a manifest), and `state restore` refuses any archive whose checksum or database integrity does not verify. A daily `xauusd-state-backup.timer` (midnight + randomized delay) keeps one verified snapshot per day under `backups/local-state`.
 
 The Bits loop persists its workflow instance, cycle IDs, shell jobs, and results
 in the selected state database. It polls an outstanding workflow after restart
@@ -136,11 +139,11 @@ open positions cap requested review delays at 60 seconds, otherwise at one hour.
 
 Paper account and transcript state live in a **local SQLite file** (`STATE_DB_PATH`, default `state/xauusd_local.db`) by default, so the running agent needs no external database or `DATABASE_URL`. Set `XAUUSD_STATE_BACKEND=cockroach` to return to the Cockroach-backed stores. The view serves the same transcript and paper endpoints from this store.
 
-The view listens on `AGENT_VIEW_PORT` (default `8100`). It shows the transcript newest-first with the AI's plain-English reasons, a paper-account strip (equity, position, day/realized P&L, drawdown, recent fills from `/api/paper`), and a recent-runs line with per-run tick counts and duration. Times render in GMT+8, labelled `+08:00`; that is display-only — persisted timestamps, bar indices, and the market-hours gate stay UTC. Each `agent_<uuid12>` is one process start: a graceful SIGTERM marks the old run stopped, so a restart cadence legitimately produces many short "runs" — this is one process, not many agents.
+The view listens on `AGENT_VIEW_PORT` (default `8100`). It shows the transcript newest-first with the AI's plain-English reasons, a paper-account strip (equity, position, day/realized P&L, drawdown, recent fills from `/api/paper`), and a recent-runs line with per-run tick counts and duration. Times render in GMT+8, labelled `+08:00`; that is display-only — persisted timestamps and bar indices stay UTC, and the market-hours gate compares instants against the New York session. Each `agent_<uuid12>` is one process start: a graceful SIGTERM marks the old run stopped, so a restart cadence legitimately produces many short "runs" — this is one process, not many agents.
 
-`agent run` and `agent once` are inert unless `CTRADER_AUTOMATION_ENABLED=true`. On every launch the agent verifies database integrity and then consults the paper kill switch: it auto-resumes a clean paper account, but a stop left behind by `paper stop`, corrupt state, missing credentials, an unknown account type, or a failed recovery stays stopped (fail closed) until `paper start`. Each tick also writes a heartbeat to `AGENT_STATUS_FILE` (default `reports/agent_status.json`); the live view's `/api/health` turns that heartbeat, stall/error counts, consecutive ticks that never reached the planner, paper-stop state, and data-update failures into a healthy/degraded status with `alerts`.
+`agent run` and `agent once` are inert unless `CTRADER_AUTOMATION_ENABLED=true`. On every launch the agent verifies database integrity and then consults the paper kill switch. It continues a running account and starts a fresh one, but any persisted stop stays stopped (fail closed) until `paper start`. That covers `paper stop` with any reason, corrupt state, missing credentials, an unknown account type, a failed recovery, a risk limit, and a broker failure. Each tick also writes a heartbeat to `AGENT_STATUS_FILE` (default `reports/agent_status.json`); the live view's `/api/health` turns that heartbeat, stall/error counts, consecutive ticks that never reached the planner, paper-stop state, and data-update failures into a healthy/degraded status with `alerts`.
 
-Each tick records market `fresh`/`age_seconds`/`market_open` on `tick_start`, so a stale or closed-market feed is always visible in the transcript as "no trade". `age_seconds` counts from when the newest M1 bar **closed**, not from its open timestamp: persisted bars are stamped at bar open, so an open-based age is intrinsically 60-120s and any gate tighter than that can never pass — the loop would report `stale_data` forever while the feed looked healthy. `AGENT_MAX_MARKET_DATA_AGE_SECONDS`, `PAPER_MAX_MARKET_DATA_AGE_SECONDS`, and `CTRADER_AUTOMATION_MAX_MARKET_DATA_AGE_SECONDS` share that close-based semantic (default 180s, three bars); keep them consistent or proposals are refused as `STALE_MARKET_DATA`. **When XAUUSD is not trading (weekends, the 21:00-22:00 UTC daily break), the deterministic paper gate refuses every proposal with `MARKET_CLOSED` — the agent never trades a closed market.** Optionally set `AGENT_DATA_REFRESH_ENABLED=true` to let a stale tick refresh the local M1 parquet in-loop before the planner reasons (bounded by `AGENT_DATA_REFRESH_*`; still gated by the paper freshness and market-hours checks).
+Each tick records market `fresh`/`age_seconds`/`market_open` on `tick_start`, so a stale or closed-market feed is always visible in the transcript as "no trade". `age_seconds` counts from when the newest M1 bar **closed**, not from its open timestamp: persisted bars are stamped at bar open, so an open-based age is intrinsically 60-120s and any gate tighter than that can never pass — the loop would report `stale_data` forever while the feed looked healthy. `AGENT_MAX_MARKET_DATA_AGE_SECONDS`, `PAPER_MAX_MARKET_DATA_AGE_SECONDS`, and `CTRADER_AUTOMATION_MAX_MARKET_DATA_AGE_SECONDS` share that close-based semantic (default 180s, three bars); keep them consistent or proposals are refused as `STALE_MARKET_DATA`. **When XAUUSD is not trading (weekends, and the daily 17:00-18:00 New York break), the deterministic paper gate refuses every proposal with `MARKET_CLOSED` — the agent never trades a closed market.** The session follows New York time, so in UTC the break is 21:00-22:00 during US daylight time and 22:00-23:00 in winter (first Sunday of November to second Sunday of March), and the weekly close and open move by the same hour. Exchange holidays are not modelled; the freshness gates refuse trading when no new bars arrive. Optionally set `AGENT_DATA_REFRESH_ENABLED=true` to let a stale tick refresh the local M1 parquet in-loop before the planner reasons (bounded by `AGENT_DATA_REFRESH_*`; still gated by the paper freshness and market-hours checks).
 
 To run the agent as a persistent background service (paper-only, live view on `http://127.0.0.1:8100/`):
 
@@ -198,7 +201,7 @@ An unscoped `pytest` from the repo root hangs while collecting `reports/` and `d
 
 The legacy research dashboard, coordinator, and timers have been retired and their templates removed. The only deployment template is `deploy/systemd/xauusd-demo-automation.service`.
 
-The service is deliberately disabled by default. It exits without broker activity unless `.env` sets `CTRADER_AUTOMATION_ENABLED=true`; it requires a successful demo reconciliation, fresh M1 data, a confirmed-breakout transition, and all paper risk gates. Install and enable it only after a validated demo canary:
+The service is deliberately disabled by default. It exits without broker activity unless `.env` sets `CTRADER_AUTOMATION_ENABLED=true`; it requires a successful demo reconciliation, fresh M1 data, a confirmed-breakout transition, and all paper risk gates. A persisted paper or demo stop makes it record `resume_refused` and exit cleanly on every restart until the matching explicit start. Install and enable it only after a validated demo canary:
 
 ```bash
 sudo cp deploy/systemd/xauusd-demo-automation.service /etc/systemd/system/

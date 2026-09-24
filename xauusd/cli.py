@@ -114,11 +114,29 @@ def _paper_to_demo_coordinator(paper: PaperTrading) -> PaperToCTraderDemoCoordin
  volume_text=os.getenv("CTRADER_VOLUME_PER_PAPER_UNIT")
  if volume_text is None: raise ValueError("CTRADER_VOLUME_PER_PAPER_UNIT is required")
  volume=CTraderVolumeConversion(int(volume_text)); volume.validate()
+ adapter=_ctrader_demo_adapter()
+ volume_policy=CTraderVolumePolicy.from_metadata(adapter.transport.symbol_metadata())
+ return PaperToCTraderDemoCoordinator(paper,adapter,volume,volume_policy)
+
+def _ctrader_demo_adapter() -> CTraderDemoAdapter:
  api_config=CTraderDemoOpenApiConfig.from_env()
  transport=CTraderDemoOpenApiTransport(api_config)
- adapter=CTraderDemoAdapter(transport.discover(),CockroachCTraderDemoStore(),transport,api_config.timeout_seconds)
- volume_policy=CTraderVolumePolicy.from_metadata(transport.symbol_metadata())
- return PaperToCTraderDemoCoordinator(paper,adapter,volume,volume_policy)
+ return CTraderDemoAdapter(transport.discover(),CockroachCTraderDemoStore(),transport,api_config.timeout_seconds)
+
+def _demo_automation_start(reason: str|None) -> dict:
+ """Explicit operator override for the demo execution kill switch; paper and the loop are untouched."""
+ if not (reason or "").strip(): raise ValueError("demo-automation start requires a reason")
+ if os.getenv("CTRADER_PAPER_ONLY")=="true":
+  return {"state":"paper_only","demo_started":False,
+          "detail":"paper-only mode has no demo execution kill switch; use paper start"}
+ adapter=_ctrader_demo_adapter()
+ # Starting requires a successful reconciliation; a failure leaves the switch stopped.
+ if not adapter.reconcile_after_restart():
+  return {"state":"refused","demo_started":False,"reason":"reconciliation_failed"}
+ adapter.start(reason)
+ demo=adapter.state()
+ return {"state":"demo_started","demo_started":True,"stopped":demo.get("stopped"),
+         "kill_switch_reason":demo.get("kill_switch_reason")}
 
 def _demo_automation_runner(config: DemoRunnerConfig) -> DemoAutomationRunner:
  paper_only=os.getenv("CTRADER_PAPER_ONLY")=="true"
@@ -131,16 +149,18 @@ def _demo_automation_runner(config: DemoRunnerConfig) -> DemoAutomationRunner:
  return DemoAutomationRunner(coordinator,LocalHistoricalMarketDataSource(market_store),
                              ConfirmedBreakoutCanarySource(market_store,quantity),config)
 
-def demo_automation(action: str) -> dict:
+def demo_automation(action: str, reason: str|None=None) -> dict:
  """Run the explicitly enabled local-data paper-to-demo canary."""
  config=DemoRunnerConfig.from_env()
  # Status and disabled actions remain local: do not open a database or broker connection.
  if action=="status" or not config.enabled: return _demo_automation_status(config)
+ if action=="start": return _demo_automation_start(reason)
  runner=_demo_automation_runner(config)
  if action=="once":
-  return runner.run_cycle() if runner.start() else runner.status()
+  # A refused or failed start reports its recorded state (e.g. resume_refused and the blocking switch).
+  return runner.run_cycle() if runner.start() else (runner.last_record or runner.status())
  runner.run_forever()
- return runner.status()
+ return runner.last_record or runner.status()
 
 def _agent_status_view() -> dict:
  from .agent_loop import agent_transcript_store_from_env
@@ -368,7 +388,8 @@ def main():
  sub.add_parser("tournament-weekly-report")
  shadow=sub.add_parser("shadow"); shadow.add_argument("action",choices=["status","stop"]); shadow.add_argument("--reason",default="manual emergency stop")
  demo=sub.add_parser("demo-automation",help="explicitly operate the local-data cTrader demo canary")
- demo.add_argument("action",nargs="?",choices=["status","once","run"],default="status")
+ demo.add_argument("action",nargs="?",choices=["status","once","run","start"],default="status")
+ demo.add_argument("--reason",help="required for start: why the demo execution kill switch may be cleared")
  agent=sub.add_parser("agent",help="single continuous AI paper-trading agent with a live thinking view")
  agent.add_argument("action",nargs="?",choices=["status","once","view","run"],default="status")
  tool=sub.add_parser("agent-tool",help="invoke deterministic tools from a Bits shell action")
@@ -468,7 +489,8 @@ def main():
   manager=ShadowTradingReadiness(); result=manager.readiness() if a.action=="status" else manager.emergency_stop(a.reason)
   print(json.dumps(result,indent=2,default=str))
  if a.cmd=="demo-automation":
-  try: result=demo_automation(a.action)
+  if a.action=="start" and not (a.reason or "").strip(): p.error("demo-automation start requires --reason")
+  try: result=demo_automation(a.action,a.reason)
   except Exception as exc: p.error(f"demo automation setup failed: {type(exc).__name__}")
   print(json.dumps(result,indent=2,allow_nan=False,default=str))
  if a.cmd=="agent":
