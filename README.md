@@ -233,3 +233,17 @@ This is a transparent progress proxy: no trade or unchanged notes alone does not
 prove analytical failure. Updating only a note timestamp does not clear the count.
 
 Use `bits-memory show --notes-only` to retrieve research notes without duplicating conversation history.
+
+Bits shell jobs use a server-enforced 1200-second (20-minute) execution timeout.
+The tool-call audit and stored job request record the effective timeout. This is
+separate from the Datadog workflow HTTP timeout. Existing recovery-stop behaviour
+is unchanged; changing this limit does not clear a persistent stop.
+
+### Operator pause for overhaul — 2026-09-24
+
+The operator paused this deployment for work with another harness. Paper is
+persistently stopped (`operator`); the agent, live view, data-update timer and
+state-backup timer are stopped and disabled. No XAUUSD cron entries were found.
+Credentials, datasets, existing backups and the unresolved timed-out job are
+preserved. Resumption requires explicit operator action and reconciliation of
+that job; changing the shell timeout does not replay it.

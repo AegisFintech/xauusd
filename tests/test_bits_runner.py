@@ -117,3 +117,18 @@ def test_stop_during_workflow_poll_never_starts_command(tmp_path):
     assert agent.run_tick()['status']=='stopped'
     assert not agent.jobs.workers
     agent.stop()
+
+
+def test_shell_timeout_is_twenty_minutes_even_when_agent_requests_two(tmp_path):
+    agent = runner(tmp_path)
+    try:
+        agent.run_tick()
+        assert agent.run_tick()['status'] == 'shell_running'
+        cycle = agent.bits_store.get('cycle')
+        with agent.bits_store.db() as db:
+            row = db.execute('SELECT request_json FROM bits_jobs WHERE job_id=?', (cycle['job_id'],)).fetchone()
+        import json
+        assert json.loads(row[0])['args']['timeout_sec'] == 1200
+        assert cycle['reply']['actions'][0]['args']['timeout_sec'] == 2
+    finally:
+        agent.stop()

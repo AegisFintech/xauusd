@@ -156,3 +156,8 @@ This is a transparent progress proxy: no trade or unchanged notes alone does not
 prove analytical failure. Updating only a note timestamp does not clear the count.
 
 Use `bits-memory show --notes-only` to retrieve research notes without duplicating conversation history.
+
+Bits shell jobs use a server-enforced 1200-second (20-minute) execution timeout.
+The tool-call audit and stored job request record the effective timeout. This is
+separate from the Datadog workflow HTTP timeout. Existing recovery-stop behaviour
+is unchanged; changing this limit does not clear a persistent stop.

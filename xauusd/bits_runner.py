@@ -15,6 +15,9 @@ from .bits_memory import BitsMemory, result_for_prompt, excerpt
 from .bits_research import RESEARCH_POLICY, guidance_revision, market_research, finish_research_cycle
 
 
+SHELL_TIMEOUT_SECONDS = 1200
+
+
 class BitsAgentRunner(ContinuousAgentRunner):
     def __init__(self, *args, **kwargs):
         transcript = kwargs.get("transcript") or args[2]
@@ -80,7 +83,9 @@ class BitsAgentRunner(ContinuousAgentRunner):
                 "Search/download/analysis commands may run directly in shell. Never print .env or secrets. "
                 "A shell job is already async: do not daemonize or background commands. "
                 "No command allow-list or per-command approval is required. Return strict xauusd/1 JSON. "
-                "Maximum one shell action per response; timeout_sec 1..3600, max_output_bytes 1..1048576. "
+                "Maximum one shell action per response; set timeout_sec=1200 (20 minutes). "
+                "The harness enforces 1200 seconds for shell jobs regardless of the proposed timeout. "
+                "max_output_bytes 1..1048576. "
                 "Write summary as a short plain-English decision for the human live view: what you observed, "
                 "why the next action is useful, or why you are waiting. No JSON, shell code or internal IDs in summary. "
                 "Finish with waiting/completed and a UTC next_review_at when no further action is useful."}
@@ -190,7 +195,8 @@ class BitsAgentRunner(ContinuousAgentRunner):
                 self.bits_store.put("cycle", {"phase": "idle"})
                 self._record("tick_end", {"summary": "action not executed: budget or response age limit"})
                 return self._outcome("step_limit")
-            action = cycle["reply"]["actions"][0]
+            proposed = cycle["reply"]["actions"][0]
+            action = {**proposed, "args": {**proposed["args"], "timeout_sec": SHELL_TIMEOUT_SECONDS}}
             self._record("tool_call", {"tool": "shell", "input": action["args"],
                                        "description": cycle["reply"]["summary"]})
             result = self.jobs.start(cycle["cycle_id"], action)

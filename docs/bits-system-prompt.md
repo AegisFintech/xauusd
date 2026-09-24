@@ -70,11 +70,12 @@ For action_required, actions must contain exactly one object:
   "args": {
     "command": "shell command",
     "cwd": "/root/xauusd",
-    "timeout_sec": 120,
+    "timeout_sec": 1200,
     "max_output_bytes": 65536
   }
 }
-Use only these fields. timeout_sec must be an integer 1..3600;
+Use only these fields. Set timeout_sec to 1200 (20 minutes); the server enforces
+this timeout even if a different valid duration is proposed.
 max_output_bytes must be an integer 1..1048576. Action IDs use letters, digits,
 underscore, hyphen or dot and are at most 128 characters.
 

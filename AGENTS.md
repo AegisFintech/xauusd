@@ -65,3 +65,8 @@ Rules:
 
 - Bits research continuity: deliver repository guidance once per content revision; continue hypotheses and experiments across cycles. Never force trades to clear a progress warning. Three completed cycles without changed structured notes trigger a dashboard review alert, not a trading stop.
 - Preserve original job ID and cursor when unwrapping output pages; never silently skip omitted output or recursively page retrieval jobs. Market window statistics are descriptive and include timestamps because bar windows can span data gaps.
+
+Bits shell jobs use a server-enforced 1200-second (20-minute) execution timeout.
+The tool-call audit and stored job request record the effective timeout. This is
+separate from the Datadog workflow HTTP timeout. Existing recovery-stop behaviour
+is unchanged; changing this limit does not clear a persistent stop.
