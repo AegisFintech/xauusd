@@ -7,6 +7,7 @@ import json
 import math
 import os
 from typing import Any, Callable, Protocol
+from zoneinfo import ZoneInfo
 
 from .experiment_registry import PostgresConnection, canonical_json
 
@@ -22,24 +23,54 @@ DAILY_LOSS_LIMIT = "DAILY_LOSS_LIMIT"
 MAX_DRAWDOWN = "MAX_DRAWDOWN"
 ACCEPTED = "ACCEPTED"
 
-# A persisted kill-switch reason in this set must never be cleared by an
-# unattended process restart (AGENTS.md: fail closed after state trouble).
-KILL_SWITCH_NO_AUTO_RESUME = frozenset({
-    "corrupt_state", "operator", "missing_credentials", "unknown_account_type", "recovery_failed", "risk_limit",
-})
+# Restart policy shared by every persistent kill switch (paper and cTrader demo execution).
+# This is an allowlist: an unattended restart may only start a fresh account that nothing has
+# ever stopped. Every other persisted reason (``operator`` or any custom ``paper stop --reason``,
+# corrupt state, missing credentials, recovery or reconciliation failure, risk limits, broker
+# failures, and reasons added in future) stays stopped until an explicit start (AGENTS.md).
+KILL_SWITCH_AUTO_RESUME = frozenset({"missing_state"})
+
+
+def restart_policy(state: dict[str, Any]) -> str:
+    """Classify a persisted kill switch for an unattended restart.
+
+    ``"running"``: not stopped, so resuming is a no-op. ``"resume"``: a fresh, never-stopped
+    account that may start. ``"refuse"``: any other stop, including a state without an explicit
+    boolean ``stopped`` flag, must be preserved until an operator starts it explicitly.
+    """
+    stopped = state.get("stopped")
+    if stopped is False:
+        return "running"
+    if stopped is True and state.get("kill_switch_reason") in KILL_SWITCH_AUTO_RESUME:
+        return "resume"
+    return "refuse"
+
+
+# XAUUSD spot trades from Sunday 18:00 to Friday 17:00 New York time, with a daily break at the
+# 17:00 New York close. Anchoring the session to New York keeps it correct across US daylight
+# saving time: the break is 21:00-22:00 UTC from March to November and 22:00-23:00 UTC in winter.
+# zoneinfo uses the system tz database or the ``tzdata`` package (already a pandas dependency).
+NEW_YORK = ZoneInfo("America/New_York")
+NEW_YORK_CLOSE_HOUR = 17
+NEW_YORK_REOPEN_HOUR = 18
 
 
 def market_is_open(now: datetime) -> bool:
-    """XAUUSD spot session: Sunday 22:00 UTC through Friday 21:00 UTC, break 21:00-22:00 UTC."""
-    now = now.astimezone(timezone.utc)
-    weekday = now.weekday()  # Monday=0 ... Sunday=6
+    """XAUUSD spot session: Sunday 18:00 to Friday 17:00 New York time, break 17:00-18:00 New York.
+
+    In UTC that is Sunday 22:00 to Friday 21:00 with a 21:00-22:00 break during US daylight time,
+    and one hour later (Sunday 23:00, Friday 22:00, break 22:00-23:00) during US standard time.
+    Exchange holidays are not modelled; the freshness gates refuse trading when bars stop arriving.
+    """
+    local = now.astimezone(NEW_YORK)
+    weekday = local.weekday()  # Monday=0 ... Sunday=6, in New York time
     if weekday == 5:  # Saturday
         return False
-    if weekday == 6:  # Sunday open from 22:00 UTC
-        return now.hour >= 22
-    if weekday == 4:  # Friday closes at 21:00 UTC
-        return now.hour < 21
-    return now.hour < 21 or now.hour >= 22  # Monday-Thursday: closed for the evening break
+    if weekday == 6:  # Sunday opens at 18:00 New York
+        return local.hour >= NEW_YORK_REOPEN_HOUR
+    if weekday == 4:  # Friday closes at 17:00 New York
+        return local.hour < NEW_YORK_CLOSE_HOUR
+    return local.hour != NEW_YORK_CLOSE_HOUR  # Monday-Thursday: closed for the daily break
 
 
 # Persisted bars are M1 and stamped with their *open* time, so the newest bar in
@@ -261,22 +292,22 @@ class PaperTrading:
         self.store.set_kill_switch(True, reason)
 
     def maybe_resume(self, reason: str) -> dict[str, Any]:
-        """Auto-resume on a benign restart; fail closed on persisted trouble.
+        """Resume after an unattended restart only when :func:`restart_policy` allows it.
 
-        A paper lifecycle that is already running resumes as a no-op. A stopped
-        lifecycle resumes only when its persisted kill-switch reason is benign
-        (for example a fresh ``missing_state`` account or a prior agent restart);
-        corruption, missing credentials, recovery failure, and operator stops are
-        preserved across restarts.
+        A paper lifecycle that is already running resumes as a no-op, and a fresh
+        ``missing_state`` account starts. Every other persisted stop (operator stops
+        with any reason, corruption, missing credentials, recovery or reconciliation
+        failure, risk limits, and broker failures) is preserved across restarts until
+        an explicit :meth:`start`.
         """
         if not reason.strip():
             raise ValueError("start reason is required")
         state = self.store.state()
         prior = state.get("kill_switch_reason")
-        already_running = not state.get("stopped")
-        if already_running:
+        decision = restart_policy(state)
+        if decision == "running":
             return {"resumed": True, "already_running": True, "reason": prior, "kill_switch_reason": prior}
-        if prior in KILL_SWITCH_NO_AUTO_RESUME:
+        if decision == "refuse":
             return {"resumed": False, "already_running": False, "reason": prior, "kill_switch_reason": prior,
                     "blocked": True}
         self.store.set_kill_switch(False, reason)

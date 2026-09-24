@@ -11,7 +11,7 @@ This repository develops an XAUUSD research, paper-trading, and cTrader demo-acc
 - The read-only data downloader is bound to the same demo host and flag. Credentials are an OAuth2 token pair; with no `CTRADER_CTID_TRADER_ACCOUNT_ID`, the demo account and its XAUUSD symbol are discovered from the token at runtime. On `CH_ACCESS_TOKEN_INVALID` it refreshes once before the paper gates ever see the data, and refreshed tokens persist only as an atomic `0600` edit of the two `CTRADER_ACCESS_TOKEN`/`CTRADER_REFRESH_TOKEN` keys in `.env` — never in prompts, reports, or fixtures.
 - `data update/download` always writes `reports/data_update_status.json` (`state: ok | auth_error | failed`, `error_code`, `recorded_at`) so scheduled-refresh failures are loud; the agent live view surfaces it at `/api/data-update`.
 - All model outputs are untrusted proposals. Deterministic symbol, sizing, daily-loss, drawdown, exposure, duplicate-order, market-data freshness, and kill-switch checks decide whether an action is allowed.
-- The kill switch must persist across restarts and default to stopped after state corruption, missing credentials, unknown account type, or recovery failure. `paper.maybe_resume(reason)` is the single restart policy: it auto-resumes a clean agent paper account but refuses (fail closed) for `corrupt_state`, `operator`, `missing_credentials`, `unknown_account_type`, `recovery_failed`, and `risk_limit` until `paper start` overrides explicitly. A refusal writes `reports/agent_status.json` and exits 0 (no crash-loop).
+- The kill switch must persist across restarts and default to stopped after state corruption, missing credentials, unknown account type, or recovery failure. `paper_trading.restart_policy` is the single restart policy, applied by `paper.maybe_resume(reason)` and by `demo-automation` to both the paper and the demo execution switch. It is an allowlist: an unattended restart continues a running account or starts a fresh one (`missing_state`), and every other persisted stop stays stopped (fail closed) until an explicit override. That includes `operator` and any custom `paper stop --reason`, `corrupt_state`, `missing_credentials`, `unknown_account_type`, `recovery_failed`, `risk_limit`, and broker, transport and reconciliation failures. The overrides are `paper start` for paper and `demo-automation start --reason ...` for demo execution; the latter requires a successful reconciliation. A refusal writes `reports/agent_status.json` (or the demo runner status file) and exits 0 (no crash-loop).
 - Never log, commit, return, or include credentials in prompts, reports, artifacts, or test fixtures.
 
 ## Autonomous Harness
@@ -26,7 +26,7 @@ This repository develops an XAUUSD research, paper-trading, and cTrader demo-acc
 - Prefer small, tested changes. Keep source code, tests, and documentation aligned.
 - Run focused tests, the complete suite, and `git diff --check` before committing.
 - Treat the state store as the authoritative application state; local files are recovery artifacts only. The agent's paper account and transcript use the backend selected by `XAUUSD_STATE_BACKEND` (`local` default → `STATE_DB_PATH` SQLite, `cockroach` → `DATABASE_URL`); both stores are schema-compatible and `paper_from_env()` / `agent_transcript_store_from_env()` are the single selection points.
-- The paper gate refuses every XAUUSD proposal while the market is closed (weekends and the 21:00-22:00 UTC daily break) with `MARKET_CLOSED`; never relax or bypass that gate.
+- The paper gate refuses every XAUUSD proposal while the market is closed (weekends, and the daily 17:00-18:00 New York break: 21:00-22:00 UTC during US daylight time, 22:00-23:00 UTC in winter) with `MARKET_CLOSED`; never relax or bypass that gate. `market_is_open` derives the session from New York time; do not hard-code UTC hours.
 - Preserve existing user changes and generated research data unless explicitly asked to remove them.
 
 ## Operations
@@ -70,3 +70,34 @@ Bits shell jobs use a server-enforced 1200-second (20-minute) execution timeout.
 The tool-call audit and stored job request record the effective timeout. This is
 separate from the Datadog workflow HTTP timeout. Existing recovery-stop behaviour
 is unchanged; changing this limit does not clear a persistent stop.
+
+## Local agent handoff (remote review, 2026-09-24)
+
+A remote Bits Code session made the change "Fail closed on restarts, broker errors and DST" (restart-policy allowlist, `demo-automation start`, cTrader order outcomes, New York market hours). It had no network access, no project `.venv`, no systemd, no cTrader and no graphify CLI. Once that change is merged into the server checkout, a local agent there must finish the items below. These items only run tests, read host state and documentation, edit the repository, and install dependencies that `pyproject.toml` declares into `.venv`. Do not start, enable or restart services, change a kill switch, or send broker requests. Delete each item when it is done and report the result in that commit.
+
+1. Run `.venv/bin/python -m pytest tests -q -p no:cacheprovider` and expect 388 passed (359 before the change plus 29 new) with no failures or errors. The remote run could not verify these:
+   - `tests/test_agent_view.py` and `tests/test_dashboard.py` were not collected (no fastapi).
+   - `test_postgres_connection_uses_configured_read_committed` failed (no psycopg).
+   - `test_codex_child_environment_uses_allowlist` failed (no `.venv`).
+   - Parquet I/O and the Twisted reactor used by `tests/test_ctrader_demo.py` ran only through local stand-ins.
+   - There was no `.env`. `cli.main()` loads `.env` into the environment without overriding variables that are already set, so a test that deletes a variable and then calls `cli.main()` sees the deployed value. Fix any such test by setting the variable explicitly.
+2. `xauusd.paper_trading` now loads `ZoneInfo("America/New_York")` at import. A missing tz database would therefore break every `xauusd.cli` command, and with it every systemd unit. From the checkout root, run `.venv/bin/python -m xauusd.cli paper status`. It must print the persisted kill switch unchanged (while paused: `stopped: true`, `operator`) and a boolean `market_open`. If the zone is missing, run `.venv/bin/python -m pip install 'tzdata>=2022.7'`; `pyproject.toml` now declares it.
+3. Run `graphify update .` and commit `graphify-out/`. The graph predates the change.
+4. Diff each `deploy/systemd/` unit against its `/etc/systemd/system/` copy and list any `xauusd-*` unit that exists only on the host. Read the host files only.
+   - `README.md` and the operator-pause note mention `xauusd-data-update.timer`, which has no template here. `README.md` also calls `xauusd-demo-automation.service` the only template, but there are five unit files.
+   - Copy missing host units into `deploy/systemd/` (without inline credentials) or correct the docs.
+   - `xauusd-demo-automation.service` may write only to `reports/`. Before it is ever enabled, confirm it can write the configured paper state store; the local SQLite default is under `state/`.
+5. Measure planner latency from the state database transcript (`STATE_DB_PATH`, table `agent_transcript`), read-only.
+   - Measure the time from each `bits_submit` row to the matching `assistant` row, and count `tick_end` rows that say `action not executed: budget or response age limit`.
+   - Why it matters: a reply with an action is discarded once `AGENT_MAX_MARKET_DATA_AGE_SECONDS` (180 s) have passed since submission, although the workflow may take up to `DD_WORKFLOW_TIMEOUT_SECONDS` (300 s).
+   - Report p50/p95 latency and the count so that gap can be fixed.
+6. Before any demo stage, confirm these cTrader Open API facts from the installed `ctrader_open_api` package and the official documentation, without connecting to cTrader:
+   - Which reply resolves a `ProtoOANewOrderReq` (acceptance, fill or error). Also confirm that `ProtoOAOrderErrorEvent`, `ProtoOAErrorRes` and rejected `ProtoOAExecutionEvent` replies carry a non-empty `errorCode`. The adapter records `BROKER_REJECTED` only when `errorCode` is set; any other reply counts as accepted.
+   - The maximum length of `clientOrderId`. Orders send the 64-character sha256 decision ID, so a lower limit (reportedly 50) would get every demo order rejected. Report it rather than changing the ID scheme, which also keys idempotency and reconciliation.
+   - Which `ProtoOAReconcileRes` position fields (`ProtoOAPosition`/`ProtoOATradeData`, such as `label` or `comment`) can tie a broker position to a request. Reconciling broker positions against the paper position depends on this.
+   - That `demo.ctraderapi.com` cannot authorize a live account. With `CTRADER_CTID_TRADER_ACCOUNT_ID` set, the account list and its `isLive` flag are skipped. The demo-only boundary then rests on the demo host refusing live accounts.
+
+Operator-only. Never do these autonomously, and never implement them without explicit operator approval:
+- Resuming the paused deployment, reconciling its timed-out job (`bits-recover`), `paper start`, `demo-automation start`, `state reset`, `state restore`, and enabling or restarting units.
+- Changing the Bits shell permission model, such as running it as an unprivileged user or restoring systemd hardening.
+- Changing risk-gate semantics. Examples: letting position-reducing trades through the daily-loss, drawdown or trade-count gates, or moving the daily-loss day from UTC midnight to the New York session.

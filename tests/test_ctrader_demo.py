@@ -1,8 +1,9 @@
 import pytest
 
-from xauusd.ctrader_demo import (CTraderDemoAccount, CTraderDemoAdapter, CTraderDemoSafetyError,
-    CTraderDemoOpenApiConfig, CTraderDemoOpenApiTransport, CTraderOrder, CTraderSymbolMetadata,
-    InMemoryCTraderDemoStore)
+from xauusd.ctrader_demo import (BROKER_REJECTED, OUTCOME_UNKNOWN, CTraderDemoAccount, CTraderDemoAdapter,
+    CTraderDemoSafetyError, CTraderDemoOpenApiConfig, CTraderDemoOpenApiTransport, CTraderOrder,
+    CTraderSymbolMetadata, InMemoryCTraderDemoStore)
+from xauusd.paper_trading import restart_policy
 
 
 class Transport:
@@ -64,6 +65,39 @@ def test_unresolved_pre_crash_request_fails_recovery_closed(monkeypatch):
     assert store.state()["kill_switch_reason"] == "reconciliation_failed"
 
 
+def test_broker_error_reply_is_recorded_as_a_rejection_not_a_fill(monkeypatch):
+    instance, store, transport = adapter(monkeypatch)
+    assert instance.reconcile_after_restart()
+    instance.start("operator approved")
+    transport.response = {"status": "ProtoOAOrderErrorEvent", "error_code": "NOT_ENOUGH_MONEY",
+                          "description": "broker text is not persisted"}
+
+    result = instance.execute(CTraderOrder("request-3", "BUY", 100))
+
+    assert result == {"accepted": False, "reason": BROKER_REJECTED, "request_id": "request-3",
+                      "response": {"status": "ProtoOAOrderErrorEvent", "error_code": "NOT_ENOUGH_MONEY"}}
+    assert store.requests["request-3"]["status"] == "completed"
+    assert not store.pending_request_ids()
+    assert instance.execute(CTraderOrder("request-3", "BUY", 100)) == result  # no second broker call
+    assert len(transport.calls) == 2
+
+
+def test_transport_failure_is_an_unknown_outcome_that_blocks_restart(monkeypatch):
+    instance, store, transport = adapter(monkeypatch)
+    assert instance.reconcile_after_restart()
+    instance.start("operator approved")
+    transport.error = TimeoutError("cTrader request timed out")
+
+    result = instance.execute(CTraderOrder("request-4", "BUY", 100))
+
+    assert result["accepted"] is False
+    assert result["reason"] == OUTCOME_UNKNOWN
+    assert result["error_type"] == "TimeoutError"
+    state = instance.state()
+    assert state["stopped"] is True and state["kill_switch_reason"] == "transport_failure"
+    assert restart_policy(state) == "refuse"  # never auto-resumed with unknown broker exposure
+
+
 class ImmediateDeferred:
     def __init__(self, value): self.value = value
     def addCallbacks(self, succeeded, failed): succeeded(self.value)
@@ -98,6 +132,46 @@ def test_open_api_transport_discovers_demo_account_and_normalizes_reconciliation
     assert details["request_outcomes"]["pending-1"]["response"]["order_id"] == 123
     assert client.started and len(client.requests) == 4
     assert not any(type(request).__name__ == "ProtoOAGetAccountListByAccessTokenReq" for request in client.requests)
+
+
+def test_open_api_transport_reports_an_order_error_reply_with_its_code(monkeypatch):
+    monkeypatch.setenv("CTRADER_DEMO_ONLY", "true")
+    client = FakeClient([
+        {}, {}, {"symbol": [{"symbolName": "XAUUSD", "symbolId": 99, "enabled": True}]},
+        {"errorCode": "TRADING_BAD_VOLUME", "description": "Invalid volume", "orderId": 5},
+    ])
+    messages = {name: Message for name in ("ProtoOAApplicationAuthReq", "ProtoOAAccountAuthReq",
+                                            "ProtoOASymbolsListReq")}
+    transport = CTraderDemoOpenApiTransport(
+        CTraderDemoOpenApiConfig("id", "secret", "token", 7), client_factory=lambda host, port: client,
+        extract=lambda value: value, message_types=messages,
+    )
+
+    receipt = transport.send({"type": "ProtoOANewOrderReq"}, 1)
+
+    assert receipt["error_code"] == "TRADING_BAD_VOLUME"
+    assert receipt["order_id"] == 5
+
+
+def test_open_api_transport_fails_reconciliation_on_an_error_reply(monkeypatch):
+    monkeypatch.setenv("CTRADER_DEMO_ONLY", "true")
+    client = FakeClient([
+        {}, {}, {"symbol": [{"symbolName": "XAUUSD", "symbolId": 99, "enabled": True}]},
+        {"errorCode": "CH_CLIENT_AUTH_FAILURE", "description": "Trading account is not authorized"},
+    ])
+    messages = {name: Message for name in ("ProtoOAApplicationAuthReq", "ProtoOAAccountAuthReq",
+                                            "ProtoOASymbolsListReq")}
+    transport = CTraderDemoOpenApiTransport(
+        CTraderDemoOpenApiConfig("id", "secret", "token", 7), client_factory=lambda host, port: client,
+        extract=lambda value: value, message_types=messages,
+    )
+    store = InMemoryCTraderDemoStore()
+    instance = CTraderDemoAdapter(transport.discover(), store, transport, 1)
+
+    # Previously an error reply carried no orders and passed as a clean reconciliation.
+    assert not instance.reconcile_after_restart()
+    assert store.state()["kill_switch_reason"] == "reconciliation_failed"
+    assert store.events[-1]["payload"]["error_type"] == "CTraderDemoSafetyError"
 
 
 def test_open_api_transport_rejects_non_demo_before_constructing_client(monkeypatch):

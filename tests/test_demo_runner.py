@@ -2,8 +2,8 @@ import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
-from xauusd.demo_execution import CTraderVolumeConversion, PaperToCTraderDemoCoordinator
-from xauusd.demo_runner import DemoAutomationRunner, DemoRunnerConfig, MarketData
+from xauusd.demo_execution import CTraderVolumeConversion, NormalizedDecision, PaperToCTraderDemoCoordinator
+from xauusd.demo_runner import AUTOMATION_START_REASON, DemoAutomationRunner, DemoRunnerConfig, MarketData
 from xauusd.paper_trading import InMemoryPaperTradingStore, PaperTrading
 
 
@@ -11,21 +11,33 @@ NOW = datetime(2026, 9, 17, 12, tzinfo=timezone.utc)
 
 
 class Adapter:
-    def __init__(self, reconciled=True):
+    """Stateful demo lifecycle double: the kill switch persists like the real store."""
+    def __init__(self, reconciled=True, stopped=True, reason="missing_state", accept_orders=True):
         self.reconciled = reconciled
+        self.kill_switch = {"stopped": stopped, "kill_switch_reason": reason}
+        self.accept_orders = accept_orders
+        self.reconcile_calls = 0
         self.start_reasons = []
         self.stop_reasons = []
 
+    def state(self):
+        return dict(self.kill_switch)
+
     def reconcile_after_restart(self):
+        self.reconcile_calls += 1
         return self.reconciled
 
     def start(self, reason):
         self.start_reasons.append(reason)
+        self.kill_switch = {"stopped": False, "kill_switch_reason": reason}
 
     def stop(self, reason):
         self.stop_reasons.append(reason)
+        self.kill_switch = {"stopped": True, "kill_switch_reason": reason}
 
     def execute(self, order):
+        if not self.accept_orders:
+            return {"accepted": False, "request_id": order.request_id, "reason": "BROKER_REJECTED"}
         return {"accepted": True, "request_id": order.request_id}
 
 
@@ -50,15 +62,22 @@ class DecisionSource:
         return self.decision
 
 
-def runner(tmp_path, *, enabled=True, reconciled=True, market=None, decisions=None, failures=1):
-    paper = PaperTrading(InMemoryPaperTradingStore())
-    adapter = Adapter(reconciled)
+def runner(tmp_path, *, enabled=True, reconciled=True, market=None, decisions=None, failures=1,
+           paper=None, adapter=None, alerts=None):
+    """Pass an existing ``paper``/``adapter`` to simulate a process restart on persisted state."""
+    paper = paper or PaperTrading(InMemoryPaperTradingStore())
+    adapter = adapter or Adapter(reconciled)
     coordinator = PaperToCTraderDemoCoordinator(paper, adapter, CTraderVolumeConversion(100))
     instance = DemoAutomationRunner(
         coordinator, market or MarketSource(), decisions or DecisionSource(),
-        DemoRunnerConfig(enabled, 1, failures, 60, tmp_path / "runner-status.json"), clock=lambda: NOW,
+        DemoRunnerConfig(enabled, 1, failures, 60, tmp_path / "runner-status.json"),
+        alert_sink=alerts.append if alerts is not None else None, clock=lambda: NOW,
     )
     return instance, paper, adapter
+
+
+def status(tmp_path):
+    return json.loads((tmp_path / "runner-status.json").read_text())
 
 
 def test_disabled_config_does_not_reconcile_or_start(tmp_path):
@@ -84,6 +103,76 @@ def test_startup_reconciliation_failure_stops_paper_and_demo(tmp_path):
     assert not instance.start()
     assert paper.state()["stopped"]
     assert adapter.stop_reasons == ["startup_reconciliation_failed"]
+
+
+def test_first_start_reconciles_then_starts_fresh_switches(tmp_path):
+    instance, paper, adapter = runner(tmp_path)
+
+    assert instance.start()
+    assert adapter.reconcile_calls == 1
+    assert adapter.start_reasons == [AUTOMATION_START_REASON]
+    assert paper.state()["stopped"] is False
+    assert status(tmp_path)["state"] == "running"
+
+
+def test_restart_preserves_persistent_paper_stop_without_broker_contact(tmp_path):
+    paper = PaperTrading(InMemoryPaperTradingStore())
+    paper.start("agent_continuous_paper_loop")
+    paper.stop("risk_limit")
+    alerts = []
+    instance, _, adapter = runner(tmp_path, paper=paper, alerts=alerts)
+
+    assert not instance.start()
+    assert paper.state()["stopped"] is True
+    assert paper.state()["kill_switch_reason"] == "risk_limit"
+    assert adapter.reconcile_calls == 0 and not adapter.start_reasons and not adapter.stop_reasons
+    refused = status(tmp_path)
+    assert refused["state"] == "resume_refused"
+    assert (refused["kill_switch"], refused["kill_switch_reason"]) == ("paper", "risk_limit")
+    assert alerts and alerts[-1]["state"] == "resume_refused"
+
+
+def test_restart_preserves_persistent_demo_stop_before_reconciling(tmp_path):
+    adapter = Adapter(stopped=True, reason="transport_failure")
+    instance, paper, _ = runner(tmp_path, adapter=adapter)
+
+    assert not instance.start()
+    assert adapter.reconcile_calls == 0 and not adapter.start_reasons
+    assert adapter.state() == {"stopped": True, "kill_switch_reason": "transport_failure"}
+    assert paper.state()["stopped"] is True  # paper is not started when the broker side refuses
+    assert (status(tmp_path)["kill_switch"], status(tmp_path)["kill_switch_reason"]) == ("demo", "transport_failure")
+
+
+def test_restart_after_broker_failure_requires_both_explicit_starts(tmp_path):
+    decision = NormalizedDecision("decision-1", "XAUUSD", "BUY", 0.5, NOW)
+    adapter = Adapter(accept_orders=False)
+    instance, paper, _ = runner(tmp_path, adapter=adapter, decisions=DecisionSource(decision))
+    assert instance.start()
+    assert instance.run_cycle()["reason"] == "broker_execution_failed"
+
+    restarted, _, _ = runner(tmp_path, paper=paper, adapter=adapter)
+    assert not restarted.start()
+    assert paper.state()["kill_switch_reason"] == "broker_execution_failed"
+
+    paper.start("operator reconciled paper")  # `paper start` alone is not enough
+    restarted, _, _ = runner(tmp_path, paper=paper, adapter=adapter)
+    assert not restarted.start()
+    assert status(tmp_path)["kill_switch"] == "demo"
+    assert adapter.start_reasons == [AUTOMATION_START_REASON]  # only the original fresh start
+
+    adapter.start("operator checked broker exposure")  # `demo-automation start`
+    restarted, _, _ = runner(tmp_path, paper=paper, adapter=adapter)
+    assert restarted.start()
+    assert adapter.state()["kill_switch_reason"] == "operator checked broker exposure"
+
+
+def test_restart_reconciles_an_already_running_demo_switch_without_restarting_it(tmp_path):
+    adapter = Adapter(stopped=False, reason="operator approved")
+    instance, _, _ = runner(tmp_path, adapter=adapter)
+
+    assert instance.start()
+    assert adapter.reconcile_calls == 1
+    assert not adapter.start_reasons
 
 
 def test_stale_market_data_and_no_decision_do_not_execute(tmp_path):
@@ -147,3 +236,13 @@ def test_paper_only_start_skips_broker_reconciliation_and_runs_cycle(tmp_path):
     assert result["result"]["paper_only"]
     assert result["result"]["demo"]["reason"] == "PAPER_ONLY_MODE"
     assert not paper.state()["stopped"]
+
+
+def test_paper_only_restart_preserves_operator_stop(tmp_path):
+    instance, paper = paper_only_runner(tmp_path, None)
+    paper.stop("operator")
+
+    assert not instance.start()
+    assert paper.state()["stopped"] is True
+    assert paper.state()["kill_switch_reason"] == "operator"
+    assert status(tmp_path)["state"] == "resume_refused"
