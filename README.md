@@ -251,7 +251,7 @@ Credentials, datasets, existing backups and the unresolved timed-out job are
 preserved. Resumption requires explicit operator action and reconciliation of
 that job; changing the shell timeout does not replay it.
 
-The [2026-09-24 handoff audit](docs/local-handoff-audit-2026-09-24.md) records local validation and remaining demo blockers (#14–#16). Audit completion does not authorize deployment resumption.
+The [2026-09-24 handoff audit](docs/local-handoff-audit-2026-09-24.md) records local validation and the subsequent broker fixes (#14–#16). Full-fill confirmation and position reconciliation are tested offline. Uncertain orders without terminal history remain blocked; no automatic replay is allowed. Deployment remains paused until explicitly resumed.
 
 ## Local Python environment
 

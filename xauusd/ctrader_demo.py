@@ -447,14 +447,24 @@ class CTraderDemoOpenApiTransport:
             assert self._account is not None
             # An error reply must fail reconciliation, never pass as an empty (clean) broker state.
             self._raise_for_error(message, "reconcile")
-            outcomes = {}
-            for order in self._values(message, "order"):
-                request_id = self._field(order, "clientOrderId")
-                if isinstance(request_id, str) and request_id:
-                    outcomes[request_id] = {"accepted": True, "request_id": request_id,
-                                            "response": self._order_receipt(order)}
+            if self._field(message, "ctidTraderAccountId") != self._account.account_id:
+                raise CTraderDemoSafetyError("reconciliation account mismatch")
+            if not isinstance(message, dict) and type(message).__name__ != "ProtoOAReconcileRes":
+                raise CTraderDemoSafetyError("unexpected reconciliation response type")
+            positions = []
+            for position in self._values(message, "position"):
+                trade = self._field(position, "tradeData")
+                positions.append({"position_id": self._field(position, "positionId"),
+                                  "symbol_id": self._field(trade, "symbolId"),
+                                  "side": self._field(trade, "tradeSide"),
+                                  "volume": self._field(trade, "volume"),
+                                  "position_status": self._field(position, "positionStatus")})
+            # Reconcile lists live pending orders, not historical fills. Their presence
+            # cannot prove an uncertain submission completed.
+            orders = [self._order_receipt(order) for order in self._values(message, "order")]
             return {"account_id": self._account.account_id, "is_demo": True, "symbol": self._account.symbol,
-                    "symbol_id": self._account.symbol_id, "request_outcomes": outcomes}
+                    "symbol_id": self._account.symbol_id, "request_outcomes": {},
+                    "positions": positions, "open_orders": orders}
         return self._order_receipt(message)
 
     def _order_receipt(self, message: Any) -> dict[str, Any]:
@@ -635,8 +645,10 @@ class CockroachCTraderDemoStore:
 
 class CTraderDemoAdapter:
     """Executes only persisted, reconciled XAUUSD demo-order proposals."""
-    def __init__(self, account: CTraderDemoAccount, store: CTraderDemoStore, transport: CTraderTransport, timeout_seconds: float = 30.0):
+    def __init__(self, account: CTraderDemoAccount, store: CTraderDemoStore, transport: CTraderTransport, timeout_seconds: float = 30.0,
+                 expected_volume_provider: Callable[[], int] | None = None):
         self.account, self.store, self.transport, self.timeout_seconds = account, store, transport, timeout_seconds
+        self.expected_volume_provider = expected_volume_provider
         self.store.initialize()
         try:
             self._validate_boundary()
@@ -693,7 +705,14 @@ class CTraderDemoAdapter:
             if set(pending) - set(outcomes):
                 raise CTraderDemoSafetyError("broker reconciliation did not resolve every pending request")
             for request_id in pending:
-                self.store.finish(request_id, outcomes[request_id])
+                outcome = outcomes[request_id]
+                if outcome.get("accepted") is not False or outcome.get("reason") != BROKER_REJECTED:
+                    raise CTraderDemoSafetyError("pending outcome requires verified terminal history")
+                # The built-in snapshot transport supplies no terminal outcomes. This
+                # branch permits a future history adapter's explicit verified rejection.
+                self.store.finish(request_id, outcome)
+            verify_position_exposure(self.account, self.store.request_records(), details,
+                                     self.expected_volume_provider)
             self.store.mark_reconciled(details)
             return True
         except Exception as exc:
@@ -707,6 +726,11 @@ class CTraderDemoAdapter:
             return {"accepted": False, "reason": KILL_SWITCH, "request_id": order.request_id}
         request_data = {"account_id": self.account.account_id, "symbol": self.account.symbol, "symbol_id": self.account.symbol_id, "side": order.side, "volume": order.volume,
                         "broker_client_order_id": broker_client_order_id(order.request_id)}
+        for prior_id, record in self.store.request_records().items():
+            prior_broker_id = record["request"].get("broker_client_order_id", prior_id)
+            if prior_id != order.request_id and prior_broker_id == request_data["broker_client_order_id"]:
+                self.store.stop("broker_identity_collision")
+                return {"accepted": False, "reason": "BROKER_IDENTITY_COLLISION", "request_id": order.request_id}
         reserved, prior = self.store.reserve(order.request_id, request_data)
         if not reserved:
             return prior or {"accepted": False, "reason": DUPLICATE_REQUEST, "request_id": order.request_id}
@@ -792,5 +816,67 @@ def _reconciliation_details(response: Any) -> dict[str, Any]:
     outcomes = response.get("request_outcomes", {})
     if not isinstance(outcomes, dict) or any(not isinstance(key, str) or not isinstance(value, dict) for key, value in outcomes.items()):
         raise CTraderDemoSafetyError("reconciliation request outcomes must be structured")
+    positions, orders = response.get("positions"), response.get("open_orders")
+    if not isinstance(positions, list) or not isinstance(orders, list):
+        raise CTraderDemoSafetyError("reconciliation requires explicit position and order snapshots")
     return {"account_id": account_id, "is_demo": is_demo, "symbol": symbol,
-            "symbol_id": symbol_id, "request_outcomes": outcomes}
+            "symbol_id": symbol_id, "request_outcomes": outcomes,
+            "positions": positions, "open_orders": orders}
+
+
+def verify_position_exposure(account: CTraderDemoAccount, records: dict[str, dict[str, Any]],
+                             snapshot: dict[str, Any], expected_volume_provider: Callable[[], int] | None) -> None:
+    """Fail closed unless fills, broker positions and authoritative paper exposure agree.
+
+    No automatic adoption of manual positions or reconstruction of missing deal history.
+    Signed fill volumes support netting; separate positions retain distinct identities.
+    """
+    def positive(value: Any) -> bool:
+        return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+    if snapshot["open_orders"]:
+        raise CTraderDemoSafetyError("open broker orders require reconciliation")
+    expected: dict[int, int] = {}
+    deals: set[int] = set()
+    for request_id, record in records.items():
+        outcome = record.get("outcome") or {}
+        if record.get("status") != "completed" or outcome.get("reason") == OUTCOME_UNKNOWN:
+            raise CTraderDemoSafetyError("unresolved broker operation")
+        if outcome.get("accepted") is False and outcome.get("reason") == BROKER_REJECTED:
+            continue
+        request = record["request"]
+        receipt = outcome.get("response", {})
+        volume, position_id = receipt.get("filled_volume"), receipt.get("position_id")
+        if (outcome.get("accepted") is not True or receipt.get("execution_type") != 3 or
+                not positive(volume) or volume != request.get("volume") or not positive(position_id) or
+                not positive(receipt.get("order_id")) or request.get("account_id") != account.account_id or
+                request.get("symbol_id") != account.symbol_id or request.get("side") not in ("BUY", "SELL") or
+                receipt.get("broker_client_order_id") != request.get("broker_client_order_id", request_id)):
+            raise CTraderDemoSafetyError("fill history lacks verified request and position identity")
+        deal_id = receipt.get("deal_id")
+        if deal_id is not None:
+            if not positive(deal_id) or deal_id in deals:
+                raise CTraderDemoSafetyError("ambiguous deal identity")
+            deals.add(deal_id)
+        expected[position_id] = expected.get(position_id, 0) + (volume if request["side"] == "BUY" else -volume)
+    expected = {key: value for key, value in expected.items() if value}
+    actual: dict[int, int] = {}
+    for position in snapshot["positions"]:
+        if not isinstance(position, dict):
+            raise CTraderDemoSafetyError("malformed broker position")
+        identifier, volume, side = position.get("position_id"), position.get("volume"), position.get("side")
+        if (not positive(identifier) or identifier in actual or not positive(volume) or
+                position.get("symbol_id") != account.symbol_id or
+                position.get("position_status") != 1 or side not in (1, 2)):
+            raise CTraderDemoSafetyError("unverified broker position")
+        actual[identifier] = volume if side == 1 else -volume
+    if actual != expected:
+        raise CTraderDemoSafetyError("broker exposure differs from persisted fill history")
+    if expected_volume_provider is None:
+        # Standalone adapters can verify only a flat account; production binds paper state.
+        paper_volume = 0
+    else:
+        paper_volume = expected_volume_provider()
+    if (not isinstance(paper_volume, int) or isinstance(paper_volume, bool) or
+            sum(actual.values()) != paper_volume):
+        raise CTraderDemoSafetyError("broker exposure differs from authoritative paper state")

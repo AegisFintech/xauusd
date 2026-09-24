@@ -77,7 +77,7 @@ class TransportDouble:
 
     def send(self, request, timeout_seconds):
         self.calls.append(request)
-        return {"account_id": 7, "is_demo": True, "symbol": "XAUUSD", "symbol_id": 99}
+        return {"account_id": 7, "is_demo": True, "symbol": "XAUUSD", "symbol_id": 99, "positions": [], "open_orders": []}
 
 
 def test_duplicate_decision_cannot_produce_another_broker_request(monkeypatch):
@@ -131,7 +131,7 @@ class SequencedTransport:
 def test_broker_error_reply_stops_both_switches_and_restart_keeps_them_stopped(monkeypatch):
     monkeypatch.setenv("CTRADER_DEMO_ONLY", "true")
     store = InMemoryCTraderDemoStore()
-    transport = SequencedTransport({"account_id": 7, "is_demo": True, "symbol": "XAUUSD", "symbol_id": 99},
+    transport = SequencedTransport({"account_id": 7, "is_demo": True, "symbol": "XAUUSD", "symbol_id": 99, "positions": [], "open_orders": []},
                                    {"status": "ProtoOAOrderErrorEvent", "error_code": "MARKET_CLOSED"})
     adapter = CTraderDemoAdapter(CTraderDemoAccount(7, 99), store, transport)
     assert adapter.reconcile_after_restart()

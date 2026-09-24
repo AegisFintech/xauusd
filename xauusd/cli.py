@@ -121,7 +121,14 @@ def _paper_to_demo_coordinator(paper: PaperTrading) -> PaperToCTraderDemoCoordin
 def _ctrader_demo_adapter() -> CTraderDemoAdapter:
  api_config=CTraderDemoOpenApiConfig.from_env()
  transport=CTraderDemoOpenApiTransport(api_config)
- return CTraderDemoAdapter(transport.discover(),CockroachCTraderDemoStore(),transport,api_config.timeout_seconds)
+ def expected_volume():
+  factor=CTraderVolumeConversion(int(os.environ["CTRADER_VOLUME_PER_PAPER_UNIT"]))
+  position=float(_paper_from_env().state()["position"])
+  factor.validate()
+  if position==0: return 0
+  return factor.to_volume(abs(position)) * (1 if position>0 else -1)
+ return CTraderDemoAdapter(transport.discover(),CockroachCTraderDemoStore(),transport,api_config.timeout_seconds,
+                           expected_volume_provider=expected_volume)
 
 def _demo_automation_start(reason: str|None) -> dict:
  """Explicit operator override for the demo execution kill switch; paper and the loop are untouched."""

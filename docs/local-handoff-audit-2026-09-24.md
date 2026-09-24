@@ -146,7 +146,7 @@ Do not test this by attempting to authorize a real-money account.
 All six local handoff items are complete as audits/validation. Broker compatibility
 issues remain explicitly tracked work, not silently repaired trading behaviour.
 
-## Follow-up implementation
+## Follow-up implementation (supersedes the original blocker list)
 
 Environment repair (#18): removed the tracked temporary-path virtual-environment
 symlink and 96 bytecode files from Git tracking. Local Python 3.13 environment
@@ -164,3 +164,28 @@ error codes on error message types and rejection events fail closed. Timeout,
 partial-only, malformed, and ambiguous outcomes remain pending and stop execution;
 late events require reconciliation and never trigger automatic resubmission.
 Broker-free acceptance/partial/fill/reject/timeout tests pass; full suite: 399.
+
+Position reconciliation (#16): broker snapshots now retain positions and pending
+orders and validate the account ID. Pending orders are no longer reported as
+completed fills. Persisted request records preserve broker IDs, order IDs,
+position IDs, deal receipts, execution types and filled volumes. Reconciliation
+compares signed fills per position with the broker snapshot and authoritative
+paper exposure using the configured volume conversion. Netting reductions and
+flat positions are covered by offline tests; unmapped/manual positions, pending
+orders, legacy unknown outcomes, missing history, duplicate identities and
+exposure mismatches fail closed. Broker identity collisions stop before sending.
+
+Limits: live snapshots cannot recover a lost fill event or prove that an absent
+order failed. Such operations remain pending for operator investigation; no
+automatic adoption, history reconstruction, reset or resubmission is implemented.
+A separate follow-up tracks history-backed recovery. The persistent SQL store is
+tested through a local SQLite compatibility shim; no real Cockroach database or
+broker integration was exercised in this change. No trading-readiness claim is
+made from offline tests alone. The deployment remains paused.
+
+Final validation: 75 focused broker/CLI tests and all 415 tests passed, with one
+existing protobuf deprecation warning. Dependency checks and `git diff --check`
+passed. All xauusd services/timers remain inactive and disabled. Paper state is
+stopped with reason `operator`, position zero, equity 100000. Generated package
+metadata was also removed from Git tracking while preserving the local files.
+History-backed recovery is tracked in GitHub issue #19.

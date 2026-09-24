@@ -9,7 +9,7 @@ from xauusd.paper_trading import restart_policy
 class Transport:
     def __init__(self, response=None, error=None):
         self.calls = []
-        self.response = response or {"account_id": 7, "is_demo": True, "symbol": "XAUUSD", "symbol_id": 99}
+        self.response = response or {"account_id": 7, "is_demo": True, "symbol": "XAUUSD", "symbol_id": 99, "positions": [], "open_orders": []}
         self.error = error
 
     def send(self, request, timeout_seconds):
@@ -52,7 +52,7 @@ def test_duplicate_request_never_sends_a_second_transport_call(monkeypatch):
 
 def test_recovery_failure_kills_and_blocks_execution(monkeypatch):
     instance, store, transport = adapter(monkeypatch)
-    transport.response = {"account_id": 7, "is_demo": False, "symbol": "XAUUSD", "symbol_id": 99}
+    transport.response = {"account_id": 7, "is_demo": False, "symbol": "XAUUSD", "symbol_id": 99, "positions": [], "open_orders": []}
     assert not instance.reconcile_after_restart()
     assert store.state()["kill_switch_reason"] == "reconciliation_failed"
     result = instance.execute(CTraderOrder("request-2", "BUY", 100))
@@ -121,7 +121,7 @@ def test_open_api_transport_discovers_demo_account_and_normalizes_reconciliation
     monkeypatch.setenv("CTRADER_DEMO_ONLY", "true")
     client = FakeClient([
         {}, {}, {"symbol": [{"symbolName": "XAUUSD", "symbolId": 99, "enabled": True}]},
-        {"order": [{"clientOrderId": "pending-1", "orderId": 123}]},
+        {"ctidTraderAccountId": 7, "position": [], "order": [{"clientOrderId": "pending-1", "orderId": 123}]},
     ])
     messages = {name: Message for name in ("ProtoOAApplicationAuthReq", "ProtoOAAccountAuthReq",
                                             "ProtoOASymbolsListReq")}
@@ -131,7 +131,8 @@ def test_open_api_transport_discovers_demo_account_and_normalizes_reconciliation
     )
     assert transport.discover() == CTraderDemoAccount(7, 99)
     details = transport.send({"type": "ProtoOAReconcileReq"}, 1)
-    assert details["request_outcomes"]["pending-1"]["response"]["order_id"] == 123
+    assert details["open_orders"][0]["order_id"] == 123
+    assert details["request_outcomes"] == {}
     assert client.started and len(client.requests) == 4
     assert not any(type(request).__name__ == "ProtoOAGetAccountListByAccessTokenReq" for request in client.requests)
 
@@ -280,3 +281,16 @@ def test_reconcile_maps_persisted_broker_id_back_to_internal_id(monkeypatch):
     transport.response["request_outcomes"] = {broker_id: {"accepted": False, "reason": "BROKER_REJECTED"}}
     assert instance.reconcile_after_restart()
     assert store.requests[original]["outcome"]["request_id"] == original
+
+
+def test_broker_identity_collision_stops_before_submission(monkeypatch):
+    from xauusd.ctrader_demo import broker_client_order_id
+    instance, store, transport = adapter(monkeypatch)
+    assert instance.reconcile_after_restart()
+    instance.start("test")
+    long_id = "z" * 64
+    short_id = broker_client_order_id(long_id)
+    store.reserve(short_id, {"broker_client_order_id": short_id})
+    assert instance.execute(CTraderOrder(long_id, "BUY", 100))["reason"] == "BROKER_IDENTITY_COLLISION"
+    assert len(transport.calls) == 1
+    assert store.state()["stopped"]

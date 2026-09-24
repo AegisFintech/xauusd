@@ -17,7 +17,7 @@ class DemoTransport:
         self.is_demo = is_demo
 
     def send(self, request, timeout_seconds):
-        return {"account_id": 7, "is_demo": self.is_demo, "symbol": "XAUUSD", "symbol_id": 99}
+        return {"account_id": 7, "is_demo": self.is_demo, "symbol": "XAUUSD", "symbol_id": 99, "positions": [], "open_orders": []}
 
 
 def stopped_demo_adapter(monkeypatch, reason, is_demo=True):
@@ -267,3 +267,18 @@ def test_bits_notes_only_does_not_repeat_history(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr('sys.argv', ['xauusd', 'bits-memory', 'show', '--notes-only'])
     cli.main()
     assert json.loads(capsys.readouterr().out) == {'notes': {'findings': []}}
+
+
+def test_demo_factory_binds_authoritative_paper_exposure(monkeypatch):
+    from types import SimpleNamespace
+    monkeypatch.setenv("CTRADER_VOLUME_PER_PAPER_UNIT", "100")
+    monkeypatch.setattr(cli.CTraderDemoOpenApiConfig, "from_env", lambda: SimpleNamespace(timeout_seconds=30))
+    monkeypatch.setattr(cli, "CTraderDemoOpenApiTransport", lambda _: SimpleNamespace(discover=lambda: "account"))
+    monkeypatch.setattr(cli, "CockroachCTraderDemoStore", lambda: "store")
+    paper = {"position": -.5}
+    monkeypatch.setattr(cli, "_paper_from_env", lambda: SimpleNamespace(state=lambda: paper))
+    monkeypatch.setattr(cli, "CTraderDemoAdapter", lambda *args, **kwargs: kwargs)
+    provider = cli._ctrader_demo_adapter()["expected_volume_provider"]
+    assert provider() == -50
+    paper["position"] = 0
+    assert provider() == 0
