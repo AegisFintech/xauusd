@@ -70,3 +70,34 @@ Bits shell jobs use a server-enforced 1200-second (20-minute) execution timeout.
 The tool-call audit and stored job request record the effective timeout. This is
 separate from the Datadog workflow HTTP timeout. Existing recovery-stop behaviour
 is unchanged; changing this limit does not clear a persistent stop.
+
+## Local agent handoff (remote review, 2026-09-24)
+
+A remote Bits Code session made the change "Fail closed on restarts, broker errors and DST" (restart-policy allowlist, `demo-automation start`, cTrader order outcomes, New York market hours). It had no network access, no project `.venv`, no systemd, no cTrader and no graphify CLI. Once that change is merged into the server checkout, a local agent there must finish the items below. These items only run tests, read host state and documentation, edit the repository, and install dependencies that `pyproject.toml` declares into `.venv`. Do not start, enable or restart services, change a kill switch, or send broker requests. Delete each item when it is done and report the result in that commit.
+
+1. Run `.venv/bin/python -m pytest tests -q -p no:cacheprovider` and expect 388 passed (359 before the change plus 29 new) with no failures or errors. The remote run could not verify these:
+   - `tests/test_agent_view.py` and `tests/test_dashboard.py` were not collected (no fastapi).
+   - `test_postgres_connection_uses_configured_read_committed` failed (no psycopg).
+   - `test_codex_child_environment_uses_allowlist` failed (no `.venv`).
+   - Parquet I/O and the Twisted reactor used by `tests/test_ctrader_demo.py` ran only through local stand-ins.
+   - There was no `.env`. `cli.main()` loads `.env` into the environment without overriding variables that are already set, so a test that deletes a variable and then calls `cli.main()` sees the deployed value. Fix any such test by setting the variable explicitly.
+2. `xauusd.paper_trading` now loads `ZoneInfo("America/New_York")` at import. A missing tz database would therefore break every `xauusd.cli` command, and with it every systemd unit. From the checkout root, run `.venv/bin/python -m xauusd.cli paper status`. It must print the persisted kill switch unchanged (while paused: `stopped: true`, `operator`) and a boolean `market_open`. If the zone is missing, run `.venv/bin/python -m pip install 'tzdata>=2022.7'`; `pyproject.toml` now declares it.
+3. Run `graphify update .` and commit `graphify-out/`. The graph predates the change.
+4. Diff each `deploy/systemd/` unit against its `/etc/systemd/system/` copy and list any `xauusd-*` unit that exists only on the host. Read the host files only.
+   - `README.md` and the operator-pause note mention `xauusd-data-update.timer`, which has no template here. `README.md` also calls `xauusd-demo-automation.service` the only template, but there are five unit files.
+   - Copy missing host units into `deploy/systemd/` (without inline credentials) or correct the docs.
+   - `xauusd-demo-automation.service` may write only to `reports/`. Before it is ever enabled, confirm it can write the configured paper state store; the local SQLite default is under `state/`.
+5. Measure planner latency from the state database transcript (`STATE_DB_PATH`, table `agent_transcript`), read-only.
+   - Measure the time from each `bits_submit` row to the matching `assistant` row, and count `tick_end` rows that say `action not executed: budget or response age limit`.
+   - Why it matters: a reply with an action is discarded once `AGENT_MAX_MARKET_DATA_AGE_SECONDS` (180 s) have passed since submission, although the workflow may take up to `DD_WORKFLOW_TIMEOUT_SECONDS` (300 s).
+   - Report p50/p95 latency and the count so that gap can be fixed.
+6. Before any demo stage, confirm these cTrader Open API facts from the installed `ctrader_open_api` package and the official documentation, without connecting to cTrader:
+   - Which reply resolves a `ProtoOANewOrderReq` (acceptance, fill or error). Also confirm that `ProtoOAOrderErrorEvent`, `ProtoOAErrorRes` and rejected `ProtoOAExecutionEvent` replies carry a non-empty `errorCode`. The adapter records `BROKER_REJECTED` only when `errorCode` is set; any other reply counts as accepted.
+   - The maximum length of `clientOrderId`. Orders send the 64-character sha256 decision ID, so a lower limit (reportedly 50) would get every demo order rejected. Report it rather than changing the ID scheme, which also keys idempotency and reconciliation.
+   - Which `ProtoOAReconcileRes` position fields (`ProtoOAPosition`/`ProtoOATradeData`, such as `label` or `comment`) can tie a broker position to a request. Reconciling broker positions against the paper position depends on this.
+   - That `demo.ctraderapi.com` cannot authorize a live account. With `CTRADER_CTID_TRADER_ACCOUNT_ID` set, the account list and its `isLive` flag are skipped. The demo-only boundary then rests on the demo host refusing live accounts.
+
+Operator-only. Never do these autonomously, and never implement them without explicit operator approval:
+- Resuming the paused deployment, reconciling its timed-out job (`bits-recover`), `paper start`, `demo-automation start`, `state reset`, `state restore`, and enabling or restarting units.
+- Changing the Bits shell permission model, such as running it as an unprivileged user or restoring systemd hardening.
+- Changing risk-gate semantics. Examples: letting position-reducing trades through the daily-loss, drawdown or trade-count gates, or moving the daily-loss day from UTC midnight to the New York session.

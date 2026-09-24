@@ -39,7 +39,8 @@ def test_demo_automation_start_requires_a_reason(monkeypatch):
 
 def test_demo_automation_start_reconciles_then_clears_only_the_demo_switch(monkeypatch, capsys):
     monkeypatch.setenv("CTRADER_AUTOMATION_ENABLED", "true")
-    monkeypatch.delenv("CTRADER_PAPER_ONLY", raising=False)
+    # Set, not deleted: cli.main() loads .env, which would otherwise re-add a deployed `true`.
+    monkeypatch.setenv("CTRADER_PAPER_ONLY", "false")
     adapter = stopped_demo_adapter(monkeypatch, "transport_failure")
     monkeypatch.setattr(cli, "_ctrader_demo_adapter", lambda: adapter)
     monkeypatch.setattr(cli, "_paper_from_env", lambda: (_ for _ in ()).throw(AssertionError("paper touched")))
@@ -54,7 +55,7 @@ def test_demo_automation_start_reconciles_then_clears_only_the_demo_switch(monke
 
 def test_demo_automation_start_keeps_the_switch_stopped_when_reconciliation_fails(monkeypatch):
     monkeypatch.setenv("CTRADER_AUTOMATION_ENABLED", "true")
-    monkeypatch.delenv("CTRADER_PAPER_ONLY", raising=False)
+    monkeypatch.setenv("CTRADER_PAPER_ONLY", "false")
     adapter = stopped_demo_adapter(monkeypatch, "transport_failure", is_demo=False)
     monkeypatch.setattr(cli, "_ctrader_demo_adapter", lambda: adapter)
 
