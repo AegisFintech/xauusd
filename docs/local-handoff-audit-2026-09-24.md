@@ -207,3 +207,13 @@ the health endpoint reports no alerts and database integrity is OK. New run
 The public URL returned Cloudflare HTTP 403 to the unauthenticated server probe;
 the local dashboard API is responding. Browser access through Cloudflare was not
 verified. Full suite before resumption: 415 passed, one existing warning.
+
+## Operator-requested fresh session — 2026-09-24 07:05 UTC
+
+Stopped paper and the agent, then ran the supported atomic session reset. The
+verified pre-reset backup is `backups/local-state/20260924T070534Z`. Paper balance
+was reset to 100000, with old decisions, runs, transcript, shell jobs and working
+memory cleared. Source, credentials and downloaded market data were preserved.
+Paper-only operation was explicitly restarted as run `agent_1b340894c95d`; the
+first transcript event is `session_start` and health reports no alerts. New
+decisions are now part of this fresh session.
