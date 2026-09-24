@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import base64
+import hashlib
 import json
 import math
 import os
@@ -408,6 +410,7 @@ class CTraderDemoStore(Protocol):
     def mark_reconciled(self, details: dict[str, Any]) -> None: ...
     def reserve(self, request_id: str, request: dict[str, Any]) -> tuple[bool, dict[str, Any] | None]: ...
     def pending_request_ids(self) -> list[str]: ...
+    def request_records(self) -> dict[str, dict[str, Any]]: ...
     def finish(self, request_id: str, outcome: dict[str, Any]) -> None: ...
     def audit(self, event: str, payload: dict[str, Any]) -> None: ...
 
@@ -450,6 +453,9 @@ class InMemoryCTraderDemoStore:
     def finish(self, request_id: str, outcome: dict[str, Any]) -> None:
         self.requests[request_id].update(status="completed", outcome=outcome)
         self.audit("request_finished", {"request_id": request_id, "accepted": outcome["accepted"]})
+
+    def request_records(self) -> dict[str, dict[str, Any]]:
+        return json.loads(_canonical_json(self.requests))
 
     def pending_request_ids(self) -> list[str]:
         return [request_id for request_id, value in self.requests.items() if value["status"] == "pending"]
@@ -532,6 +538,12 @@ class CockroachCTraderDemoStore:
             db.execute("UPDATE ctrader_demo_requests SET status='completed',outcome_json=?,finished_at=? WHERE request_id=?", (_canonical_json(outcome), _now(), request_id))
             self._audit(db, "request_finished", {"request_id": request_id, "accepted": outcome["accepted"]})
 
+    def request_records(self) -> dict[str, dict[str, Any]]:
+        with self.connect() as db:
+            rows = db.execute("SELECT request_id,request_json,status,outcome_json FROM ctrader_demo_requests").fetchall()
+            return {row["request_id"]: {"request": json.loads(row["request_json"]), "status": row["status"],
+                    "outcome": json.loads(row["outcome_json"]) if row["outcome_json"] else None} for row in rows}
+
     def pending_request_ids(self) -> list[str]:
         with self.connect() as db:
             rows = db.execute("SELECT request_id FROM ctrader_demo_requests WHERE status='pending' ORDER BY created_at").fetchall()
@@ -589,7 +601,16 @@ class CTraderDemoAdapter:
                     details["symbol"] != self.account.symbol or details["symbol_id"] != self.account.symbol_id):
                 raise CTraderDemoSafetyError("broker reconciliation did not verify the configured demo account and XAUUSD symbol")
             pending = self.store.pending_request_ids()
-            outcomes = details["request_outcomes"]
+            records = self.store.request_records()
+            mapping = {}
+            for request_id, record in records.items():
+                # Pre-migration records used the original ID verbatim. Never rewrite history.
+                broker_id = record["request"].get("broker_client_order_id", request_id)
+                if broker_id in mapping:
+                    raise CTraderDemoSafetyError("ambiguous broker request identity")
+                mapping[broker_id] = request_id
+            outcomes = {mapping.get(key, key): dict(value, request_id=mapping.get(key, key))
+                        for key, value in details["request_outcomes"].items()}
             if set(pending) - set(outcomes):
                 raise CTraderDemoSafetyError("broker reconciliation did not resolve every pending request")
             for request_id in pending:
@@ -605,7 +626,8 @@ class CTraderDemoAdapter:
         order.validate(); self._validate_boundary()
         if self.store.state().get("stopped", True):
             return {"accepted": False, "reason": KILL_SWITCH, "request_id": order.request_id}
-        request_data = {"account_id": self.account.account_id, "symbol": self.account.symbol, "symbol_id": self.account.symbol_id, "side": order.side, "volume": order.volume}
+        request_data = {"account_id": self.account.account_id, "symbol": self.account.symbol, "symbol_id": self.account.symbol_id, "side": order.side, "volume": order.volume,
+                        "broker_client_order_id": broker_client_order_id(order.request_id)}
         reserved, prior = self.store.reserve(order.request_id, request_data)
         if not reserved:
             return prior or {"accepted": False, "reason": DUPLICATE_REQUEST, "request_id": order.request_id}
@@ -629,6 +651,14 @@ class CTraderDemoAdapter:
         return outcome
 
 
+def broker_client_order_id(request_id: str) -> str:
+    """Stable, ASCII broker ID; retain the full internal ID in the request store."""
+    if len(request_id) <= 50 and request_id.isascii():
+        return request_id
+    digest = base64.urlsafe_b64encode(hashlib.sha256(request_id.encode()).digest()).decode().rstrip("=")
+    return "xau_" + digest
+
+
 def build_new_order_request(account: CTraderDemoAccount, order: CTraderOrder) -> Any:
     """Construct the actual Open API market-order protobuf without opening a connection."""
     account.validate(); order.validate()
@@ -638,10 +668,10 @@ def build_new_order_request(account: CTraderDemoAccount, order: CTraderOrder) ->
     except ModuleNotFoundError:
         return {"type": "ProtoOANewOrderReq", "ctidTraderAccountId": account.account_id,
                 "symbolId": account.symbol_id, "orderType": "MARKET", "tradeSide": order.side,
-                "volume": order.volume, "clientOrderId": order.request_id, "label": "xauusd-demo"}
+                "volume": order.volume, "clientOrderId": broker_client_order_id(order.request_id), "label": "xauusd-demo"}
     return ProtoOANewOrderReq(ctidTraderAccountId=account.account_id, symbolId=account.symbol_id,
                               orderType=ProtoOAOrderType.MARKET, tradeSide=ProtoOATradeSide.Value(order.side),
-                              volume=order.volume, clientOrderId=order.request_id, label="xauusd-demo")
+                              volume=order.volume, clientOrderId=broker_client_order_id(order.request_id), label="xauusd-demo")
 
 
 def build_reconcile_request(account_id: int) -> Any:

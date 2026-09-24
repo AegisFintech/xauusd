@@ -251,3 +251,30 @@ def test_symbol_detail_error_is_fail_closed(monkeypatch):
         client_factory=lambda host, port: client, extract=lambda value: value, message_types=messages)
     with pytest.raises(CTraderDemoSafetyError, match=r"symbol detail error CH_UNKNOWN"):
         transport.symbol_metadata()
+
+
+def test_long_decision_id_is_persisted_but_broker_id_fits(monkeypatch):
+    from xauusd.ctrader_demo import broker_client_order_id, build_new_order_request
+    instance, store, transport = adapter(monkeypatch)
+    assert instance.reconcile_after_restart()
+    instance.start("test")
+    original = "a" * 64
+    order = CTraderOrder(original, "BUY", 100)
+    request = build_new_order_request(instance.account, order)
+    assert len(request.clientOrderId) <= 50
+    assert request.clientOrderId == broker_client_order_id(original)
+    assert request.clientOrderId != broker_client_order_id("b" * 64)
+    instance.execute(order)
+    assert store.requests[original]["request"]["broker_client_order_id"] == request.clientOrderId
+    assert broker_client_order_id("legacy-1") == "legacy-1"
+
+
+def test_reconcile_maps_persisted_broker_id_back_to_internal_id(monkeypatch):
+    from xauusd.ctrader_demo import broker_client_order_id
+    instance, store, transport = adapter(monkeypatch)
+    original = "c" * 64
+    broker_id = broker_client_order_id(original)
+    store.reserve(original, {"broker_client_order_id": broker_id})
+    transport.response["request_outcomes"] = {broker_id: {"accepted": False, "reason": "BROKER_REJECTED"}}
+    assert instance.reconcile_after_restart()
+    assert store.requests[original]["outcome"]["request_id"] == original

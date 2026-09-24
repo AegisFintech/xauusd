@@ -108,9 +108,9 @@
     "semantic_hash": "d32b2d543f0a4ce74be8cad4f47650fa"
   },
   "tests/test_ctrader_demo.py": {
-    "mtime": 1790220641.0876648,
-    "seen": 1790221339.2995818,
-    "ast_hash": "4717abb3148e1a3710942b4fb0e42a39",
+    "mtime": 1790232572.5734544,
+    "seen": 1790232593.9618928,
+    "ast_hash": "3315e3ba886992af4d6ca7531aab62c4",
     "semantic_hash": ""
   },
   "tests/test_dashboard.py": {
@@ -312,9 +312,9 @@
     "semantic_hash": "9b1c2ad522815ef9ed9435d37e82a17f"
   },
   "xauusd/ctrader_demo.py": {
-    "mtime": 1790220641.0916648,
-    "seen": 1790221339.2996376,
-    "ast_hash": "e87970ee648cb53ebb393be15c7d4f38",
+    "mtime": 1790232572.5694544,
+    "seen": 1790232593.9619887,
+    "ast_hash": "2229569f7e88a58a8c3940596464fcbb",
     "semantic_hash": ""
   },
   "xauusd/dashboard.py": {
@@ -522,9 +522,9 @@
     "semantic_hash": ""
   },
   "AGENTS.md": {
-    "mtime": 1790232492.3693554,
-    "seen": 1790232517.794921,
-    "ast_hash": "6414a8b82c08dab38c9ec892ea4d3c3b",
+    "mtime": 1790232590.3694766,
+    "seen": 1790232593.962069,
+    "ast_hash": "130a803c64a8514fe8c80ad3094d3bc7",
     "semantic_hash": ""
   },
   "README.md": {
@@ -726,9 +726,9 @@
     "semantic_hash": ""
   },
   "docs/local-handoff-audit-2026-09-24.md": {
-    "mtime": 1790221491.1008217,
-    "seen": 1790221503.5377011,
-    "ast_hash": "70b6aaf2f40d7c576fede352fb072b05",
+    "mtime": 1790232590.3694766,
+    "seen": 1790232593.9620855,
+    "ast_hash": "eda4a6d5ef6e0fff2734f62be4edeaba",
     "semantic_hash": ""
   }
 }

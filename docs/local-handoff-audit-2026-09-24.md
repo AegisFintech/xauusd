@@ -145,3 +145,14 @@ Do not test this by attempting to authorize a real-money account.
 
 All six local handoff items are complete as audits/validation. Broker compatibility
 issues remain explicitly tracked work, not silently repaired trading behaviour.
+
+## Follow-up implementation
+
+Environment repair (#18): removed the tracked temporary-path virtual-environment
+symlink and 96 bytecode files from Git tracking. Local Python 3.13 environment
+rebuilt; 388 tests and dependency checks passed. Services stayed inactive.
+
+Broker IDs (#14): new long/non-ASCII IDs use an ASCII SHA-256 representation
+within the 50-character limit. The full internal ID and broker ID are persisted
+before submission. Reconciliation maps through persisted request records; older
+records retain their original broker identity and are never automatically resent.
