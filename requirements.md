@@ -6,7 +6,126 @@ permission to change risk rules, reset state, resume/restart services, or enable
 broker orders. Implement changes separately from deployment. Preserve user data,
 credentials, arbitrary shell access, demo-only restrictions, and operator stops.
 
-## What is actually happening
+## Merge review — 2026-09-25, baseline `cba22b2`
+
+This revision supersedes the original priority list below. The original incident
+and evidence IDs remain for reproduction, not as claims about the merged code.
+Reviewed all 21 changed files, implementation paths and added tests. No application
+code was changed during this review.
+
+| Requirement area | Verified merged implementation | Remaining work |
+| --- | --- | --- |
+| Memory input/error handling | Canonical, compatibility and versioned forms; validation without state access; stdin/file input; safe structured rejection; versions/digests; SQLite atomic rollback | Pending-draft lifecycle and backend/concurrency acceptance below |
+| Research recovery | Safe bounded pending payload, repair instruction after two rejections, health alert | Pending findings can still be discarded by unrelated successful writes; recovery is prompt guidance, not proof of repair |
+| Shell environment | Shared environment builder, virtualenv PATH, optional extra paths, manifest, missing-command history/fallbacks | Discovery-failure visibility and deployment-check correctness below |
+| Diagnostics | Classified tick/transport/validation errors, memory and missing-executable health alerts | Candidate/no-trade view, decision counts and scheduling explanations remain open |
+| Reproducibility and live signal | Guidance improved; no experiment implementation changes | Entire original experiment/current-signal work remains open |
+| Research decisions and scheduling | Existing strict action contract and one-hour clamp retained | Entire original decision-state and scheduling work remains open |
+
+Do not rebuild the completed memory schema, CLI, environment builder or error
+classification. Extend them and retain their regression tests.
+
+### Runtime adoption is still pending
+
+At approximately 09:21 UTC, the running agent still had run ID
+`agent_1b340894c95d`, started September 24 07:05 UTC. Its heartbeat had neither
+`memory` nor `capabilities`, and the live store had no capabilities manifest. It
+was unstopped and waiting, with seven cycles without updated notes. Therefore
+pulling the merge did not activate the new long-running runner code. Newly spawned
+CLI processes can load the new files, so this is potentially a mixed-version
+runtime; do not call it fully deployed.
+
+An operator-authorized rollout must inspect active workflows/jobs first, preserve
+uncertain-side-effect recovery rules, coordinate agent and view versions, and
+verify new heartbeat fields plus a stored service-environment manifest. Never
+blindly restart an active shell job or clear a stop. Updating
+`docs/bits-system-prompt.md` does not update the Datadog agent configuration; the
+operator must synchronize it separately. This task authorizes review and
+requirements updates, not those operational actions.
+
+### R1 — P0: do not lose pending findings when memory is rewritten
+
+Confirmed in a temporary SQLite store using the merged code:
+
+1. Save valid notes A.
+2. Reject draft B containing new evidence and an invalid sources field.
+3. Write the unchanged valid notes A again.
+4. The result is `unchanged`, but `pending_notes` is deleted and the recovery alert
+   clears. B's unpersisted evidence is lost from the pending record.
+
+Cause: `BitsMemory.write_notes` unconditionally deletes `pending_notes` on every
+successful write, including an unchanged write. A later rejected safe payload
+also overwrites the previously retained payload, even if it concerns a different
+finding.
+
+Required: give pending drafts bounded durable identities and a base notes
+version/digest. Resolving or explicitly superseding a draft must reference that
+identity; arbitrary successful writes must not silently acknowledge it. Preserve
+unresolved evidence references when replacing a draft. Keep bounded storage with
+an explicit overflow/supersession policy and no secret retention. Update schema,
+CLI, prompt and documentation together. Do not introduce a trading stop.
+
+Acceptance: unchanged-write reproduction retains B; unrelated write retains B;
+explicit corrected resolution clears only B; multiple failed drafts have documented
+bounded behavior; interrupted resolution rolls back notes and pending state
+atomically. Add stale-version/concurrent-writer tests. Validate the transaction
+contract for the supported Cockroach backend before claiming database parity;
+existing local rollback tests alone are insufficient.
+
+### R2 — P1: capability discovery failure must remain visible
+
+Confirmed with the merged `minimal_manifest('os_error')` fallback:
+`prompt_view` omits its error code; `heartbeat_view` reports empty missing lists;
+and the CLI check accepts a returned fallback manifest because it checks only
+`required_missing`. The same issue applies to `--stored --check` when the runner
+has persisted that fallback. The runner's exception fallback itself is useful and
+must remain nonblocking.
+
+Required: publish explicit discovery status (`ok`, `partial`, `failed`) and safe
+error code in stored, prompt and heartbeat views. A failed/unknown manifest must
+not pass a deployment check. Represent unprobed tools as unknown rather than
+implicitly healthy. Include probe time and staleness in stored checks; report
+invalid declared extra directories and CLI/data discovery failures separately
+from missing optional tools. Keep research and risk monitoring running when
+optional discovery fails; do not weaken stop rules or shell permissions.
+
+Acceptance: inject discovery failure, persist fallback, then `--stored --check`
+returns nonzero and health/context explain the failure. A real direct discovery
+exception already exits nonzero and must continue to do so. Test partial discovery,
+stale stored manifests, repaired tools and an optional absent tool with a working
+fallback. Optional absence alone must not become a trading stop.
+
+### R3 — P1: make experiment continuity work with the deployed backend
+
+The original experiment requirements remain open. Additional implementation
+constraint: `ExperimentRegistry` currently requires Cockroach `DATABASE_URL`,
+whereas this deployment uses local SQLite. Reuse its schema/concepts with an
+explicit local-capable adapter or another justified backend-compatible record
+store; do not make optional database credentials a new dependency for local Bits
+research. Test both backend contracts and preserve immutable artifact references.
+
+Prioritize exact producer/data identities and current-signal timestamps before
+expanding strategy searches. A fixed memory writer does not resolve contradictory
+backtests, stale targets, or a weekly rule's lack of a current signal.
+
+### Delivery order after this merge
+
+1. R1 pending-draft preservation, then R2 honest discovery status/checks.
+2. Original reproducibility/current-signal requirements plus R3 local backend support.
+3. Original candidate decision state and isolated proposal-to-paper-fill tests.
+4. Original requested/effective scheduling and human no-trade dashboard requirements.
+5. Operator-authorized adoption, prompt synchronization and runtime acceptance.
+
+Validation: 88 focused tests and the full 453-test suite passed; one existing
+protobuf deprecation warning remains. `git diff --check` passed. Two additional
+isolated probes reproduced R1 and R2 without touching live application state.
+`graphify update .` refreshed the local graph for the merged code (2,210 nodes,
+6,208 edges). Existing generated graph changes were preserved separately from
+this requirements-only commit. No live Cockroach integration was exercised.
+No workflow submissions, broker orders, note repairs, resets or service restarts
+were performed by this review.
+
+## Original incident evidence (pre-merge snapshot)
 
 Snapshot at approximately 08:28 UTC (16:28 Asia/Shanghai), covering the session
 started 2026-09-24 07:05 UTC, run `agent_1b340894c95d`:
@@ -52,7 +171,7 @@ copy raw environment values or credentials into artifacts.
 | Transcript 13876 and 14441 | Agent requests October 2 00:02 UTC and September 27 22:05 UTC respectively as a weekly review; scheduler instead caps waits at one hour. |
 | `bits_state.working_notes` at snapshot | Last updated September 25 01:02 UTC, retaining earlier results despite subsequent contradictory reproduction. |
 
-## P0 — Repair memory writes and actionable errors
+## Implemented baseline — memory writes and actionable errors (R1 remains)
 
 Relevant: `xauusd/bits_memory.py`, `xauusd/cli.py`, `xauusd/bits_runner.py`,
 `docs/bits-system-prompt.md`, associated tests.
@@ -80,7 +199,7 @@ secret rejection, atomic preservation, readback, and useful safe error output.
 Reproduce the observed wrapper failure in an isolated store; never modify live
 notes as a test. No silent truncation or unbounded memory expansion.
 
-## P0 — Make the service execution environment discoverable
+## Implemented baseline — service environment discovery (R2 remains)
 
 Relevant: `xauusd/bits_jobs.py`, runner guidance, `deploy/systemd/`, documentation.
 
@@ -198,8 +317,8 @@ summaries must agree with authoritative state and verified results.
 
 ## Delivery and operational boundaries
 
-Implement P0 first, then experiment continuity/current-signal correctness, decision
-state, scheduling transparency, and dashboard reporting. Track milestones in GitHub,
+Follow the updated delivery order above. The two original P0 sections now describe
+implemented baselines to preserve; R1 and R2 describe their remaining gaps. Track milestones in GitHub,
 update README/AGENTS/prompt documentation where behavior changes, run focused tests
 and `.venv/bin/python -m pytest tests -q -p no:cacheprovider`, run `git diff --check`,
 and run `graphify update .` after code changes. Commit and push each milestone.
