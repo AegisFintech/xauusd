@@ -132,3 +132,75 @@ def test_shell_timeout_is_twenty_minutes_even_when_agent_requests_two(tmp_path):
         assert cycle['reply']['actions'][0]['args']['timeout_sec'] == 2
     finally:
         agent.stop()
+
+
+def test_tick_errors_keep_a_classified_code_phase_and_safe_summary(tmp_path):
+    import json
+    from threading import Event
+    agent = runner(tmp_path)
+    try:
+        agent.status_path = str(tmp_path / 'status.json')
+        agent.run_tick()  # a workflow is now outstanding
+        heartbeat = json.loads((tmp_path / 'status.json').read_text())
+        assert heartbeat['memory']['state'] == 'ok' and not heartbeat['memory']['needs_repair']
+        def failing_poll(*args):
+            stop.set()
+            raise BitsError("workflow did not succeed", "workflow_failed")
+        stop = Event()
+        agent.planner.poll = failing_poll
+        agent.run_forever(stop=stop)
+        error = [s for s in agent.transcript.steps(agent.run_id) if s['phase'] == 'tick_error'][-1]['content']
+        assert error == {'error_type': 'BitsError', 'error_code': 'workflow_failed',
+                         'summary': 'workflow did not succeed', 'cycle_phase': 'workflow'}
+    finally:
+        agent.stop()
+
+
+def test_base_runner_records_codes_for_planner_and_tick_errors(tmp_path):
+    import json
+    from datetime import datetime, timezone
+    from threading import Event
+    from xauusd.agent_loop import ContinuousAgentRunner, InMemoryAgentTranscriptStore
+    now = datetime.now(timezone.utc)
+    source = SimpleNamespace(read=lambda: SimpleNamespace(price=3000., observed_at=now))
+    paper = PaperTrading(InMemoryPaperTradingStore()); paper.start("test")
+    class Down:
+        def plan_with_raw(self, *args):
+            raise TimeoutError("planner down; password=hunter2")
+    coordinator = PaperToCTraderDemoCoordinator(paper, paper_only=True)
+    registry = build_agent_registry(source, paper, coordinator, AgentConfig())
+    store = InMemoryAgentTranscriptStore()
+    agent = ContinuousAgentRunner(Down(), registry, store, source, paper, coordinator, AgentConfig(),
+                                  status_path=str(tmp_path / 's.json'), now_provider=lambda: NOW)
+    assert agent.run_tick()['status'] == 'planner_error'
+    end = [s for s in store.steps(agent.run_id) if s['phase'] == 'tick_end'][-1]['content']
+    assert end['error_code'] == 'timeout' and 'hunter2' not in json.dumps(end)
+    stop = Event()
+    def boom():
+        stop.set()
+        raise BitsError("workflow deadline exceeded; no commands executed", "workflow_deadline_exceeded")
+    agent.run_tick = boom
+    agent.run_forever(stop=stop)
+    error = [s for s in store.steps(agent.run_id) if s['phase'] == 'tick_error'][-1]['content']
+    assert error['error_code'] == 'workflow_deadline_exceeded' and 'no commands executed' in error['summary']
+    assert json.loads((tmp_path / 's.json').read_text())['error_code'] == 'workflow_deadline_exceeded'
+
+
+def test_repeated_memory_rejections_become_a_specific_repair_task(tmp_path):
+    from xauusd.bits_memory import NotesRejected
+    agent = runner(tmp_path)
+    try:
+        draft = {'notes': {'findings': [{'text': 'EMA fold one differs by $2.80/oz', 'sources': ['job-9']}]}}
+        for _ in range(2):
+            with pytest.raises(NotesRejected):
+                agent.memory.write_notes(draft)
+        assert agent.run_tick()['status'] == 'bits_waiting'
+        context = agent.planner.invocations[-1]['context']
+        task = context['repair_task']
+        assert task['kind'] == 'memory_write' and task['consecutive_failures'] == 2
+        assert task['last_error']['code'] == 'missing_field'
+        assert context['history']['pending_notes']['payload'] == draft
+        import sys
+        assert sys.executable + ' -m xauusd.cli agent-tool TOOL' in context['execution']
+    finally:
+        agent.stop()

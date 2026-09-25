@@ -237,6 +237,36 @@ prove analytical failure. Updating only a note timestamp does not clear the coun
 
 Use `bits-memory show --notes-only` to retrieve research notes without duplicating conversation history.
 
+### Research notes (`bits-memory`, schema `xauusd.notes/1`)
+
+There is no standalone `bits-memory` executable; always run it through the CLI:
+
+```bash
+.venv/bin/python -m xauusd.cli bits-memory schema             # published schema, limits, source rules
+.venv/bin/python -m xauusd.cli bits-memory validate --input-file - <<'JSON'   # check only; no state is read or written
+{"notes": {"findings": [], "hypotheses": [], "rejected_approaches": [], "open_questions": [], "next_steps": []}}
+JSON
+.venv/bin/python -m xauusd.cli bits-memory write --input-file notes.json      # or --input JSON
+.venv/bin/python -m xauusd.cli bits-memory show --notes-only   # readback, with version and digest
+.venv/bin/python -m xauusd.cli bits-memory pending             # a rejected write retained for repair
+```
+
+Accepted inputs are the canonical object with exactly the five categories, the
+versioned wrapper `{"schema":"xauusd.notes/1","notes":{...}}`, and the observed
+`{"notes":{...}}` wrapper as a compatibility form. Mixed shapes, extra fields and
+unknown schema versions are rejected. Each category holds at most 12
+`{"text","sources"}` entries, and the canonical JSON is at most 4,000 characters;
+nothing is truncated. A successful write returns `version` and a `sha256` digest
+(identical content keeps its version). A rejection exits 2 and prints
+`status: rejected` with a stable `code`, JSON `path`, `expected` shape, sizes and
+`retryable`/`retry` guidance, never the payload or exception text; operational
+failures exit 1 with a classified code. The stored notes stay unchanged and a
+safe payload of up to 12,000 characters is retained as pending notes; anything
+sensitive or larger is recorded as not retained. Two consecutive rejections give
+Bits a `repair_task` and raise a `memory writes failing` health alert until a
+write succeeds. Tick errors record a classified `error_code`, a safe summary and
+the cycle phase rather than only an exception class name.
+
 Bits shell jobs use a server-enforced 1200-second (20-minute) execution timeout.
 The tool-call audit and stored job request record the effective timeout. This is
 separate from the Datadog workflow HTTP timeout. Existing recovery-stop behaviour

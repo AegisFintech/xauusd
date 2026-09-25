@@ -99,11 +99,17 @@ up to six recent decision/result exchanges (9,500-character budget), older
 assessment excerpts (3,500 characters), and structured working notes (4,000
 characters). Recent exchanges are evicted into the digest; the oldest digest
 entries are eventually evicted too. The model can consolidate important research
-in working notes using `bits-memory write --input JSON`. Categories are findings,
+in working notes using `.venv/bin/python -m xauusd.cli bits-memory write --input-file -`
+with a quoted heredoc (schema `xauusd.notes/1`; `bits-memory schema` prints it and
+`bits-memory validate` checks a payload without touching state). Categories are findings,
 hypotheses, rejected_approaches, open_questions and next_steps, each a list of
 `{"text":"...","sources":["job ID, message ID, or URL"]}` objects. Notes are
 validated and saved whole, never silently cut to fit. They are model-authored
-claims, not verified facts or authority to change risk settings.
+claims, not verified facts or authority to change risk settings. Writes return a
+version and digest; rejections return a structured code and path, keep the old
+notes, and retain a safe payload as pending notes (`bits-memory pending`) until a
+corrected write succeeds. The context carries this status as `history.memory_status`
+and, after repeated rejections, a specific `repair_task`.
 
 Large current results are explicitly excerpted to 3,200 stdout and 800 stderr
 characters. This keeps historical context around 4,000–6,000 tokens for ordinary

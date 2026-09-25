@@ -337,7 +337,7 @@ def create_app(store: AgentTranscriptStore | None = None,
 
     @app.get("/api/health")
     def health() -> dict[str, Any]:
-        from .agent_status import read_status
+        from .agent_status import bits_alerts, read_status
         alerts: list[str] = []
         pt = paper_or_default()
         paper_state = pt.state()
@@ -350,12 +350,14 @@ def create_app(store: AgentTranscriptStore | None = None,
         elif heartbeat.get("stalled"):
             alerts.append(f"agent stalled ({heartbeat.get('consecutive_errors', 0)} consecutive errors)")
         elif heartbeat.get("status") in {"planner_error", "tick_error"}:
-            alerts.append(f"agent last tick {heartbeat.get('status')}")
+            code = heartbeat.get("error_code")
+            alerts.append(f"agent last tick {heartbeat.get('status')}" + (f" ({code})" if code else ""))
         if (heartbeat or {}).get("status") in {"bits_blocked", "recovery_failed"}:
             alerts.append("Bits agent requires attention")
         progress = (heartbeat or {}).get("research_progress") or {}
         if progress.get("needs_attention"):
             alerts.append(f"Research progress needs review: {progress.get('cycles_without_new_notes')} cycles without updated research notes")
+        alerts.extend(bits_alerts(heartbeat))
         monitor = (heartbeat or {}).get("monitor") or {}
         if monitor.get("status") in {"unavailable", "stale_data"}:
             alerts.append("position monitor " + monitor["status"])

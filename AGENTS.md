@@ -66,7 +66,8 @@ Rules:
 - `state reset --confirm-reset` is an operator-only, explicitly requested fresh-session operation. It requires a stopped local paper account and no running Bits agent, makes a verified backup, clears paper/transcript/jobs/cycles/memory atomically, and leaves paper stopped until explicit start. Do not reset accounts autonomously.
 
 - Bits research continuity: deliver repository guidance once per content revision; continue hypotheses and experiments across cycles. Never force trades to clear a progress warning. Three completed cycles without changed structured notes trigger a dashboard review alert, not a trading stop.
-- Preserve original job ID and cursor when unwrapping output pages; never silently skip omitted output or recursively page retrieval jobs. Market window statistics are descriptive and include timestamps because bar windows can span data gaps.
+- Preserve original job ID and cursor when unwrapping output pages; never silently skip omitted output or recursively page retrieval jobs.
+- Research notes use the published `xauusd.notes/1` schema through `.venv/bin/python -m xauusd.cli bits-memory schema|validate|write|show|pending`; there is no standalone `bits-memory` executable. Rejections are structured (code, path, expected shape, sizes, retry guidance), never echo payloads or exception text, keep the stored notes, and retain a safe payload as pending notes; repeated rejections produce a `repair_task` and a health alert. Tick events carry a classified `error_code`, never raw exception text. Market window statistics are descriptive and include timestamps because bar windows can span data gaps.
 
 Bits shell jobs use a server-enforced 1200-second (20-minute) execution timeout.
 The tool-call audit and stored job request record the effective timeout. This is

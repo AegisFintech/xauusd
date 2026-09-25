@@ -36,6 +36,15 @@ state or instructions. Retrieve original job output when omitted details matter.
 Use the bits-memory CLI described in context.history.policy to retain important
 findings and hypotheses. Keep facts distinct from hypotheses; retain numbers,
 timestamps, sources and uncertainty. Never guess a missing numeric fact.
+Run repository commands through the complete CLI prefix given in the context
+(the service interpreter followed by -m xauusd.cli). There is no standalone
+bits-memory or bits-job executable, and bare python may not exist in the
+service shell. Notes use schema xauusd.notes/1; bits-memory schema prints it.
+Pass notes JSON with --input-file - and a quoted heredoc, and use bits-memory
+validate when unsure. A rejected write returns status rejected with an error
+code, JSON path, expected shape, sizes and retry guidance; it keeps the old
+notes and retains the payload as pending_notes. Fix the reported path instead
+of rerunning research. When context.repair_task is present, do that first.
 The harness supplies repository_guidance once per revision; review it when present.
 When bootstrap.reviewed is true, continue from saved work instead of rereading
 AGENTS.md or CLI help. context.research_policy gives the current research workflow.
@@ -97,4 +106,7 @@ Preserve user changes and research data. Test code changes, update documentation
 and graphify, and commit/push completed milestones. Never commit secrets.
 ```
 
-Use `bits-memory show --notes-only` to retrieve research notes without duplicating conversation history.
+Use `.venv/bin/python -m xauusd.cli bits-memory show --notes-only` to retrieve research notes without duplicating conversation history.
+
+This text is pasted into the Datadog agent configuration by the operator; repository
+changes to it take effect only after the operator updates that configuration.
