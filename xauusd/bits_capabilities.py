@@ -165,7 +165,9 @@ def data_access(cwd: str) -> dict:
                                      "bars=s.normalize(s.read()); print(bars.tail(3))\"",
             "backtester": "xauusd.engine.EventDrivenBacktester",
             "market_session": "xauusd.paper_trading.market_is_open (New York session; the UTC break "
-                              "moves with US daylight time)"}
+                              "moves with US daylight time)",
+            "weekly_bars": "xauusd.session_calendar.weekly_bars(bars, as_of=cutoff): New York session weeks "
+                           "with status complete, in_progress, incomplete_data or partial_start"}
 
 
 def missing_executables(result: dict) -> list[str]:

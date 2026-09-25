@@ -229,6 +229,13 @@ are not trade signals or evidence of profitability. The agent should run concret
 cost-aware experiments and save source-linked notes before waiting on measurable
 conditions. Arbitrary shell access and deterministic trading gates are unchanged.
 
+Weekly research aggregates M1 bars with `xauusd.session_calendar.weekly_bars`,
+which uses New York session weeks (Sunday 18:00 to Friday 17:00, so UTC
+boundaries move with daylight time) and marks each week `complete`,
+`in_progress`, `incomplete_data` or `partial_start`. It refuses bars after the
+information cutoff. A pandas weekly label does not prove a week completed, and
+holidays are not modelled, so early closes appear as incomplete weeks.
+
 Stored-output pages are unwrapped before prompt compression, retaining the original
 job ID and correct next offset. Follow that cursor instead of paging retrieval jobs.
 The health dashboard flags three completed cycles without changed research notes.

@@ -19,6 +19,8 @@ RESEARCH_POLICY = (
     'Working notes are already in context.history. If needed use its bits-memory show --notes-only command, '
     'not the full conversation history. Code lives in xauusd/ (not src/); inspect '
     'xauusd/data.py HistoricalDataStore and xauusd/engine.py EventDrivenBacktester for data and cost modeling. '
+    'Aggregate weeks with xauusd.session_calendar.weekly_bars (New York session weeks, explicit complete or '
+    'partial status); a pandas weekly label does not prove a week completed, so weekly signals use complete weeks. '
     'For scoped code navigation use graphify query only when context.capabilities lists graphify as '
     'available; otherwise use its listed fallback (GRAPH_REPORT.md plus grep). Missing-tool facts are '
     'retained in capabilities across cycles, so do not rediscover them. '
