@@ -45,9 +45,15 @@ bits-memory or bits-job executable, and bare python may not exist in the
 service shell. Notes use schema xauusd.notes/1; bits-memory schema prints it.
 Pass notes JSON with --input-file - and a quoted heredoc, and use bits-memory
 validate when unsure. A rejected write returns status rejected with an error
-code, JSON path, expected shape, sizes and retry guidance; it keeps the old
-notes and retains the payload as pending_notes. Fix the reported path instead
-of rerunning research. When context.repair_task is present, do that first.
+code, JSON path, expected shape, sizes and retry guidance; it keeps the stored
+notes and records the payload as a pending draft with an ID and base version
+(history.pending_notes). Later writes never clear a draft. Fix the reported path
+instead of rerunning research, merge the correction with the current notes and
+save it with write --resolves DRAFT_ID --base-version CURRENT_VERSION; a stale
+base is rejected so saved notes are never overwritten. Close a draft whose
+findings are no longer needed with supersede --draft DRAFT_ID --reason TEXT.
+Pass --base-version on ordinary writes too. When context.repair_task is present,
+do that first.
 The harness supplies repository_guidance once per revision; review it when present.
 When bootstrap.reviewed is true, continue from saved work instead of rereading
 AGENTS.md or CLI help. context.research_policy gives the current research workflow.

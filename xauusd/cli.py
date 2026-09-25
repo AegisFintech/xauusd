@@ -383,24 +383,32 @@ def _read_notes_input(raw: str|None, input_file: str|None) -> str|None:
                              expected="a readable UTF-8 JSON file, or - with a heredoc")]) from None
 
 def bits_memory_command(action: str, raw: str|None=None, input_file: str|None=None,
-                        notes_only: bool=False) -> tuple[int, dict]:
+                        notes_only: bool=False, resolves: list[str]|None=None, base_version: int|None=None,
+                        draft: str|None=None, reason: str|None=None) -> tuple[int, dict]:
  """Exit 0 on success, 2 for a rejected payload (fix and retry), 1 for an operational failure."""
  from .agent_loop import agent_transcript_store_from_env
  from .bits_jobs import BitsStore
- from .bits_memory import BitsMemory, NotesRejected, notes_schema, parse_notes_input, validate_notes
+ from .bits_memory import BitsMemory, NotesRejected, issue, notes_schema, parse_notes_input, validate_notes
  try:
+  allowed={"--resolves":{"write"},"--base-version":{"write"},"--draft":{"pending","supersede"},"--reason":{"supersede"}}
+  given={"--resolves":resolves,"--base-version":base_version,"--draft":draft,"--reason":reason}
+  misplaced=[flag for flag,value in given.items() if value is not None and action not in allowed[flag]]
+  if misplaced:
+   raise NotesRejected([issue("invalid_argument",flag,f"{flag} is not accepted by bits-memory {action}",
+                              expected="only with: "+", ".join(sorted(allowed[flag]))) for flag in misplaced])
   if action=="schema": return 0,notes_schema()
   if action=="validate":
    # Validation-only: parse and check, never open or mutate the state store.
    return 0,validate_notes(parse_notes_input(_read_notes_input(raw,input_file)))
   memory=BitsMemory(BitsStore(agent_transcript_store_from_env()))
   if action=="show": return 0,(memory.store.get("working_notes") if notes_only else memory.context())
-  if action=="pending": return 0,memory.pending()
+  if action=="pending": return 0,memory.pending(draft)
+  if action=="supersede": return 0,memory.supersede(draft,reason)
   try: text=_read_notes_input(raw,input_file)
   except NotesRejected as rejection:
-   memory.record_rejection(rejection)
+   memory.record_rejection(rejection,resolves=resolves or (),base_version=base_version)
    raise
-  return 0,memory.submit(text)
+  return 0,memory.submit(text,resolves or (),base_version)
  except NotesRejected as rejection:
   return 2,rejection.report()
  except Exception as exc:
@@ -494,10 +502,17 @@ def build_parser() -> argparse.ArgumentParser:
  recover=sub.add_parser("bits-recover",help="acknowledge reconciled interrupted commands; leaves paper stopped")
  recover.add_argument("--reason",required=True)
  memory=sub.add_parser("bits-memory",help="read, validate, or replace compact research notes (schema xauusd.notes/1)")
- memory.add_argument("action",choices=["show","validate","write","schema","pending"],
-                     help="validate checks notes without saving; pending shows a rejected write kept for repair")
+ memory.add_argument("action",choices=["show","validate","write","schema","pending","supersede"],
+                     help="validate checks notes without saving; pending lists rejected writes kept as drafts; "
+                          "supersede closes a draft deliberately")
  memory.add_argument("--input",help="notes JSON")
  memory.add_argument("--input-file",help="read notes JSON from a file, or - for stdin (use a quoted heredoc)")
+ memory.add_argument("--resolves",action="append",metavar="DRAFT_ID",
+                     help="write: a pending draft this write resolves (repeatable); unnamed drafts stay open")
+ memory.add_argument("--base-version",type=int,metavar="VERSION",
+                     help="write: the notes version this payload was written against; a stale base is rejected")
+ memory.add_argument("--draft",metavar="DRAFT_ID",help="pending/supersede: the draft to show or close")
+ memory.add_argument("--reason",help="supersede: why the draft's findings are no longer needed")
  memory.add_argument("--notes-only",action="store_true",help="show structured working notes without conversation history")
  caps=sub.add_parser("bits-capabilities",help="describe the Bits shell-job environment: interpreter, PATH, tools, data API")
  caps.add_argument("--check",action="store_true",help="exit 1 when a required executable is missing (deployment validation)")
@@ -618,7 +633,8 @@ def main():
   except Exception as exc: p.error(type(exc).__name__)
   print(json.dumps(result))
  if a.cmd=="bits-memory":
-  code,result=bits_memory_command(a.action,a.input,a.input_file,a.notes_only)
+  code,result=bits_memory_command(a.action,a.input,a.input_file,a.notes_only,a.resolves,a.base_version,
+                                  a.draft,a.reason)
   _print_structured(result)
   if code: raise SystemExit(code)
  if a.cmd=="bits-capabilities":

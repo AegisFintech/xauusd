@@ -86,6 +86,10 @@ def codes(error):
     return [(item['code'], item['path']) for item in error.issues]
 
 
+def open_drafts(memory):
+    return (memory.store.get('pending_drafts') or {'open': []})['open']
+
+
 def observed_wrapper_payload():
     """Shape of job c5ea68176942459881c9409618ac2936: valid notes inside a single notes key."""
     notes = {key: [] for key in NOTE_FIELDS}
@@ -172,7 +176,7 @@ def test_oversize_notes_report_sizes_and_preserve_previous_notes(memory):
     assert detail['actual_characters'] == len(canonical_json(big)) > NOTES_BUDGET
     assert detail['category_characters']['findings'] > 4900
     assert memory.store.get('working_notes') == before
-    pending = memory.store.get('pending_notes')
+    pending = open_drafts(memory)[-1]
     assert pending['attempts'] == 1 and pending['payload'] == big and pending['latest']['retained']
 
 
@@ -183,8 +187,10 @@ def test_secret_notes_are_rejected_never_echoed_or_retained(memory, monkeypatch)
         memory.write_notes(sample_notes(findings=[entry('leaked ' + value, 'job')]))
     assert caught.value.issues[0]['code'] == 'sensitive_content'
     assert value not in json.dumps(caught.value.report())
-    pending = memory.store.get('pending_notes')
-    assert pending['latest']['not_retained_reason'] == 'sensitive_content' and 'payload' not in pending
+    pending = open_drafts(memory)[-1]
+    assert pending['latest']['not_retained_reason'] == 'sensitive_content' and pending['payload'] is None
+    assert pending['evidence'] == [] and pending['payload_digest'] is None
+    assert value not in json.dumps(memory.store.get('pending_drafts'))
     assert value not in json.dumps(memory.context()) and value not in json.dumps(memory.pending())
     keyed = rejection({**sample_notes(), value: []}, memory.secrets)
     assert value not in json.dumps(keyed.report()) and keyed.issues[0]['path'] == '$[<unexpected key>]'
@@ -194,9 +200,12 @@ def test_storage_failure_rolls_back_the_whole_write(memory, monkeypatch):
     from xauusd.bits_jobs import StateTransaction
     memory.write_notes(sample_notes())
     before = memory.store.get('working_notes')
-    def broken(self, key):
-        raise RuntimeError('disk full')
-    monkeypatch.setattr(StateTransaction, 'delete', broken)
+    original = StateTransaction.put
+    def broken(self, key, value):
+        if key == 'pending_drafts':  # fails after the notes row was written in the same transaction
+            raise RuntimeError('disk full')
+        return original(self, key, value)
+    monkeypatch.setattr(StateTransaction, 'put', broken)
     with pytest.raises(RuntimeError):
         memory.write_notes(sample_notes(hypotheses=[entry('new', 'job')]))
     assert memory.store.get('working_notes') == before
@@ -218,11 +227,17 @@ def test_pending_notes_stay_recoverable_and_repeated_failures_create_repair_task
     assert all(' -m xauusd.cli bits-memory ' in command for command in task['commands'].values())
     context = memory.context()
     assert context['pending_notes']['payload'] == draft and context['memory_status']['needs_repair']
-    # The evidence reference survives in the retained payload until a corrected write succeeds.
+    # The evidence reference survives in the retained draft until a write explicitly resolves it.
+    draft_id = status['draft_ids'][0]
+    assert open_drafts(memory)[0]['evidence'] == ['c5ea68176942459881c9409618ac2936', 'transcript:14441']
     fixed = json.loads(json.dumps(draft))
     fixed['findings'][0]['sources'] = [fixed['findings'][0]['sources']]
-    assert memory.write_notes(fixed)['status'] == 'saved'
-    assert memory.store.get('pending_notes') is None and memory.repair_task() is None
+    unnamed = memory.write_notes(fixed)
+    assert unnamed['status'] == 'saved' and unnamed['open_drafts'] == [draft_id] and 'notice' in unnamed
+    assert 'later_write_did_not_resolve' in memory.repair_task()['repair_reasons']
+    resolved = memory.write_notes(fixed, resolves=[draft_id], base_version=unnamed['version'])
+    assert resolved['status'] == 'unchanged' and resolved['resolved'] == [{'draft_id': draft_id, 'dropped_evidence': []}]
+    assert open_drafts(memory) == [] and memory.repair_task() is None
     assert memory.status()['state'] == 'ok' and memory.status()['notes_version'] == 1
 
 
@@ -232,7 +247,7 @@ def test_unparseable_input_reports_position_and_is_kept_as_text(memory):
         memory.submit(text)
     detail = caught.value.issues[0]
     assert detail['code'] == 'invalid_json' and detail['line'] == 1 and detail['column'] > 1
-    pending = memory.store.get('pending_notes')
+    pending = open_drafts(memory)[-1]
     assert pending['payload_kind'] == 'text' and pending['payload'] == text
     for raw, code in (('{"a": NaN}', 'non_finite_number'), ('{"a": 1, "a": 2}', 'duplicate_field'),
                       ('x' * 70000, 'input_too_large'), (None, 'missing_input')):

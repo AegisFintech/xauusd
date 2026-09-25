@@ -82,8 +82,10 @@ def test_every_published_operation_is_a_real_cli_command(tmp_path):
     prefix = shlex.quote(sys.executable) + ' -m xauusd.cli '
     for name, command in build_manifest(cwd=str(tmp_path))['operations'].items():
         assert command.startswith(prefix), name
-        # Drop the heredoc body and any optional [..] suffix, then parse with the real grammar.
+        # Drop the heredoc body and any optional [..] suffix, fill documented placeholders with
+        # concrete values, then parse with the real grammar.
         rest = command[len(prefix):].split(' <<')[0].split(' [')[0]
+        rest = rest.replace('VERSION', '1').replace('DRAFT_ID', 'draft_' + '0' * 12)
         parser.parse_args(shlex.split(rest))  # raises SystemExit on an unsupported example
 
 

@@ -43,8 +43,14 @@ def bits_alerts(heartbeat: dict[str, Any] | None) -> list[str]:
     memory = heartbeat.get("memory") or {}
     if memory.get("needs_repair"):
         error = memory.get("last_error") or {}
-        alerts.append(f"memory writes failing: {memory.get('consecutive_failures', 0)} consecutive rejected writes "
-                      f"(last {error.get('code') or 'unknown'} at {error.get('path') or '$'}); stored notes unchanged")
+        last = f"last {error.get('code') or 'unknown'} at {error.get('path') or '$'}"
+        if "open_drafts" in memory:
+            reasons = ", ".join(memory.get("repair_reasons") or []) or "unresolved"
+            alerts.append(f"memory drafts need repair: {memory['open_drafts']} unresolved rejected write(s), "
+                          f"{memory.get('consecutive_failures', 0)} consecutive rejections ({reasons}; {last})")
+        else:  # heartbeat written by the previous release
+            alerts.append(f"memory writes failing: {memory.get('consecutive_failures', 0)} consecutive rejected "
+                          f"writes ({last}); stored notes unchanged")
     capabilities = heartbeat.get("capabilities") or {}
     if capabilities.get("required_missing"):
         alerts.append("Bits shell is missing required executables: " + ", ".join(capabilities["required_missing"]))

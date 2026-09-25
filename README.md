@@ -248,7 +248,9 @@ There is no standalone `bits-memory` executable; always run it through the CLI:
 JSON
 .venv/bin/python -m xauusd.cli bits-memory write --input-file notes.json      # or --input JSON
 .venv/bin/python -m xauusd.cli bits-memory show --notes-only   # readback, with version and digest
-.venv/bin/python -m xauusd.cli bits-memory pending             # a rejected write retained for repair
+.venv/bin/python -m xauusd.cli bits-memory pending [--draft ID] # rejected writes kept as drafts
+.venv/bin/python -m xauusd.cli bits-memory write --resolves ID --base-version 3 --input-file notes.json
+.venv/bin/python -m xauusd.cli bits-memory supersede --draft ID --reason 'replaced by a later reproduction'
 ```
 
 Accepted inputs are the canonical object with exactly the five categories, the
@@ -260,12 +262,30 @@ nothing is truncated. A successful write returns `version` and a `sha256` digest
 (identical content keeps its version). A rejection exits 2 and prints
 `status: rejected` with a stable `code`, JSON `path`, `expected` shape, sizes and
 `retryable`/`retry` guidance, never the payload or exception text; operational
-failures exit 1 with a classified code. The stored notes stay unchanged and a
-safe payload of up to 12,000 characters is retained as pending notes; anything
-sensitive or larger is recorded as not retained. Two consecutive rejections give
-Bits a `repair_task` and raise a `memory writes failing` health alert until a
-write succeeds. Tick errors record a classified `error_code`, a safe summary and
-the cycle phase rather than only an exception class name.
+failures exit 1 with a classified code. The stored notes stay unchanged.
+
+A rejected write that supplied a payload becomes a pending draft (`xauusd.drafts/1`)
+with a durable ID (`draft_` plus 12 hex characters), the base notes version and
+digest, the latest error, the payload when it is safe and at most 12,000
+characters, and its evidence references (anything under `sources`, up to 40).
+Retrying the identical payload or naming the draft updates it; a replaced payload
+keeps earlier unresolved references. Only `write --resolves ID` (in the same
+transaction as the notes) or `supersede --draft ID --reason TEXT` closes a draft;
+unrelated or unchanged writes never clear one, and the result lists drafts that
+remain open. `--base-version` makes a write fail with `stale_base` when the notes
+changed in between; resolving a draft whose base is older than the stored notes
+requires it, so a resolution cannot overwrite notes saved meanwhile. At most five
+drafts stay open: opening a sixth closes the oldest as `evicted_overflow`,
+keeping its ID, last error and references but not its payload. The newest 20
+closed records are kept. Sensitive payloads, references and reasons are never
+retained. Drafts rejected twice, skipped by a later write, based on older notes,
+unresolved for 30 minutes or migrated from the previous single pending record
+give Bits a `repair_task` and raise a `memory drafts need repair` health alert;
+none of this stops trading. Writes lock a sentinel row with `FOR UPDATE` on the
+Postgres/Cockroach path and use `BEGIN IMMEDIATE` on SQLite; the Postgres path is
+contract-tested offline, and `XAUUSD_TEST_DATABASE_URL` enables an opt-in test
+against a disposable database. Tick errors record a classified `error_code`, a
+safe summary and the cycle phase rather than only an exception class name.
 
 ### Bits shell environment (`bits-capabilities`)
 

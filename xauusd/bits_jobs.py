@@ -74,8 +74,23 @@ class StateTransaction:
     UPSERT = ("INSERT INTO bits_state(state_key,value_json) VALUES(?,?) "
               "ON CONFLICT(state_key) DO UPDATE SET value_json=excluded.value_json")
 
-    def __init__(self, db):
+    def __init__(self, db, dialect="sqlite"):
         self.db = db
+        self.dialect = dialect
+
+    def lock(self, key):
+        """Serialize read-modify-write transactions that name the same key.
+
+        SQLite's BEGIN IMMEDIATE already holds the database write lock. On the
+        Postgres/Cockroach path the sentinel row is created if needed and locked
+        with FOR UPDATE, so concurrent writers wait (or fail with a retryable
+        serialization error) instead of both reading the same version.
+        """
+        if self.dialect == "sqlite":
+            return
+        self.db.execute("INSERT INTO bits_state(state_key,value_json) VALUES(?,?) ON CONFLICT(state_key) DO NOTHING",
+                        (key, "{}"))
+        self.db.execute("SELECT value_json FROM bits_state WHERE state_key=? FOR UPDATE", (key,)).fetchone()
 
     def get(self, key, default=None):
         row = self.db.execute("SELECT value_json FROM bits_state WHERE state_key=?", (key,)).fetchone()
@@ -131,7 +146,7 @@ class BitsStore:
             if explicit:
                 db.execute("BEGIN IMMEDIATE")
             try:
-                yield StateTransaction(db)
+                yield StateTransaction(db, "sqlite" if explicit else "postgres")
                 if explicit:
                     db.execute("COMMIT")
             except BaseException:
