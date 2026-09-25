@@ -368,3 +368,22 @@ def test_bits_job_errors_are_structured(tmp_path, monkeypatch, capsys):
     assert code == 2 and result['error']['code'] == 'unknown_job' and not result['error']['retryable']
     code, result, _ = _run_cli(monkeypatch, capsys, 'bits-job', 'f' * 32, '--limit', '0')
     assert code == 2 and result['error']['code'] == 'invalid_page_bounds'
+
+
+def test_bits_capabilities_check_and_stored_manifest(tmp_path, monkeypatch, capsys):
+    _isolated_bits_state(tmp_path, monkeypatch)
+    code, manifest, _ = _run_cli(monkeypatch, capsys, 'bits-capabilities', '--check')
+    assert code == 0 and manifest['schema'] == 'xauusd.capabilities/1' and manifest['required_missing'] == []
+    code, result, _ = _run_cli(monkeypatch, capsys, 'bits-capabilities', '--stored')
+    assert code == 0 and result['status'] == 'none'
+    code, result, _ = _run_cli(monkeypatch, capsys, 'bits-capabilities', '--stored', '--check')
+    assert code == 1
+    from xauusd.bits_jobs import BitsStore
+    from xauusd.local_state import SQLiteAgentTranscriptStore
+    import os
+    BitsStore(SQLiteAgentTranscriptStore(os.environ['STATE_DB_PATH'])).put('capabilities', {**manifest, 'cwd': '/root/xauusd'})
+    code, result, _ = _run_cli(monkeypatch, capsys, 'bits-capabilities', '--stored', '--check')
+    assert code == 0 and result['cwd'] == '/root/xauusd'
+    monkeypatch.setattr('xauusd.bits_capabilities.SHELL', str(tmp_path / 'no-bash'))
+    code, result, _ = _run_cli(monkeypatch, capsys, 'bits-capabilities', '--check')
+    assert code == 1 and result['required_missing'] == ['bash']

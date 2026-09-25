@@ -45,6 +45,12 @@ def bits_alerts(heartbeat: dict[str, Any] | None) -> list[str]:
         error = memory.get("last_error") or {}
         alerts.append(f"memory writes failing: {memory.get('consecutive_failures', 0)} consecutive rejected writes "
                       f"(last {error.get('code') or 'unknown'} at {error.get('path') or '$'}); stored notes unchanged")
+    capabilities = heartbeat.get("capabilities") or {}
+    if capabilities.get("required_missing"):
+        alerts.append("Bits shell is missing required executables: " + ", ".join(capabilities["required_missing"]))
+    if capabilities.get("observed_missing"):
+        alerts.append("Bits shell jobs hit missing executables: " + ", ".join(capabilities["observed_missing"])
+                      + " (see capabilities fallbacks)")
     return alerts
 
 

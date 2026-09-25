@@ -204,3 +204,56 @@ def test_repeated_memory_rejections_become_a_specific_repair_task(tmp_path):
         assert sys.executable + ' -m xauusd.cli agent-tool TOOL' in context['execution']
     finally:
         agent.stop()
+
+
+class MissingToolPlanner(Planner):
+    def poll(self, instance, cycle, message):
+        reply = super().poll(instance, cycle, message)
+        if reply['actions']:
+            reply['actions'][0]['args']['command'] = 'definitely-missing-tool-xyz --version'
+        return reply
+
+
+def test_missing_executables_are_retained_across_cycles_and_restarts(tmp_path):
+    import json
+    from xauusd.agent_status import bits_alerts
+    agent = runner(tmp_path, MissingToolPlanner())
+    agent.status_path = str(tmp_path / 'status.json')
+    try:
+        first = agent.planner.invocations
+        agent.run_tick(); agent.run_tick()
+        for _ in range(100):
+            if agent.run_tick()['status'] == 'bits_waiting':
+                break
+            time.sleep(.03)
+        assert first[-1]['results'][0]['exit_code'] == 127
+        seen = first[-1]['context']['capabilities']['observed_missing']
+        assert [row['name'] for row in seen] == ['definitely-missing-tool-xyz']
+        # Only executables that are still missing are listed, with the job that hit them.
+        assert seen[0]['job_id'] == first[-1]['results'][0]['job_id'] and seen[0]['count'] == 1
+        heartbeat = json.loads((tmp_path / 'status.json').read_text())
+        assert heartbeat['capabilities']['observed_missing'] == ['definitely-missing-tool-xyz']
+        assert any('definitely-missing-tool-xyz' in alert for alert in bits_alerts(heartbeat))
+    finally:
+        agent.stop()
+    restarted = runner(tmp_path, Planner())
+    try:
+        # The restarted process polls the outstanding workflow; inspect the context it would send next.
+        context = restarted._context(restarted.source.read())
+        assert [row['name'] for row in context['capabilities']['observed_missing']] == ['definitely-missing-tool-xyz']
+        assert context['capabilities']['cli_prefix'] in context['execution']
+    finally:
+        restarted.stop()
+
+
+def test_capability_discovery_failure_never_blocks_the_agent(tmp_path, monkeypatch):
+    def broken(**kwargs):
+        raise OSError('probe failed')
+    monkeypatch.setattr('xauusd.bits_runner.build_manifest', broken)
+    agent = runner(tmp_path)
+    try:
+        assert agent.bits_store.get('capabilities')['error_code'] == 'os_error'
+        assert agent.run_tick()['status'] == 'bits_waiting'
+        assert not agent.paper_trading.state()['stopped']
+    finally:
+        agent.stop()

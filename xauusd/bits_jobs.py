@@ -17,6 +17,7 @@ import time
 from uuid import uuid4
 
 from .bits import BitsError, validate_shell_action
+from .bits_capabilities import SHELL, shell_environment
 from .experiment_registry import canonical_json
 
 
@@ -205,12 +206,9 @@ class ShellJobs:
         deadline = time.monotonic() + args["timeout_sec"]
         state = "failed"
         try:
-            from dotenv import dotenv_values
-            env = dict(os.environ)
-            latest = dotenv_values(self.secrets.env_file)
-            for key in ("CTRADER_ACCESS_TOKEN", "CTRADER_REFRESH_TOKEN"):
-                if latest.get(key): env[key] = latest[key]
-            proc = subprocess.Popen(["/bin/bash", "-c", args["command"]], cwd=args["cwd"], env=env,
+            # One definition of the job environment; the capability manifest uses it too.
+            env = shell_environment(env_file=self.secrets.env_file)
+            proc = subprocess.Popen([SHELL, "-c", args["command"]], cwd=args["cwd"], env=env,
                                     stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                     stderr=subprocess.PIPE, start_new_session=True)
             with selectors.DefaultSelector() as sel:

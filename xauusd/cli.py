@@ -406,6 +406,25 @@ def bits_memory_command(action: str, raw: str|None=None, input_file: str|None=No
  except Exception as exc:
   return 1,_command_failure(exc,"memory command failed; the stored notes were not changed")
 
+def bits_capabilities_command(check: bool=False, stored: bool=False) -> tuple[int, dict]:
+ """Manifest of the shell-job environment; --check exits 1 when a required executable is missing.
+
+ Without --stored it describes the environment this process would give a shell job. Run it under
+ the service environment (systemd-run) or use --stored: an interactive shell is not the service.
+ """
+ from .bits_capabilities import build_manifest
+ try:
+  if stored:
+   from .agent_loop import agent_transcript_store_from_env
+   from .bits_jobs import BitsStore
+   manifest=BitsStore(agent_transcript_store_from_env()).get("capabilities")
+   if manifest is None:
+    return (1 if check else 0),{"status":"none","message":"no manifest has been recorded by the agent service yet"}
+  else: manifest=build_manifest()
+ except Exception as exc:
+  return 1,_command_failure(exc,"capability discovery failed")
+ return (1 if check and manifest.get("required_missing") else 0),manifest
+
 def bits_job_page(job_id: str, stream: str, offset: int, limit: int) -> tuple[int, dict]:
  from .agent_loop import agent_transcript_store_from_env
  from .bits import BitsError
@@ -445,8 +464,8 @@ def bits_recover(reason: str) -> dict:
  finally: lock.close()
  return {"status":"reconciled","paper_stopped":True,"next":"paper start --reason operator_reconciled"}
 
-def main():
- load_dotenv(".env")
+def build_parser() -> argparse.ArgumentParser:
+ """The complete CLI grammar; also used to publish supported operations."""
  p=argparse.ArgumentParser(); sub=p.add_subparsers(dest="cmd"); c=sub.add_parser("campaign"); c.add_argument("--synthetic",action="store_true")
  b=sub.add_parser("backtest"); b.add_argument("--strategy",choices=["momentum","mean-reversion"],default="momentum"); b.add_argument("--start"); b.add_argument("--end")
  r=sub.add_parser("research"); r.add_argument("--start"); r.add_argument("--end")
@@ -480,6 +499,9 @@ def main():
  memory.add_argument("--input",help="notes JSON")
  memory.add_argument("--input-file",help="read notes JSON from a file, or - for stdin (use a quoted heredoc)")
  memory.add_argument("--notes-only",action="store_true",help="show structured working notes without conversation history")
+ caps=sub.add_parser("bits-capabilities",help="describe the Bits shell-job environment: interpreter, PATH, tools, data API")
+ caps.add_argument("--check",action="store_true",help="exit 1 when a required executable is missing (deployment validation)")
+ caps.add_argument("--stored",action="store_true",help="show the manifest recorded by the running agent service")
  job=sub.add_parser("bits-job",help="retrieve a bounded page of stored command output")
  job.add_argument("job_id")
  job.add_argument("--stream",choices=["stdout","stderr"],default="stdout")
@@ -497,6 +519,12 @@ def main():
  d=sub.add_parser("data"); ds=d.add_subparsers(dest="data_cmd"); i=ds.add_parser("import"); i.add_argument("csv"); v=ds.add_parser("validate")
  download=ds.add_parser("download"); download.add_argument("--start",required=True,help="UTC start date/time (for example 2026-08-01)"); download.add_argument("--end",help="UTC end date/time; defaults to now"); download.add_argument("--page-size",type=int,default=int(os.getenv("CTRADER_DATA_UPDATE_PAGE_SIZE","5000")))
  update=ds.add_parser("update"); update.add_argument("--overlap-minutes",type=int,default=int(os.getenv("CTRADER_DATA_UPDATE_OVERLAP_MINUTES","10"))); update.add_argument("--page-size",type=int,default=int(os.getenv("CTRADER_DATA_UPDATE_PAGE_SIZE","5000")))
+ p.subcommands=sorted(sub.choices)
+ return p
+
+def main():
+ load_dotenv(".env")
+ p=build_parser()
  a=p.parse_args(); logging.basicConfig(level=logging.INFO)
  if a.cmd=="campaign": campaign(a.synthetic)
  if a.cmd=="backtest": event_backtest(a.strategy,a.start,a.end)
@@ -591,6 +619,10 @@ def main():
   print(json.dumps(result))
  if a.cmd=="bits-memory":
   code,result=bits_memory_command(a.action,a.input,a.input_file,a.notes_only)
+  _print_structured(result)
+  if code: raise SystemExit(code)
+ if a.cmd=="bits-capabilities":
+  code,result=bits_capabilities_command(a.check,a.stored)
   _print_structured(result)
   if code: raise SystemExit(code)
  if a.cmd=="bits-job":

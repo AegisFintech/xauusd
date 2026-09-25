@@ -267,6 +267,45 @@ Bits a `repair_task` and raise a `memory writes failing` health alert until a
 write succeeds. Tick errors record a classified `error_code`, a safe summary and
 the cycle phase rather than only an exception class name.
 
+### Bits shell environment (`bits-capabilities`)
+
+Shell jobs run `/bin/bash -c` without a login profile, so interactive `PATH`
+additions (pipx, cargo, rc files) do not apply. The harness builds one explicit
+job environment: the service virtualenv's `bin` first (so `python` is the service
+interpreter), then absolute directories declared in `BITS_SHELL_EXTRA_PATH`, then
+the inherited service `PATH`. The capability manifest is computed from the same
+function:
+
+```bash
+.venv/bin/python -m xauusd.cli bits-capabilities            # what a job started by this process would see
+.venv/bin/python -m xauusd.cli bits-capabilities --stored   # the manifest recorded by the running agent
+```
+
+The manifest (`xauusd.capabilities/1`) lists the working directory, the absolute
+interpreter and CLI prefix, the resulting `PATH`, availability, path and version
+of `graphify`, `rg`, `git` and `grep` with documented fallbacks, supported CLI
+operations as complete commands, and the M1 data entry point. It includes no
+environment variable values other than `PATH`. The agent refreshes it at start-up,
+every 15 minutes, and when a job reports `command not found`. Observed missing
+executables persist across cycles and restarts, appear in `context.capabilities`,
+and raise a health alert until they resolve. An optional tool that is simply
+absent is reported with its fallback, not alerted. A discovery failure records a
+minimal manifest and never blocks the agent.
+
+Deployment validation is an operator step and restarts nothing. Run the check
+under the unit's working directory and environment file, because an interactive
+shell is not the service environment:
+
+```bash
+sudo systemd-run --pipe --wait --quiet -p WorkingDirectory=/root/xauusd \
+  -p EnvironmentFile=/root/xauusd/.env \
+  /root/xauusd/.venv/bin/python -m xauusd.cli bits-capabilities --check
+```
+
+`--check` exits 1 when a required executable (`/bin/bash` or the interpreter) is
+missing. Declare extra tool directories with `BITS_SHELL_EXTRA_PATH` in `.env`;
+the systemd unit files are unchanged.
+
 Bits shell jobs use a server-enforced 1200-second (20-minute) execution timeout.
 The tool-call audit and stored job request record the effective timeout. This is
 separate from the Datadog workflow HTTP timeout. Existing recovery-stop behaviour

@@ -155,6 +155,12 @@ are not trade signals or evidence of profitability. The agent should run concret
 cost-aware experiments and save source-linked notes before waiting on measurable
 conditions. Arbitrary shell access and deterministic trading gates are unchanged.
 
+Every invocation also carries `context.capabilities`, a compact view of the
+shell-job environment manifest (`bits-capabilities`): working directory, service
+interpreter and CLI prefix, `PATH`, available tools with fallbacks, the data entry
+point, and executables that real jobs reported as `command not found`. It is
+persisted, so missing-tool facts survive cycles and restarts.
+
 Stored-output pages are unwrapped before prompt compression, retaining the original
 job ID and correct next offset. Follow that cursor instead of paging retrieval jobs.
 The health dashboard flags three completed cycles without changed research notes.

@@ -16,8 +16,11 @@ execute duplicate actions through Datadog bash or HTTP tools. Do not use Apollo.
 The user authorizes arbitrary shell commands in this container without a command
 allow-list or per-command approval. You may run programs, install tools, edit code,
 search and download data. Commands already run asynchronously: do not background
-them or start another agent service. Read repository instructions and use graphify
-when investigating code. Keep long datasets on disk and request useful summaries.
+them or start another agent service. Read repository instructions. context.capabilities
+is computed from the shell-job environment: use the interpreter, CLI prefix, data
+entry point and tools it lists; use graphify only when it is listed as available,
+otherwise its fallback, and never retry an executable listed in observed_missing.
+Keep long datasets on disk and request useful summaries.
 
 Use context.tools schemas and the server's agent-tool CLI for trade proposals.
 Only demo.ctraderapi.com with CTRADER_DEMO_ONLY=true is permitted for broker access.

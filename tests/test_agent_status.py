@@ -39,3 +39,14 @@ def test_bits_alerts_name_repeated_memory_failures():
                                      "last_error": {"code": "ambiguous_shape", "path": "$"}}})
     assert alerts == ["memory writes failing: 3 consecutive rejected writes (last ambiguous_shape at $); "
                       "stored notes unchanged"]
+
+
+def test_bits_alerts_name_missing_executables():
+    from xauusd.agent_status import bits_alerts
+    heartbeat = {"capabilities": {"required_missing": ["bash"], "unavailable_tools": ["graphify"],
+                                  "observed_missing": ["python", "rg"]}}
+    assert bits_alerts(heartbeat) == ["Bits shell is missing required executables: bash",
+                                      "Bits shell jobs hit missing executables: python, rg (see capabilities fallbacks)"]
+    # An optional tool with a documented fallback is not, by itself, an alert.
+    assert bits_alerts({"capabilities": {"required_missing": [], "unavailable_tools": ["graphify"],
+                                         "observed_missing": []}}) == []
