@@ -574,9 +574,11 @@ class ContinuousAgentRunner:
             except Exception as exc:
                 self.consecutive_errors += 1
                 self._stale_ticks = 0
+                detail = self._error_details(exc)
                 self.transcript.append(self.run_id, tick, "tick_end",
-                                       {"summary": "planner error", "steps": step + 1, "error_type": type(exc).__name__})
-                self._write_status("planner_error", error_type=type(exc).__name__)
+                                       {"summary": "planner error", "steps": step + 1, "error_type": detail["error_type"],
+                                        "error_code": detail["error_code"]})
+                self._write_status("planner_error", error_type=detail["error_type"], error_code=detail["error_code"])
                 return {"tick": tick, "status": "planner_error", "summary": "planner error", "steps": step + 1}
             self.transcript.append(self.run_id, tick, "assistant", _assistant_step(action, raw, self.config.transcript_content_limit))
             if action["action"] == "final":
@@ -633,6 +635,11 @@ class ContinuousAgentRunner:
         result["status"] = "completed"
         return result
 
+    def _error_details(self, exc: BaseException) -> dict[str, Any]:
+        """Stable classification kept in tick events: code and safe summary, never raw text."""
+        from .bits import error_details
+        return error_details(exc)
+
     def run_forever(self, stop: Event | None = None, on_tick: Callable[[dict[str, Any]], None] | None = None) -> None:
         if stop is not None:
             self._stop = stop
@@ -643,8 +650,9 @@ class ContinuousAgentRunner:
                     on_tick(result)
             except Exception as exc:
                 self.consecutive_errors += 1
-                self.transcript.append(self.run_id, self._tick, "tick_error", {"error_type": type(exc).__name__})
-                self._write_status("tick_error", error_type=type(exc).__name__)
+                detail = self._error_details(exc)
+                self.transcript.append(self.run_id, self._tick, "tick_error", detail)
+                self._write_status("tick_error", **detail)
             self._stop.wait(self.config.poll_seconds)
 
     def stop(self) -> None:

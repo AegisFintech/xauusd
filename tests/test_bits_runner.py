@@ -132,3 +132,128 @@ def test_shell_timeout_is_twenty_minutes_even_when_agent_requests_two(tmp_path):
         assert cycle['reply']['actions'][0]['args']['timeout_sec'] == 2
     finally:
         agent.stop()
+
+
+def test_tick_errors_keep_a_classified_code_phase_and_safe_summary(tmp_path):
+    import json
+    from threading import Event
+    agent = runner(tmp_path)
+    try:
+        agent.status_path = str(tmp_path / 'status.json')
+        agent.run_tick()  # a workflow is now outstanding
+        heartbeat = json.loads((tmp_path / 'status.json').read_text())
+        assert heartbeat['memory']['state'] == 'ok' and not heartbeat['memory']['needs_repair']
+        def failing_poll(*args):
+            stop.set()
+            raise BitsError("workflow did not succeed", "workflow_failed")
+        stop = Event()
+        agent.planner.poll = failing_poll
+        agent.run_forever(stop=stop)
+        error = [s for s in agent.transcript.steps(agent.run_id) if s['phase'] == 'tick_error'][-1]['content']
+        assert error == {'error_type': 'BitsError', 'error_code': 'workflow_failed',
+                         'summary': 'workflow did not succeed', 'cycle_phase': 'workflow'}
+    finally:
+        agent.stop()
+
+
+def test_base_runner_records_codes_for_planner_and_tick_errors(tmp_path):
+    import json
+    from datetime import datetime, timezone
+    from threading import Event
+    from xauusd.agent_loop import ContinuousAgentRunner, InMemoryAgentTranscriptStore
+    now = datetime.now(timezone.utc)
+    source = SimpleNamespace(read=lambda: SimpleNamespace(price=3000., observed_at=now))
+    paper = PaperTrading(InMemoryPaperTradingStore()); paper.start("test")
+    class Down:
+        def plan_with_raw(self, *args):
+            raise TimeoutError("planner down; password=hunter2")
+    coordinator = PaperToCTraderDemoCoordinator(paper, paper_only=True)
+    registry = build_agent_registry(source, paper, coordinator, AgentConfig())
+    store = InMemoryAgentTranscriptStore()
+    agent = ContinuousAgentRunner(Down(), registry, store, source, paper, coordinator, AgentConfig(),
+                                  status_path=str(tmp_path / 's.json'), now_provider=lambda: NOW)
+    assert agent.run_tick()['status'] == 'planner_error'
+    end = [s for s in store.steps(agent.run_id) if s['phase'] == 'tick_end'][-1]['content']
+    assert end['error_code'] == 'timeout' and 'hunter2' not in json.dumps(end)
+    stop = Event()
+    def boom():
+        stop.set()
+        raise BitsError("workflow deadline exceeded; no commands executed", "workflow_deadline_exceeded")
+    agent.run_tick = boom
+    agent.run_forever(stop=stop)
+    error = [s for s in store.steps(agent.run_id) if s['phase'] == 'tick_error'][-1]['content']
+    assert error['error_code'] == 'workflow_deadline_exceeded' and 'no commands executed' in error['summary']
+    assert json.loads((tmp_path / 's.json').read_text())['error_code'] == 'workflow_deadline_exceeded'
+
+
+def test_repeated_memory_rejections_become_a_specific_repair_task(tmp_path):
+    from xauusd.bits_memory import NotesRejected
+    agent = runner(tmp_path)
+    try:
+        draft = {'notes': {'findings': [{'text': 'EMA fold one differs by $2.80/oz', 'sources': ['job-9']}]}}
+        for _ in range(2):
+            with pytest.raises(NotesRejected):
+                agent.memory.write_notes(draft)
+        assert agent.run_tick()['status'] == 'bits_waiting'
+        context = agent.planner.invocations[-1]['context']
+        task = context['repair_task']
+        assert task['kind'] == 'memory_write' and task['consecutive_failures'] == 2
+        assert task['last_error']['code'] == 'missing_field'
+        assert context['history']['pending_notes']['payload'] == draft
+        import sys
+        assert sys.executable + ' -m xauusd.cli agent-tool TOOL' in context['execution']
+    finally:
+        agent.stop()
+
+
+class MissingToolPlanner(Planner):
+    def poll(self, instance, cycle, message):
+        reply = super().poll(instance, cycle, message)
+        if reply['actions']:
+            reply['actions'][0]['args']['command'] = 'definitely-missing-tool-xyz --version'
+        return reply
+
+
+def test_missing_executables_are_retained_across_cycles_and_restarts(tmp_path):
+    import json
+    from xauusd.agent_status import bits_alerts
+    agent = runner(tmp_path, MissingToolPlanner())
+    agent.status_path = str(tmp_path / 'status.json')
+    try:
+        first = agent.planner.invocations
+        agent.run_tick(); agent.run_tick()
+        for _ in range(100):
+            if agent.run_tick()['status'] == 'bits_waiting':
+                break
+            time.sleep(.03)
+        assert first[-1]['results'][0]['exit_code'] == 127
+        seen = first[-1]['context']['capabilities']['observed_missing']
+        assert [row['name'] for row in seen] == ['definitely-missing-tool-xyz']
+        # Only executables that are still missing are listed, with the job that hit them.
+        assert seen[0]['job_id'] == first[-1]['results'][0]['job_id'] and seen[0]['count'] == 1
+        heartbeat = json.loads((tmp_path / 'status.json').read_text())
+        assert heartbeat['capabilities']['observed_missing'] == ['definitely-missing-tool-xyz']
+        assert any('definitely-missing-tool-xyz' in alert for alert in bits_alerts(heartbeat))
+    finally:
+        agent.stop()
+    restarted = runner(tmp_path, Planner())
+    try:
+        # The restarted process polls the outstanding workflow; inspect the context it would send next.
+        context = restarted._context(restarted.source.read())
+        assert [row['name'] for row in context['capabilities']['observed_missing']] == ['definitely-missing-tool-xyz']
+        assert context['capabilities']['cli_prefix'] in context['execution']
+    finally:
+        restarted.stop()
+
+
+def test_capability_discovery_failure_never_blocks_the_agent(tmp_path, monkeypatch):
+    def broken(**kwargs):
+        raise OSError('probe failed')
+    monkeypatch.setattr('xauusd.bits_runner.build_manifest', broken)
+    agent = runner(tmp_path)
+    try:
+        assert agent.bits_store.get('capabilities')['error_code'] == 'os_error'
+        assert agent.run_tick()['status'] == 'bits_waiting'
+        assert not agent.paper_trading.state()['stopped']
+    finally:
+        agent.stop()

@@ -8,7 +8,9 @@ from threading import Thread
 from uuid import uuid4
 
 from .agent_loop import ContinuousAgentRunner, paper_state_tool
-from .bits import BitsError, PROTOCOL
+from .bits import BitsError, PROTOCOL, error_details
+from .bits_capabilities import (build_manifest, cli_prefix, heartbeat_view, minimal_manifest, missing_executables,
+                                 prompt_view, record_observed)
 from .bits_jobs import BitsStore, ShellJobs, SecretFilter, AgentLock
 from .paper_trading import market_is_open
 from .bits_memory import BitsMemory, result_for_prompt, excerpt
@@ -16,12 +18,15 @@ from .bits_research import RESEARCH_POLICY, guidance_revision, market_research, 
 
 
 SHELL_TIMEOUT_SECONDS = 1200
+CYCLE_PHASES = {"idle", "submitting", "workflow", "response", "job", "feedback", "blocked"}
+CAPABILITY_TTL_SECONDS = 900
 
 
 class BitsAgentRunner(ContinuousAgentRunner):
     def __init__(self, *args, **kwargs):
         transcript = kwargs.get("transcript") or args[2]
         self.lock = AgentLock(transcript)
+        self._tick_phase = None
         super().__init__(*args, **kwargs)
         self.bits_store = BitsStore(self.transcript)
         self.secrets = SecretFilter()
@@ -32,11 +37,12 @@ class BitsAgentRunner(ContinuousAgentRunner):
                                           "Previous decisions, trades and working memory have been cleared."})
             self.bits_store.put("session_start_recorded", {"run_id": self.run_id})
         self.jobs = ShellJobs(self.bits_store, self.secrets)
+        self._capabilities(force=True)
         self.monitor_thread = None
         self.monitor_error = None
         self.workflow_timeout = float(os.getenv("DD_WORKFLOW_TIMEOUT_SECONDS", "300"))
         if not 1 <= self.workflow_timeout <= 3600:
-            raise BitsError("invalid workflow timeout")
+            raise BitsError("invalid workflow timeout", "invalid_workflow_timeout")
         interrupted = self.bits_store.recover()
         pending = self.bits_store.get("cycle", {})
         if interrupted or pending.get("phase") == "submitting":
@@ -49,8 +55,42 @@ class BitsAgentRunner(ContinuousAgentRunner):
     def _outcome(self, status, **extra):
         self._write_status(status, planner="datadog_bits", monitor=self.bits_store.get("monitor"),
                            research_progress=self.bits_store.get("research_progress", {}),
+                           memory=self.memory.status(),
+                           capabilities=heartbeat_view(self.bits_store.get("capabilities")),
                            next_review_at=self.bits_store.get("cycle", {}).get("next_at"), **extra)
         return {"tick": self._tick, "status": status, **extra}
+
+    def _capabilities(self, force=False):
+        """Manifest of the shell-job environment, persisted so its facts survive cycles and restarts."""
+        stored = self.bits_store.get("capabilities")
+        if stored and not force:
+            try:
+                age = (datetime.now(timezone.utc) - datetime.fromisoformat(stored["generated_at"])).total_seconds()
+            except (KeyError, TypeError, ValueError):
+                age = None
+            if age is not None and 0 <= age < CAPABILITY_TTL_SECONDS:
+                return stored
+        try:
+            manifest = build_manifest(observed=self.bits_store.get("observed_executables"))
+        except Exception as exc:
+            manifest = minimal_manifest(error_details(exc)["error_code"])
+        manifest = self.secrets.clean(manifest)
+        self.bits_store.put("capabilities", manifest)
+        return manifest
+
+    def _observe_job(self, result):
+        names = missing_executables(result)
+        if names:
+            self.bits_store.put("observed_executables",
+                                record_observed(self.bits_store.get("observed_executables"), names, result["job_id"]))
+            self._capabilities(force=True)
+
+    def _error_details(self, exc):
+        detail = error_details(exc)
+        # The phase the tick started in locates the failure (workflow poll, job, submission...).
+        if self._tick_phase in CYCLE_PHASES:
+            detail["cycle_phase"] = self._tick_phase
+        return self.secrets.clean(detail)
 
     def _guidance(self):
         from pathlib import Path
@@ -61,34 +101,45 @@ class BitsAgentRunner(ContinuousAgentRunner):
         return None
 
     def _context(self, market):
-        return {"utc_now": self._now().isoformat(), "market": self._market_view(market),
-                "paper": paper_state_tool(self.paper_trading).handler({}),
-                "paper_only": self.coordinator.paper_only,
-                "previous_summary": excerpt(self.bits_store.get("last_summary"), 1200),
-                "history": self.memory.context(),
-                "bootstrap": {"reviewed": bool(guidance_revision()) and self.bits_store.get("guidance_reviewed") == guidance_revision()},
-                "repository_guidance": self._guidance(),
-                "research_policy": RESEARCH_POLICY,
-                "research_progress": self.bits_store.get("research_progress", {}),
-                "market_research": market_research(self.source),
-                "session_reset": self.bits_store.get("session_reset"),
-                "tools": [tool for tool in self.registry.definitions()
-                          if tool["name"] in {"read_market", "paper_state", "propose_trade"}],
-                "execution": "The server harness executes your JSON shell action; do not use Datadog sandbox tools. "
-                "The current paper.stopped boolean is authoritative: a historical kill_switch_reason "
-                "does not imply an active stop when stopped=false. Never clear a true operator stop. "
-                "Run existing trading tools with .venv/bin/python -m xauusd.cli agent-tool TOOL --input 'JSON'. "
-                "Available TOOL names and input schemas are in tools. Use propose_trade for every trade; "
-                "never bypass the deterministic gates. Shell cwd is /root/xauusd. "
-                "Search/download/analysis commands may run directly in shell. Never print .env or secrets. "
-                "A shell job is already async: do not daemonize or background commands. "
-                "No command allow-list or per-command approval is required. Return strict xauusd/1 JSON. "
-                "Maximum one shell action per response; set timeout_sec=1200 (20 minutes). "
-                "The harness enforces 1200 seconds for shell jobs regardless of the proposed timeout. "
-                "max_output_bytes 1..1048576. "
-                "Write summary as a short plain-English decision for the human live view: what you observed, "
-                "why the next action is useful, or why you are waiting. No JSON, shell code or internal IDs in summary. "
-                "Finish with waiting/completed and a UTC next_review_at when no further action is useful."}
+        cli = cli_prefix()
+        capabilities = prompt_view(self._capabilities())
+        context = {"utc_now": self._now().isoformat(), "market": self._market_view(market),
+                  "paper": paper_state_tool(self.paper_trading).handler({}),
+                  "paper_only": self.coordinator.paper_only,
+                  "previous_summary": excerpt(self.bits_store.get("last_summary"), 1200),
+                  "history": self.memory.context(),
+                  "bootstrap": {"reviewed": bool(guidance_revision()) and self.bits_store.get("guidance_reviewed") == guidance_revision()},
+                  "repository_guidance": self._guidance(),
+                  "research_policy": RESEARCH_POLICY,
+                  "research_progress": self.bits_store.get("research_progress", {}),
+                  "market_research": market_research(self.source),
+                  "session_reset": self.bits_store.get("session_reset"),
+                  "tools": [tool for tool in self.registry.definitions()
+                            if tool["name"] in {"read_market", "paper_state", "propose_trade"}],
+                  "capabilities": capabilities,
+                  "execution": "The server harness executes your JSON shell action; do not use Datadog sandbox tools. "
+                  "The current paper.stopped boolean is authoritative: a historical kill_switch_reason "
+                  "does not imply an active stop when stopped=false. Never clear a true operator stop. "
+                  f"Run existing trading tools with {cli} agent-tool TOOL --input 'JSON'. "
+                  f"Run every repository CLI command through {cli}; bare python and standalone "
+                  "bits-memory/bits-job executables are not guaranteed to exist in the service shell. "
+                  "context.capabilities is computed from the shell-job environment: use the tools it lists "
+                  "as available, otherwise their fallbacks; do not retry an executable listed in observed_missing. "
+                  "Available TOOL names and input schemas are in tools. Use propose_trade for every trade; "
+                  f"never bypass the deterministic gates. Shell cwd is {capabilities['cwd']}. "
+                  "Search/download/analysis commands may run directly in shell. Never print .env or secrets. "
+                  "A shell job is already async: do not daemonize or background commands. "
+                  "No command allow-list or per-command approval is required. Return strict xauusd/1 JSON. "
+                  "Maximum one shell action per response; set timeout_sec=1200 (20 minutes). "
+                  "The harness enforces 1200 seconds for shell jobs regardless of the proposed timeout. "
+                  "max_output_bytes 1..1048576. "
+                  "Write summary as a short plain-English decision for the human live view: what you observed, "
+                  "why the next action is useful, or why you are waiting. No JSON, shell code or internal IDs in summary. "
+                  "Finish with waiting/completed and a UTC next_review_at when no further action is useful."}
+        repair = self.memory.repair_task()
+        if repair:
+            context["repair_task"] = repair
+        return context
 
     def _submit(self, cycle, market, results=None):
         if self._stop.is_set():
@@ -115,6 +166,7 @@ class BitsAgentRunner(ContinuousAgentRunner):
     def run_tick(self):
         self._tick += 1
         cycle = self.bits_store.get("cycle", {})
+        self._tick_phase = cycle.get("phase", "idle")
         if self.paper_trading.state().get("stopped"):
             self.jobs.stop()
             self._stop.set()
@@ -139,6 +191,7 @@ class BitsAgentRunner(ContinuousAgentRunner):
             result = self.jobs.store.job(cycle["job_id"])
             if result["status"] == "running":
                 return self._outcome("shell_running")
+            self._observe_job(result)
             if result["status"] in ("unknown", "cancelled", "timed_out"):
                 self.paper_trading.stop("recovery_failed")
                 self._record("tool_result", result)
@@ -152,12 +205,12 @@ class BitsAgentRunner(ContinuousAgentRunner):
             elapsed = (self._now() - datetime.fromisoformat(cycle["submitted_at"])).total_seconds()
             if elapsed > self.workflow_timeout:
                 self.bits_store.put("cycle", {"phase": "idle", "next_at": (self._now()+timedelta(seconds=60)).isoformat()})
-                raise BitsError("workflow deadline exceeded; no commands executed")
+                raise BitsError("workflow deadline exceeded; no commands executed", "workflow_deadline_exceeded")
             reply = self.planner.poll(cycle["instance"], cycle["cycle_id"], cycle["invocation"]["message_id"])
             if reply is None:
                 return self._outcome("bits_waiting")
             if self.secrets.unsafe(json.dumps(reply)):
-                raise BitsError("agent response contains sensitive content")
+                raise BitsError("agent response contains sensitive content", "sensitive_response")
             guidance = cycle["invocation"]["context"].get("repository_guidance")
             if guidance:
                 self.bits_store.put("guidance_reviewed", guidance["revision"])

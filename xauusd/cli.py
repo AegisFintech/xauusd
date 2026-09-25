@@ -357,6 +357,95 @@ def agent_tool(name: str, raw: str) -> dict:
  _validate_json(value,tool.input_schema)
  return SecretFilter().clean(tool.handler(value))
 
+def _print_structured(result: dict) -> None:
+ from .bits_jobs import SecretFilter
+ print(json.dumps(SecretFilter().clean(result),allow_nan=False))
+
+def _command_failure(exc: Exception, message: str) -> dict:
+ """Classified, payload-free failure: exception text and arguments are never echoed."""
+ from .bits import error_details
+ detail=error_details(exc)
+ return {"status":"failed","error":{"code":detail["error_code"],"error_type":detail["error_type"],
+         "message":message,"retryable":True,"retry":"unchanged"}}
+
+def _read_notes_input(raw: str|None, input_file: str|None) -> str|None:
+ import sys
+ from .bits_memory import MAX_INPUT_CHARACTERS, NotesRejected, issue
+ if raw is not None and input_file is not None:
+  raise NotesRejected([issue("conflicting_input","$","use either --input or --input-file, not both",
+                             expected="exactly one notes input")])
+ if input_file is None: return raw
+ try:
+  if input_file=="-": return sys.stdin.read(MAX_INPUT_CHARACTERS+1)
+  with open(input_file,encoding="utf-8") as handle: return handle.read(MAX_INPUT_CHARACTERS+1)
+ except (OSError,UnicodeDecodeError):
+  raise NotesRejected([issue("input_unreadable","$","the notes input file could not be read as UTF-8 text",
+                             expected="a readable UTF-8 JSON file, or - with a heredoc")]) from None
+
+def bits_memory_command(action: str, raw: str|None=None, input_file: str|None=None,
+                        notes_only: bool=False) -> tuple[int, dict]:
+ """Exit 0 on success, 2 for a rejected payload (fix and retry), 1 for an operational failure."""
+ from .agent_loop import agent_transcript_store_from_env
+ from .bits_jobs import BitsStore
+ from .bits_memory import BitsMemory, NotesRejected, notes_schema, parse_notes_input, validate_notes
+ try:
+  if action=="schema": return 0,notes_schema()
+  if action=="validate":
+   # Validation-only: parse and check, never open or mutate the state store.
+   return 0,validate_notes(parse_notes_input(_read_notes_input(raw,input_file)))
+  memory=BitsMemory(BitsStore(agent_transcript_store_from_env()))
+  if action=="show": return 0,(memory.store.get("working_notes") if notes_only else memory.context())
+  if action=="pending": return 0,memory.pending()
+  try: text=_read_notes_input(raw,input_file)
+  except NotesRejected as rejection:
+   memory.record_rejection(rejection)
+   raise
+  return 0,memory.submit(text)
+ except NotesRejected as rejection:
+  return 2,rejection.report()
+ except Exception as exc:
+  return 1,_command_failure(exc,"memory command failed; the stored notes were not changed")
+
+def bits_capabilities_command(check: bool=False, stored: bool=False) -> tuple[int, dict]:
+ """Manifest of the shell-job environment; --check exits 1 when a required executable is missing.
+
+ Without --stored it describes the environment this process would give a shell job. Run it under
+ the service environment (systemd-run) or use --stored: an interactive shell is not the service.
+ """
+ from .bits_capabilities import build_manifest
+ try:
+  if stored:
+   from .agent_loop import agent_transcript_store_from_env
+   from .bits_jobs import BitsStore
+   manifest=BitsStore(agent_transcript_store_from_env()).get("capabilities")
+   if manifest is None:
+    return (1 if check else 0),{"status":"none","message":"no manifest has been recorded by the agent service yet"}
+  else: manifest=build_manifest()
+ except Exception as exc:
+  return 1,_command_failure(exc,"capability discovery failed")
+ return (1 if check and manifest.get("required_missing") else 0),manifest
+
+def bits_job_page(job_id: str, stream: str, offset: int, limit: int) -> tuple[int, dict]:
+ from .agent_loop import agent_transcript_store_from_env
+ from .bits import BitsError
+ from .bits_jobs import BitsStore
+ if offset<0 or not 1<=limit<=65536:
+  return 2,{"status":"rejected","error":{"code":"invalid_page_bounds","path":"offset/limit",
+            "message":"offset must be >= 0 and limit 1..65536","retryable":True,"retry":"after_correction"}}
+ try:
+  job=BitsStore(agent_transcript_store_from_env()).job(job_id)
+ except BitsError as exc:
+  if exc.code!="unknown_job": return 1,_command_failure(exc,"output retrieval failed")
+  return 2,{"status":"rejected","error":{"code":"unknown_job","path":"job_id",
+            "message":"no stored shell job has this ID; use the original job_id from a result or output_page",
+            "retryable":False,"retry":"no"}}
+ except Exception as exc:
+  return 1,_command_failure(exc,"output retrieval failed")
+ text=job[stream]; end=min(len(text),offset+limit)
+ return 0,{"job_id":job_id,"status":job["status"],"exit_code":job["exit_code"],"stream":stream,
+           "text":text[offset:end],"offset":offset,"next_offset":end if end<len(text) else None,
+           "stored_characters":len(text),"capture_truncated":job["truncated"]}
+
 def bits_recover(reason: str) -> dict:
  """Explicit operator acknowledgement after reconciling uncertain side effects."""
  from .agent_loop import agent_transcript_store_from_env
@@ -375,8 +464,8 @@ def bits_recover(reason: str) -> dict:
  finally: lock.close()
  return {"status":"reconciled","paper_stopped":True,"next":"paper start --reason operator_reconciled"}
 
-def main():
- load_dotenv(".env")
+def build_parser() -> argparse.ArgumentParser:
+ """The complete CLI grammar; also used to publish supported operations."""
  p=argparse.ArgumentParser(); sub=p.add_subparsers(dest="cmd"); c=sub.add_parser("campaign"); c.add_argument("--synthetic",action="store_true")
  b=sub.add_parser("backtest"); b.add_argument("--strategy",choices=["momentum","mean-reversion"],default="momentum"); b.add_argument("--start"); b.add_argument("--end")
  r=sub.add_parser("research"); r.add_argument("--start"); r.add_argument("--end")
@@ -404,10 +493,15 @@ def main():
  tool.add_argument("--input",default="{}")
  recover=sub.add_parser("bits-recover",help="acknowledge reconciled interrupted commands; leaves paper stopped")
  recover.add_argument("--reason",required=True)
- memory=sub.add_parser("bits-memory",help="read or replace compact research notes")
- memory.add_argument("action",choices=["show","write"])
- memory.add_argument("--input")
+ memory=sub.add_parser("bits-memory",help="read, validate, or replace compact research notes (schema xauusd.notes/1)")
+ memory.add_argument("action",choices=["show","validate","write","schema","pending"],
+                     help="validate checks notes without saving; pending shows a rejected write kept for repair")
+ memory.add_argument("--input",help="notes JSON")
+ memory.add_argument("--input-file",help="read notes JSON from a file, or - for stdin (use a quoted heredoc)")
  memory.add_argument("--notes-only",action="store_true",help="show structured working notes without conversation history")
+ caps=sub.add_parser("bits-capabilities",help="describe the Bits shell-job environment: interpreter, PATH, tools, data API")
+ caps.add_argument("--check",action="store_true",help="exit 1 when a required executable is missing (deployment validation)")
+ caps.add_argument("--stored",action="store_true",help="show the manifest recorded by the running agent service")
  job=sub.add_parser("bits-job",help="retrieve a bounded page of stored command output")
  job.add_argument("job_id")
  job.add_argument("--stream",choices=["stdout","stderr"],default="stdout")
@@ -425,6 +519,12 @@ def main():
  d=sub.add_parser("data"); ds=d.add_subparsers(dest="data_cmd"); i=ds.add_parser("import"); i.add_argument("csv"); v=ds.add_parser("validate")
  download=ds.add_parser("download"); download.add_argument("--start",required=True,help="UTC start date/time (for example 2026-08-01)"); download.add_argument("--end",help="UTC end date/time; defaults to now"); download.add_argument("--page-size",type=int,default=int(os.getenv("CTRADER_DATA_UPDATE_PAGE_SIZE","5000")))
  update=ds.add_parser("update"); update.add_argument("--overlap-minutes",type=int,default=int(os.getenv("CTRADER_DATA_UPDATE_OVERLAP_MINUTES","10"))); update.add_argument("--page-size",type=int,default=int(os.getenv("CTRADER_DATA_UPDATE_PAGE_SIZE","5000")))
+ p.subcommands=sorted(sub.choices)
+ return p
+
+def main():
+ load_dotenv(".env")
+ p=build_parser()
  a=p.parse_args(); logging.basicConfig(level=logging.INFO)
  if a.cmd=="campaign": campaign(a.synthetic)
  if a.cmd=="backtest": event_backtest(a.strategy,a.start,a.end)
@@ -517,23 +617,18 @@ def main():
   try: result=bits_recover(a.reason)
   except Exception as exc: p.error(type(exc).__name__)
   print(json.dumps(result))
- if a.cmd in {"bits-memory","bits-job"}:
-  from .agent_loop import agent_transcript_store_from_env
-  from .bits_jobs import BitsStore,SecretFilter
-  from .bits_memory import BitsMemory
-  try:
-   store=BitsStore(agent_transcript_store_from_env())
-   if a.cmd=="bits-memory":
-    memory=BitsMemory(store)
-    result=(store.get("working_notes") if a.notes_only else memory.context()) if a.action=="show" else memory.write_notes(json.loads(a.input or "null"))
-   else:
-    if a.offset<0 or not 1<=a.limit<=65536: raise ValueError("invalid output page bounds")
-    job=store.job(a.job_id); text=job[a.stream]; end=min(len(text),a.offset+a.limit)
-    result={"job_id":a.job_id,"status":job["status"],"exit_code":job["exit_code"],"stream":a.stream,
-            "text":text[a.offset:end],"offset":a.offset,"next_offset":end if end<len(text) else None,
-            "stored_characters":len(text),"capture_truncated":job["truncated"]}
-   print(json.dumps(SecretFilter().clean(result),allow_nan=False))
-  except Exception as exc: p.error(type(exc).__name__)
+ if a.cmd=="bits-memory":
+  code,result=bits_memory_command(a.action,a.input,a.input_file,a.notes_only)
+  _print_structured(result)
+  if code: raise SystemExit(code)
+ if a.cmd=="bits-capabilities":
+  code,result=bits_capabilities_command(a.check,a.stored)
+  _print_structured(result)
+  if code: raise SystemExit(code)
+ if a.cmd=="bits-job":
+  code,result=bits_job_page(a.job_id,a.stream,a.offset,a.limit)
+  _print_structured(result)
+  if code: raise SystemExit(code)
  if a.cmd=="paper":
   pt=_paper_from_env()
   if a.action=="stop": pt.stop(a.reason)

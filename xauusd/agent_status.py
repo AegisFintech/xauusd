@@ -32,6 +32,28 @@ def write_status(payload: dict[str, Any], path: str | Path | None = None) -> Non
     temporary.replace(target)
 
 
+def bits_alerts(heartbeat: dict[str, Any] | None) -> list[str]:
+    """Operator alerts derived from Bits heartbeat fields.
+
+    Pure so it is testable without the web stack; a healthy heartbeat alone does
+    not mean research is progressing, so these name the specific blocker.
+    """
+    heartbeat = heartbeat or {}
+    alerts: list[str] = []
+    memory = heartbeat.get("memory") or {}
+    if memory.get("needs_repair"):
+        error = memory.get("last_error") or {}
+        alerts.append(f"memory writes failing: {memory.get('consecutive_failures', 0)} consecutive rejected writes "
+                      f"(last {error.get('code') or 'unknown'} at {error.get('path') or '$'}); stored notes unchanged")
+    capabilities = heartbeat.get("capabilities") or {}
+    if capabilities.get("required_missing"):
+        alerts.append("Bits shell is missing required executables: " + ", ".join(capabilities["required_missing"]))
+    if capabilities.get("observed_missing"):
+        alerts.append("Bits shell jobs hit missing executables: " + ", ".join(capabilities["observed_missing"])
+                      + " (see capabilities fallbacks)")
+    return alerts
+
+
 def read_status(path: str | Path | None = None) -> dict[str, Any] | None:
     target = Path(path) if path is not None else agent_status_path()
     try:

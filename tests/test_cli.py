@@ -282,3 +282,108 @@ def test_demo_factory_binds_authoritative_paper_exposure(monkeypatch):
     assert provider() == -50
     paper["position"] = 0
     assert provider() == 0
+
+
+def _isolated_bits_state(tmp_path, monkeypatch):
+    # Never touch live notes: every CLI memory test uses its own SQLite file.
+    path = str(tmp_path / 'isolated' / 'state.db')
+    monkeypatch.setenv('XAUUSD_STATE_BACKEND', 'local')
+    monkeypatch.setenv('STATE_DB_PATH', path)
+    return path
+
+
+def _run_cli(monkeypatch, capsys, *argv, stdin=None):
+    import io
+    import json
+    monkeypatch.setattr('sys.argv', ['xauusd', *argv])
+    if stdin is not None:
+        monkeypatch.setattr('sys.stdin', io.StringIO(stdin))
+    code = 0
+    try:
+        cli.main()
+    except SystemExit as exc:
+        code = exc.code
+    captured = capsys.readouterr()
+    return code, json.loads(captured.out), captured.err
+
+
+def _wrapped_notes():
+    notes = {key: [] for key in ('findings', 'hypotheses', 'rejected_approaches', 'open_questions', 'next_steps')}
+    notes['findings'] = [{'text': "Weekly reproduction: 34 signals; it's unverified.",
+                          'sources': ['53e4380f3e2e4b01b772a46da08601b5']}]
+    return {'notes': notes}
+
+
+def test_bits_memory_cli_writes_heredoc_input_and_reads_back_digest(tmp_path, monkeypatch, capsys):
+    import json
+    _isolated_bits_state(tmp_path, monkeypatch)
+    code, saved, _ = _run_cli(monkeypatch, capsys, 'bits-memory', 'write', '--input-file', '-',
+                              stdin=json.dumps(_wrapped_notes(), indent=2))
+    assert code == 0 and saved['status'] == 'saved' and saved['input_form'] == 'notes_wrapper'
+    assert saved['version'] == 1 and saved['digest'].startswith('sha256:')
+    assert ' -m xauusd.cli bits-memory show --notes-only' in saved['read_back']
+    code, stored, _ = _run_cli(monkeypatch, capsys, 'bits-memory', 'show', '--notes-only')
+    assert code == 0 and stored['digest'] == saved['digest'] and stored['notes'] == _wrapped_notes()['notes']
+    notes_file = tmp_path / 'notes.json'
+    notes_file.write_text(json.dumps(_wrapped_notes()['notes']))
+    code, again, _ = _run_cli(monkeypatch, capsys, 'bits-memory', 'write', '--input-file', str(notes_file))
+    assert code == 0 and again['status'] == 'unchanged' and again['version'] == 1
+
+
+def test_bits_memory_cli_rejection_is_structured_safe_and_keeps_notes(tmp_path, monkeypatch, capsys):
+    import json
+    _isolated_bits_state(tmp_path, monkeypatch)
+    _run_cli(monkeypatch, capsys, 'bits-memory', 'write', '--input', json.dumps(_wrapped_notes()))
+    mixed = {**_wrapped_notes(), 'findings': []}
+    code, report, err = _run_cli(monkeypatch, capsys, 'bits-memory', 'write', '--input', json.dumps(mixed))
+    assert code == 2 and report['status'] == 'rejected' and report['schema'] == 'xauusd.notes/1'
+    assert report['error']['code'] == 'ambiguous_shape' and report['error']['path'] == '$'
+    assert report['error']['retryable'] and 'expected' in report['error']
+    assert report['pending']['attempts'] == 1 and report['pending']['notes_unchanged']
+    assert 'BitsError' not in err and 'Traceback' not in err and 'unverified' not in json.dumps(report)
+    code, pending, _ = _run_cli(monkeypatch, capsys, 'bits-memory', 'pending')
+    assert code == 0 and pending['pending_notes']['payload'] == mixed
+    assert pending['memory_status']['notes_version'] == 1
+    code, report, _ = _run_cli(monkeypatch, capsys, 'bits-memory', 'write', '--input', '{}', '--input-file', '-')
+    assert code == 2 and report['error']['code'] == 'conflicting_input'
+    assert report['pending']['attempts'] == 2 and report['pending']['needs_repair']
+
+
+def test_bits_memory_validate_and_schema_never_open_state(tmp_path, monkeypatch, capsys):
+    import json
+    from pathlib import Path
+    path = _isolated_bits_state(tmp_path, monkeypatch)
+    code, result, _ = _run_cli(monkeypatch, capsys, 'bits-memory', 'validate', '--input', json.dumps(_wrapped_notes()))
+    assert code == 0 and result['status'] == 'valid'
+    code, result, _ = _run_cli(monkeypatch, capsys, 'bits-memory', 'validate', '--input', '{"findings": []}')
+    assert code == 2 and result['error']['code'] == 'missing_field'
+    code, schema, _ = _run_cli(monkeypatch, capsys, 'bits-memory', 'schema')
+    assert code == 0 and schema['schema'] == 'xauusd.notes/1'
+    assert not Path(path).parent.exists()
+
+
+def test_bits_job_errors_are_structured(tmp_path, monkeypatch, capsys):
+    _isolated_bits_state(tmp_path, monkeypatch)
+    code, result, _ = _run_cli(monkeypatch, capsys, 'bits-job', 'f' * 32)
+    assert code == 2 and result['error']['code'] == 'unknown_job' and not result['error']['retryable']
+    code, result, _ = _run_cli(monkeypatch, capsys, 'bits-job', 'f' * 32, '--limit', '0')
+    assert code == 2 and result['error']['code'] == 'invalid_page_bounds'
+
+
+def test_bits_capabilities_check_and_stored_manifest(tmp_path, monkeypatch, capsys):
+    _isolated_bits_state(tmp_path, monkeypatch)
+    code, manifest, _ = _run_cli(monkeypatch, capsys, 'bits-capabilities', '--check')
+    assert code == 0 and manifest['schema'] == 'xauusd.capabilities/1' and manifest['required_missing'] == []
+    code, result, _ = _run_cli(monkeypatch, capsys, 'bits-capabilities', '--stored')
+    assert code == 0 and result['status'] == 'none'
+    code, result, _ = _run_cli(monkeypatch, capsys, 'bits-capabilities', '--stored', '--check')
+    assert code == 1
+    from xauusd.bits_jobs import BitsStore
+    from xauusd.local_state import SQLiteAgentTranscriptStore
+    import os
+    BitsStore(SQLiteAgentTranscriptStore(os.environ['STATE_DB_PATH'])).put('capabilities', {**manifest, 'cwd': '/root/xauusd'})
+    code, result, _ = _run_cli(monkeypatch, capsys, 'bits-capabilities', '--stored', '--check')
+    assert code == 0 and result['cwd'] == '/root/xauusd'
+    monkeypatch.setattr('xauusd.bits_capabilities.SHELL', str(tmp_path / 'no-bash'))
+    code, result, _ = _run_cli(monkeypatch, capsys, 'bits-capabilities', '--check')
+    assert code == 1 and result['required_missing'] == ['bash']

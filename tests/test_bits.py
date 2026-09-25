@@ -67,3 +67,37 @@ def test_workflow_agent_identity_is_verified(monkeypatch):
     with pytest.raises(BitsError): client.verify_agent("other-agent")
     spec['data']['attributes']['spec']['outputSchema']['parameters'][0]['value']=''
     with pytest.raises(BitsError): client.verify_agent("expected-agent")
+
+
+def test_errors_carry_stable_codes_and_only_safe_text():
+    import sqlite3
+    from xauusd.bits import error_details
+    with pytest.raises(BitsError) as caught:
+        validate_envelope(json.dumps(envelope(reply_to="other")), "cycle", "message")
+    assert caught.value.code == "correlation_mismatch"
+    assert error_details(caught.value) == {"error_type": "BitsError", "error_code": "correlation_mismatch",
+                                           "summary": "response correlation mismatch"}
+    # Text from exceptions we do not own is never recorded; only a classification is.
+    leaked = error_details(ValueError("token=abc123 in /secret/path"))
+    assert leaked == {"error_type": "ValueError", "error_code": "unclassified"}
+    assert error_details(sqlite3.OperationalError("database is locked"))["error_code"] == "database_operational_error"
+    assert BitsError("Free text; with punctuation!").code == "free_text_with_punctuation"
+    assert BitsError("x", "Not A Code").code == "x"
+
+
+def test_http_and_workflow_failures_are_classified(monkeypatch):
+    from urllib import error as urlerror
+    client = object.__new__(BitsClient)
+    client.site, client.workflow_id, client.api_key, client.app_key, client.timeout = "datadoghq.com", "wf", "k", "a", 1
+
+    class Opener:
+        def open(self, *args, **kwargs):
+            raise urlerror.HTTPError("https://example.invalid", 429, "Too Many Requests", {}, None)
+    monkeypatch.setattr("xauusd.bits.request.build_opener", lambda *handlers: Opener())
+    with pytest.raises(BitsError) as caught:
+        client._request()
+    assert caught.value.code == "datadog_http_429"
+    monkeypatch.setattr(client, "_request", lambda *a: {"data": {"attributes": {"instanceStatus": {"detailsKind": "CANCELLED"}}}})
+    with pytest.raises(BitsError) as caught:
+        client.poll("instance", "cycle", "message")
+    assert caught.value.code == "workflow_cancelled"

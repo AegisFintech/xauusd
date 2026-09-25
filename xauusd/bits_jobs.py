@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import selectors
 import signal
+import sqlite3
 import subprocess
 import fcntl
 from threading import Event, Thread
@@ -16,6 +17,7 @@ import time
 from uuid import uuid4
 
 from .bits import BitsError, validate_shell_action
+from .bits_capabilities import SHELL, shell_environment
 from .experiment_registry import canonical_json
 
 
@@ -34,7 +36,8 @@ class AgentLock:
             fcntl.flock(self.handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             self.handle.close()
-            raise AgentAlreadyRunning("another Bits agent owns this container state") from None
+            raise AgentAlreadyRunning("another Bits agent owns this container state",
+                                      "agent_already_running") from None
 
     def close(self):
         self.handle.close()
@@ -66,6 +69,25 @@ class SecretFilter:
         return value
 
 
+class StateTransaction:
+    """bits_state access bound to one open connection/transaction."""
+    UPSERT = ("INSERT INTO bits_state(state_key,value_json) VALUES(?,?) "
+              "ON CONFLICT(state_key) DO UPDATE SET value_json=excluded.value_json")
+
+    def __init__(self, db):
+        self.db = db
+
+    def get(self, key, default=None):
+        row = self.db.execute("SELECT value_json FROM bits_state WHERE state_key=?", (key,)).fetchone()
+        return json.loads(row["value_json"]) if row else default
+
+    def put(self, key, value):
+        self.db.execute(self.UPSERT, (key, canonical_json(value)))
+
+    def delete(self, key):
+        self.db.execute("DELETE FROM bits_state WHERE state_key=?", (key,))
+
+
 class BitsStore:
     """Uses the same connection selected for the application's transcript store."""
     def __init__(self, transcript):
@@ -91,7 +113,31 @@ class BitsStore:
 
     def put(self, key, value):
         with self.db() as db:
-            db.execute("INSERT INTO bits_state(state_key,value_json) VALUES(?,?) ON CONFLICT(state_key) DO UPDATE SET value_json=excluded.value_json", (key, canonical_json(value)))
+            db.execute(StateTransaction.UPSERT, (key, canonical_json(value)))
+
+    def delete(self, key):
+        with self.db() as db:
+            db.execute("DELETE FROM bits_state WHERE state_key=?", (key,))
+
+    @contextmanager
+    def transaction(self):
+        """Read-modify-write several state keys atomically.
+
+        SQLite connections run in autocommit mode, so the transaction is explicit;
+        a psycopg connection block is already one transaction.
+        """
+        with self.db() as db:
+            explicit = isinstance(db, sqlite3.Connection)
+            if explicit:
+                db.execute("BEGIN IMMEDIATE")
+            try:
+                yield StateTransaction(db)
+                if explicit:
+                    db.execute("COMMIT")
+            except BaseException:
+                if explicit:
+                    db.execute("ROLLBACK")
+                raise
 
     def claim(self, cycle, action):
         key = hashlib.sha256((cycle + ":" + action["id"]).encode()).hexdigest()
@@ -106,7 +152,7 @@ class BitsStore:
             created = cur.rowcount == 1
             row = db.execute("SELECT request_json,result_json FROM bits_jobs WHERE action_key=?", (key,)).fetchone()
         if row["request_json"] != payload:
-            raise BitsError("action ID reused with different command")
+            raise BitsError("action ID reused with different command", "action_id_conflict")
         return json.loads(row["result_json"]), created
 
     def finish(self, result):
@@ -118,7 +164,7 @@ class BitsStore:
         with self.db() as db:
             row = db.execute("SELECT result_json FROM bits_jobs WHERE job_id=?", (job_id,)).fetchone()
         if not row:
-            raise BitsError("unknown shell job")
+            raise BitsError("unknown shell job", "unknown_job")
         return json.loads(row["result_json"])
 
     def recover(self):
@@ -140,10 +186,10 @@ class ShellJobs:
 
     def start(self, cycle, action):
         if self.cancelled.is_set():
-            raise BitsError("shell executor is stopping")
+            raise BitsError("shell executor is stopping", "executor_stopping")
         validate_shell_action(action)
         if self.secrets.unsafe(canonical_json(action)):
-            raise BitsError("command contains sensitive content")
+            raise BitsError("command contains sensitive content", "sensitive_command")
         result, created = self.store.claim(cycle, action)
         if created:
             self.workers = {key: thread for key, thread in self.workers.items() if thread.is_alive()}
@@ -160,12 +206,9 @@ class ShellJobs:
         deadline = time.monotonic() + args["timeout_sec"]
         state = "failed"
         try:
-            from dotenv import dotenv_values
-            env = dict(os.environ)
-            latest = dotenv_values(self.secrets.env_file)
-            for key in ("CTRADER_ACCESS_TOKEN", "CTRADER_REFRESH_TOKEN"):
-                if latest.get(key): env[key] = latest[key]
-            proc = subprocess.Popen(["/bin/bash", "-c", args["command"]], cwd=args["cwd"], env=env,
+            # One definition of the job environment; the capability manifest uses it too.
+            env = shell_environment(env_file=self.secrets.env_file)
+            proc = subprocess.Popen([SHELL, "-c", args["command"]], cwd=args["cwd"], env=env,
                                     stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                     stderr=subprocess.PIPE, start_new_session=True)
             with selectors.DefaultSelector() as sel:

@@ -237,6 +237,75 @@ prove analytical failure. Updating only a note timestamp does not clear the coun
 
 Use `bits-memory show --notes-only` to retrieve research notes without duplicating conversation history.
 
+### Research notes (`bits-memory`, schema `xauusd.notes/1`)
+
+There is no standalone `bits-memory` executable; always run it through the CLI:
+
+```bash
+.venv/bin/python -m xauusd.cli bits-memory schema             # published schema, limits, source rules
+.venv/bin/python -m xauusd.cli bits-memory validate --input-file - <<'JSON'   # check only; no state is read or written
+{"notes": {"findings": [], "hypotheses": [], "rejected_approaches": [], "open_questions": [], "next_steps": []}}
+JSON
+.venv/bin/python -m xauusd.cli bits-memory write --input-file notes.json      # or --input JSON
+.venv/bin/python -m xauusd.cli bits-memory show --notes-only   # readback, with version and digest
+.venv/bin/python -m xauusd.cli bits-memory pending             # a rejected write retained for repair
+```
+
+Accepted inputs are the canonical object with exactly the five categories, the
+versioned wrapper `{"schema":"xauusd.notes/1","notes":{...}}`, and the observed
+`{"notes":{...}}` wrapper as a compatibility form. Mixed shapes, extra fields and
+unknown schema versions are rejected. Each category holds at most 12
+`{"text","sources"}` entries, and the canonical JSON is at most 4,000 characters;
+nothing is truncated. A successful write returns `version` and a `sha256` digest
+(identical content keeps its version). A rejection exits 2 and prints
+`status: rejected` with a stable `code`, JSON `path`, `expected` shape, sizes and
+`retryable`/`retry` guidance, never the payload or exception text; operational
+failures exit 1 with a classified code. The stored notes stay unchanged and a
+safe payload of up to 12,000 characters is retained as pending notes; anything
+sensitive or larger is recorded as not retained. Two consecutive rejections give
+Bits a `repair_task` and raise a `memory writes failing` health alert until a
+write succeeds. Tick errors record a classified `error_code`, a safe summary and
+the cycle phase rather than only an exception class name.
+
+### Bits shell environment (`bits-capabilities`)
+
+Shell jobs run `/bin/bash -c` without a login profile, so interactive `PATH`
+additions (pipx, cargo, rc files) do not apply. The harness builds one explicit
+job environment: the service virtualenv's `bin` first (so `python` is the service
+interpreter), then absolute directories declared in `BITS_SHELL_EXTRA_PATH`, then
+the inherited service `PATH`. The capability manifest is computed from the same
+function:
+
+```bash
+.venv/bin/python -m xauusd.cli bits-capabilities            # what a job started by this process would see
+.venv/bin/python -m xauusd.cli bits-capabilities --stored   # the manifest recorded by the running agent
+```
+
+The manifest (`xauusd.capabilities/1`) lists the working directory, the absolute
+interpreter and CLI prefix, the resulting `PATH`, availability, path and version
+of `graphify`, `rg`, `git` and `grep` with documented fallbacks, supported CLI
+operations as complete commands, and the M1 data entry point. It includes no
+environment variable values other than `PATH`. The agent refreshes it at start-up,
+every 15 minutes, and when a job reports `command not found`. Observed missing
+executables persist across cycles and restarts, appear in `context.capabilities`,
+and raise a health alert until they resolve. An optional tool that is simply
+absent is reported with its fallback, not alerted. A discovery failure records a
+minimal manifest and never blocks the agent.
+
+Deployment validation is an operator step and restarts nothing. Run the check
+under the unit's working directory and environment file, because an interactive
+shell is not the service environment:
+
+```bash
+sudo systemd-run --pipe --wait --quiet -p WorkingDirectory=/root/xauusd \
+  -p EnvironmentFile=/root/xauusd/.env \
+  /root/xauusd/.venv/bin/python -m xauusd.cli bits-capabilities --check
+```
+
+`--check` exits 1 when a required executable (`/bin/bash` or the interpreter) is
+missing. Declare extra tool directories with `BITS_SHELL_EXTRA_PATH` in `.env`;
+the systemd unit files are unchanged.
+
 Bits shell jobs use a server-enforced 1200-second (20-minute) execution timeout.
 The tool-call audit and stored job request record the effective timeout. This is
 separate from the Datadog workflow HTTP timeout. Existing recovery-stop behaviour
