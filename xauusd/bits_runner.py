@@ -9,8 +9,8 @@ from uuid import uuid4
 
 from .agent_loop import ContinuousAgentRunner, paper_state_tool
 from .bits import BitsError, PROTOCOL, error_details
-from .bits_capabilities import (build_manifest, cli_prefix, heartbeat_view, minimal_manifest, missing_executables,
-                                 prompt_view, record_observed)
+from .bits_capabilities import (REFRESH_SECONDS, build_manifest, cli_prefix, heartbeat_view, minimal_manifest,
+                                 missing_executables, prompt_view, record_observed)
 from .bits_jobs import BitsStore, ShellJobs, SecretFilter, AgentLock
 from .paper_trading import market_is_open
 from .bits_memory import BitsMemory, result_for_prompt, excerpt
@@ -19,7 +19,7 @@ from .bits_research import RESEARCH_POLICY, guidance_revision, market_research, 
 
 SHELL_TIMEOUT_SECONDS = 1200
 CYCLE_PHASES = {"idle", "submitting", "workflow", "response", "job", "feedback", "blocked"}
-CAPABILITY_TTL_SECONDS = 900
+CAPABILITY_TTL_SECONDS = REFRESH_SECONDS
 
 
 class BitsAgentRunner(ContinuousAgentRunner):
@@ -56,7 +56,7 @@ class BitsAgentRunner(ContinuousAgentRunner):
         self._write_status(status, planner="datadog_bits", monitor=self.bits_store.get("monitor"),
                            research_progress=self.bits_store.get("research_progress", {}),
                            memory=self.memory.status(),
-                           capabilities=heartbeat_view(self.bits_store.get("capabilities")),
+                           capabilities=heartbeat_view(self._capabilities()),
                            next_review_at=self.bits_store.get("cycle", {}).get("next_at"), **extra)
         return {"tick": self._tick, "status": status, **extra}
 

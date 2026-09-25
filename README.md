@@ -309,8 +309,22 @@ environment variable values other than `PATH`. The agent refreshes it at start-u
 every 15 minutes, and when a job reports `command not found`. Observed missing
 executables persist across cycles and restarts, appear in `context.capabilities`,
 and raise a health alert until they resolve. An optional tool that is simply
-absent is reported with its fallback, not alerted. A discovery failure records a
-minimal manifest and never blocks the agent.
+absent is reported with its fallback, not alerted.
+
+Every manifest states its discovery `status`: `ok`, `partial` (named sections
+such as `cli_commands` or `data` failed, each with a safe `error_code`) or
+`failed` (the whole probe raised; the agent stores a fallback manifest and keeps
+researching and monitoring). Tools are `available`, `missing` or `unknown`;
+unprobed tools are never implied healthy, and `version_state` distinguishes
+`probed`, `probe_failed` and `not_probed`. Invalid `BITS_SHELL_EXTRA_PATH`
+entries are reported as `configuration_errors`, separately from missing tools.
+The same status, error codes and unknown tools appear in `context.capabilities`,
+the heartbeat and `/api/health` alerts. The agent re-probes at least every 15
+minutes while it runs. Output includes a `check` verdict: `--check` exits 1
+unless the status is `ok`, no required executable is missing and no declared
+configuration is invalid; with `--stored` the recorded manifest must also be at
+most 45 minutes old (probe time and age are shown). A discovery exception exits 1.
+None of these conditions stops trading.
 
 Deployment validation is an operator step and restarts nothing. Run the check
 under the unit's working directory and environment file, because an interactive

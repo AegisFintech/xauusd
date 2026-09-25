@@ -247,13 +247,34 @@ def test_missing_executables_are_retained_across_cycles_and_restarts(tmp_path):
 
 
 def test_capability_discovery_failure_never_blocks_the_agent(tmp_path, monkeypatch):
+    import json
+    from xauusd.agent_status import bits_alerts
+    from xauusd.cli import bits_capabilities_command
     def broken(**kwargs):
         raise OSError('probe failed')
     monkeypatch.setattr('xauusd.bits_runner.build_manifest', broken)
+    monkeypatch.setenv('XAUUSD_STATE_BACKEND', 'local')
+    monkeypatch.setenv('STATE_DB_PATH', str(tmp_path / 'state.db'))
     agent = runner(tmp_path)
+    agent.status_path = str(tmp_path / 'status.json')
     try:
-        assert agent.bits_store.get('capabilities')['error_code'] == 'os_error'
+        stored = agent.bits_store.get('capabilities')
+        assert stored['status'] == 'failed' and stored['error_code'] == 'os_error'
         assert agent.run_tick()['status'] == 'bits_waiting'
-        assert not agent.paper_trading.state()['stopped']
+        assert not agent.paper_trading.state()['stopped']  # research and risk monitoring keep running
+        context = agent.planner.invocations[-1]['context']['capabilities']
+        assert context['status'] == 'failed' and context['discovery']['error_code'] == 'os_error'
+        heartbeat = json.loads((tmp_path / 'status.json').read_text())
+        assert heartbeat['capabilities']['status'] == 'failed'
+        assert 'Bits shell capability discovery failed (os_error); tool availability is unknown' in bits_alerts(heartbeat)
+        code, result = bits_capabilities_command(check=True, stored=True)
+        assert code == 1 and result['check']['failures'][0]['kind'] == 'discovery'
+        # Once discovery works again the stored manifest recovers and the check passes.
+        monkeypatch.undo()
+        monkeypatch.setenv('XAUUSD_STATE_BACKEND', 'local')
+        monkeypatch.setenv('STATE_DB_PATH', str(tmp_path / 'state.db'))
+        assert agent._capabilities(force=True)['status'] == 'ok'
+        code, result = bits_capabilities_command(check=True, stored=True)
+        assert code == 0 and result['check']['passed']
     finally:
         agent.stop()

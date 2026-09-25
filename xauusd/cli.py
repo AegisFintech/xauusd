@@ -415,12 +415,14 @@ def bits_memory_command(action: str, raw: str|None=None, input_file: str|None=No
   return 1,_command_failure(exc,"memory command failed; the stored notes were not changed")
 
 def bits_capabilities_command(check: bool=False, stored: bool=False) -> tuple[int, dict]:
- """Manifest of the shell-job environment; --check exits 1 when a required executable is missing.
+ """Manifest of the shell-job environment plus a deployment verdict.
 
+ --check exits 1 unless discovery is complete (status ok), no required executable is missing and
+ no declared configuration is invalid; with --stored the recorded manifest must also be fresh.
  Without --stored it describes the environment this process would give a shell job. Run it under
  the service environment (systemd-run) or use --stored: an interactive shell is not the service.
  """
- from .bits_capabilities import build_manifest
+ from .bits_capabilities import build_manifest, check_manifest
  try:
   if stored:
    from .agent_loop import agent_transcript_store_from_env
@@ -431,7 +433,8 @@ def bits_capabilities_command(check: bool=False, stored: bool=False) -> tuple[in
   else: manifest=build_manifest()
  except Exception as exc:
   return 1,_command_failure(exc,"capability discovery failed")
- return (1 if check and manifest.get("required_missing") else 0),manifest
+ verdict=check_manifest(manifest,stored=stored)
+ return (1 if check and not verdict["passed"] else 0),{**manifest,"check":verdict}
 
 def bits_job_page(job_id: str, stream: str, offset: int, limit: int) -> tuple[int, dict]:
  from .agent_loop import agent_transcript_store_from_env

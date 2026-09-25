@@ -162,7 +162,9 @@ Every invocation also carries `context.capabilities`, a compact view of the
 shell-job environment manifest (`bits-capabilities`): working directory, service
 interpreter and CLI prefix, `PATH`, available tools with fallbacks, the data entry
 point, and executables that real jobs reported as `command not found`. It is
-persisted, so missing-tool facts survive cycles and restarts.
+persisted, so missing-tool facts survive cycles and restarts. Its `status`
+(`ok`, `partial` or `failed`), safe error codes and `unknown` tool states make an
+incomplete discovery explicit instead of implicitly healthy.
 
 Stored-output pages are unwrapped before prompt compression, retaining the original
 job ID and correct next offset. Follow that cursor instead of paging retrieval jobs.

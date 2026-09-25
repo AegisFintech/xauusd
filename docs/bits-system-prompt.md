@@ -20,6 +20,8 @@ them or start another agent service. Read repository instructions. context.capab
 is computed from the shell-job environment: use the interpreter, CLI prefix, data
 entry point and tools it lists; use graphify only when it is listed as available,
 otherwise its fallback, and never retry an executable listed in observed_missing.
+If capabilities.status is partial or failed, treat tools marked unknown as
+unavailable and use absolute paths and fallbacks; the harness retries discovery.
 Keep long datasets on disk and request useful summaries.
 
 Use context.tools schemas and the server's agent-tool CLI for trade proposals.

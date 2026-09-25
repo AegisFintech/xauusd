@@ -432,3 +432,28 @@ def test_bits_memory_cli_supersede_and_misplaced_flags(tmp_path, monkeypatch, ca
                  ['write', '--input', '{}', '--reason', 'x'], ['pending', '--base-version', '1']):
         code, result, _ = _run_cli(monkeypatch, capsys, 'bits-memory', *argv)
         assert code == 2 and result['error']['code'] == 'invalid_argument'
+
+
+def test_bits_capabilities_direct_discovery_exception_still_exits_nonzero(tmp_path, monkeypatch, capsys):
+    _isolated_bits_state(tmp_path, monkeypatch)
+    def broken(*args, **kwargs):
+        raise OSError('probe failed')
+    monkeypatch.setattr('xauusd.bits_capabilities.build_manifest', broken)
+    for argv in (['bits-capabilities'], ['bits-capabilities', '--check']):
+        code, result, _ = _run_cli(monkeypatch, capsys, *argv)
+        assert code == 1 and result['status'] == 'failed' and result['error']['code'] == 'os_error'
+
+
+def test_bits_capabilities_stored_check_rejects_a_stale_manifest(tmp_path, monkeypatch, capsys):
+    import os
+    from datetime import datetime, timedelta, timezone
+    from xauusd.bits_capabilities import STALE_AFTER_SECONDS, build_manifest
+    from xauusd.bits_jobs import BitsStore
+    from xauusd.local_state import SQLiteAgentTranscriptStore
+    _isolated_bits_state(tmp_path, monkeypatch)
+    old = (datetime.now(timezone.utc) - timedelta(seconds=STALE_AFTER_SECONDS + 60)).isoformat()
+    BitsStore(SQLiteAgentTranscriptStore(os.environ['STATE_DB_PATH'])).put('capabilities', {**build_manifest(), 'generated_at': old})
+    code, result, _ = _run_cli(monkeypatch, capsys, 'bits-capabilities', '--stored')
+    assert code == 0 and result['check']['stale'] and not result['check']['passed']
+    code, result, _ = _run_cli(monkeypatch, capsys, 'bits-capabilities', '--stored', '--check')
+    assert code == 1 and [failure['kind'] for failure in result['check']['failures']] == ['stale']
