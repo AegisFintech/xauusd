@@ -58,8 +58,10 @@ def test_restricted_path_manifest_reports_missing_tools_with_fallbacks(tmp_path,
     manifest = build_manifest({'PATH': str(bin_dir), 'HOME': str(tmp_path)}, cwd=str(tmp_path),
                               env_file=str(tmp_path / 'no-env'))
     tools = manifest['tools']
-    assert tools['rg'] == {'available': True, 'path': str(bin_dir / 'rg'), 'purpose': TOOLS['rg']['purpose'],
-                           'version': 'ripgrep 99.0.0'}
+    assert tools['rg'] == {'state': 'available', 'available': True, 'path': str(bin_dir / 'rg'),
+                           'purpose': TOOLS['rg']['purpose'], 'version': 'ripgrep 99.0.0', 'version_state': 'probed'}
+    assert tools['graphify']['state'] == 'missing' and tools['graphify']['version_state'] == 'not_applicable'
+    assert manifest['status'] == 'ok' and manifest['errors'] == [] and manifest['configuration_errors'] == []
     for name in ('graphify', 'grep', 'git'):
         assert not tools[name]['available'] and tools[name]['fallback'] == TOOLS[name]['fallback']
     assert 'GRAPH_REPORT.md' in tools['graphify']['fallback']
@@ -82,8 +84,10 @@ def test_every_published_operation_is_a_real_cli_command(tmp_path):
     prefix = shlex.quote(sys.executable) + ' -m xauusd.cli '
     for name, command in build_manifest(cwd=str(tmp_path))['operations'].items():
         assert command.startswith(prefix), name
-        # Drop the heredoc body and any optional [..] suffix, then parse with the real grammar.
+        # Drop the heredoc body and any optional [..] suffix, fill documented placeholders with
+        # concrete values, then parse with the real grammar.
         rest = command[len(prefix):].split(' <<')[0].split(' [')[0]
+        rest = rest.replace('VERSION', '1').replace('DRAFT_ID', 'draft_' + '0' * 12)
         parser.parse_args(shlex.split(rest))  # raises SystemExit on an unsupported example
 
 
@@ -165,3 +169,114 @@ def test_service_like_shell_runs_documented_examples_without_profile(tmp_path, m
     assert job_view['path']['entries'][-1] == str(empty_bin)
     assert not job_view['tools']['rg']['available'] and not job_view['tools']['grep']['available']
     assert job_view['required_missing'] == [] and job_view['cwd'] == str(tmp_path)
+
+
+# --- R2: discovery status stays honest in stored, prompt and heartbeat views ---
+from datetime import datetime, timedelta, timezone
+from xauusd.agent_status import bits_alerts
+from xauusd.bits_capabilities import STALE_AFTER_SECONDS, check_manifest, minimal_manifest
+
+
+def test_failed_discovery_is_explicit_in_every_view():
+    manifest = minimal_manifest('os_error')
+    assert manifest['status'] == 'failed' and manifest['errors'] == [{'section': 'manifest', 'error_code': 'os_error'}]
+    assert all(tool['state'] == 'unknown' and tool['available'] is None for tool in manifest['tools'].values())
+    view = prompt_view(manifest)
+    assert view['status'] == 'failed' and view['discovery']['error_code'] == 'os_error'
+    assert view['tools']['rg'] == {'available': None, 'state': 'unknown', 'fallback': TOOLS['rg']['fallback']}
+    beat = heartbeat_view(manifest)
+    assert beat['status'] == 'failed' and beat['error_code'] == 'os_error' and beat['unavailable_tools'] == []
+    assert beat['unknown_tools'] == sorted(TOOLS)
+    verdict = check_manifest(manifest)
+    assert not verdict['passed'] and verdict['failures'][0] == {
+        'kind': 'discovery', 'status': 'failed', 'error_code': 'os_error',
+        'errors': [{'section': 'manifest', 'error_code': 'os_error'}]}
+    assert bits_alerts({'capabilities': beat}) == [
+        'Bits shell capability discovery failed (os_error); tool availability is unknown']
+    # A manifest without an explicit status (previous release or corrupted) is unknown, never passing.
+    legacy = {key: value for key, value in build_manifest().items() if key not in ('status', 'errors', 'error_code')}
+    assert check_manifest(legacy)['status'] == 'unknown' and not check_manifest(legacy)['passed']
+
+
+def test_partial_discovery_names_failed_sections_and_fails_the_check(tmp_path, monkeypatch):
+    def broken(*args, **kwargs):
+        raise OSError('unreadable data directory')
+    monkeypatch.setattr('xauusd.bits_capabilities.data_access', broken)
+    monkeypatch.setattr('xauusd.bits_capabilities.cli_commands', lambda: 1 / 0)
+    manifest = build_manifest(cwd=str(tmp_path))
+    # Sections are reported in discovery order; the summary code is the first failure's.
+    assert manifest['status'] == 'partial' and manifest['error_code'] == 'unclassified'
+    assert manifest['errors'] == [{'section': 'cli_commands', 'error_code': 'unclassified'},
+                                  {'section': 'data', 'error_code': 'os_error'}]
+    assert manifest['data'] == {'entry_point': 'xauusd.data.HistoricalDataStore', 'state': 'unknown'}
+    assert manifest['tools']['grep']['state'] in ('available', 'missing')  # other sections still discovered
+    assert prompt_view(manifest)['discovery']['errors'] == manifest['errors']
+    assert [failure['kind'] for failure in check_manifest(manifest)['failures']] == ['discovery']
+    assert bits_alerts({'capabilities': heartbeat_view(manifest)}) == [
+        'Bits shell capability discovery incomplete: cli_commands (unclassified), data (os_error)']
+
+
+def test_invalid_declared_directories_are_configuration_errors_not_missing_tools(tmp_path):
+    base = {'PATH': '/usr/bin:/bin', 'BITS_SHELL_EXTRA_PATH': f'relative/bin:{tmp_path}/absent'}
+    manifest = build_manifest(base, cwd=str(tmp_path), env_file=str(tmp_path / 'no-env'))
+    assert manifest['status'] == 'ok'  # discovery itself succeeded
+    assert manifest['configuration_errors'] == [
+        {'kind': 'invalid_extra_path', 'variable': 'BITS_SHELL_EXTRA_PATH', 'entry': 'relative/bin', 'reason': 'not_absolute'},
+        {'kind': 'invalid_extra_path', 'variable': 'BITS_SHELL_EXTRA_PATH', 'entry': f'{tmp_path}/absent',
+         'reason': 'not_a_directory'}]
+    verdict = check_manifest(manifest)
+    assert not verdict['passed'] and {failure['kind'] for failure in verdict['failures']} == {'configuration'}
+    assert verdict['failures'][0]['issue'] == 'invalid_extra_path' and verdict['failures'][0]['entry'] == 'relative/bin'
+    assert prompt_view(manifest)['configuration_errors'] == manifest['configuration_errors']
+    alerts = bits_alerts({'capabilities': heartbeat_view(manifest)})
+    assert 'Bits shell configuration: BITS_SHELL_EXTRA_PATH entry relative/bin ignored (not_absolute)' in alerts
+
+
+def test_stored_manifest_probe_time_and_staleness_are_checked(tmp_path):
+    manifest = build_manifest(cwd=str(tmp_path))
+    fresh = check_manifest(manifest, stored=True)
+    assert fresh['passed'] and not fresh['stale'] and fresh['probed_at'] == manifest['generated_at']
+    old = {**manifest, 'generated_at': (datetime.now(timezone.utc) - timedelta(seconds=STALE_AFTER_SECONDS + 5)).isoformat()}
+    stale = check_manifest(old, stored=True)
+    assert not stale['passed'] and stale['stale'] and stale['failures'][-1]['kind'] == 'stale'
+    assert stale['age_seconds'] > STALE_AFTER_SECONDS
+    assert not check_manifest({**manifest, 'generated_at': 'not a time'}, stored=True)['passed']
+    assert check_manifest(old)['passed']  # a direct probe is judged on its content, not a stored age
+
+
+def test_version_probe_results_are_distinguished(tmp_path, monkeypatch):
+    monkeypatch.setattr('xauusd.bits_capabilities._in_virtualenv', lambda: False)
+    bin_dir = tmp_path / 'bin'
+    fake_tool(bin_dir, 'graphify', 'never run')
+    silent = bin_dir / 'git'
+    silent.write_text('#!/bin/sh\nexit 3\n')
+    silent.chmod(0o755)
+    tools = build_manifest({'PATH': str(bin_dir)}, cwd=str(tmp_path), env_file=str(tmp_path / 'no-env'))['tools']
+    assert (tools['graphify']['state'], tools['graphify']['version'], tools['graphify']['version_state']) == \
+        ('available', None, 'not_probed')
+    assert (tools['git']['state'], tools['git']['version_state']) == ('available', 'probe_failed')
+
+
+def test_optional_absent_tool_with_fallback_passes_and_does_not_alert(tmp_path, monkeypatch):
+    monkeypatch.setattr('xauusd.bits_capabilities._in_virtualenv', lambda: False)
+    bin_dir = tmp_path / 'bin'
+    fake_tool(bin_dir, 'grep', 'grep (GNU grep) 3.11')
+    manifest = build_manifest({'PATH': str(bin_dir)}, cwd=str(tmp_path), env_file=str(tmp_path / 'no-env'))
+    assert manifest['status'] == 'ok' and manifest['tools']['graphify']['state'] == 'missing'
+    assert check_manifest(manifest)['passed']
+    beat = heartbeat_view(manifest)
+    assert 'graphify' in beat['unavailable_tools'] and bits_alerts({'capabilities': beat}) == []
+
+
+def test_a_repaired_tool_clears_the_observed_missing_alert(tmp_path, monkeypatch):
+    monkeypatch.setattr('xauusd.bits_capabilities._in_virtualenv', lambda: False)
+    bin_dir = tmp_path / 'bin'
+    bin_dir.mkdir()
+    observed = record_observed(None, ['rg'], 'job-1')
+    before = build_manifest({'PATH': str(bin_dir)}, cwd=str(tmp_path), observed=observed, env_file=str(tmp_path / 'x'))
+    assert heartbeat_view(before)['observed_missing'] == ['rg'] and bits_alerts({'capabilities': heartbeat_view(before)})
+    fake_tool(bin_dir, 'rg', 'ripgrep 14.1.0')
+    after = build_manifest({'PATH': str(bin_dir)}, cwd=str(tmp_path), observed=observed, env_file=str(tmp_path / 'x'))
+    assert after['tools']['rg']['state'] == 'available' and after['observed_missing'][0]['now_available']
+    assert heartbeat_view(after)['observed_missing'] == [] and bits_alerts({'capabilities': heartbeat_view(after)}) == []
+    assert prompt_view(after)['observed_missing'] == []

@@ -116,6 +116,22 @@ backtests, stale targets, or a weekly rule's lack of a current signal.
 4. Original requested/effective scheduling and human no-trade dashboard requirements.
 5. Operator-authorized adoption, prompt synchronization and runtime acceptance.
 
+Implementation status after this list (pending review; nothing deployed):
+
+- R1 implemented: rejected writes become bounded `xauusd.drafts/1` drafts with durable IDs, base
+  version/digest and evidence references; only `write --resolves` or `supersede --reason` closes one.
+  `--base-version` rejects stale writes; overflow evicts the oldest draft into an explicit closed record;
+  the legacy single pending record migrates. Tests cover the unchanged/unrelated-write reproductions,
+  single-draft resolution, bounded overflow, interrupted-resolution rollback, stale bases, concurrent
+  writers, and a psycopg-style transaction contract. An opt-in test (`XAUUSD_TEST_DATABASE_URL`) exists
+  for a disposable Cockroach/Postgres database but has not been run, so database parity is not claimed.
+- R2 implemented: manifests carry `status` ok/partial/failed with safe section error codes, `unknown`
+  tool states, configuration errors and probe age; failed, partial, unknown, misconfigured or stale
+  (stored, over 45 minutes) manifests fail `--check`; alerts never stop trading.
+- Step 2 started: `xauusd.session_calendar.weekly_bars` provides New York session weeks with explicit
+  completion status. The experiment registry, producer/input identities, live-signal separation and
+  R3 local backend remain open.
+
 Validation: 88 focused tests and the full 453-test suite passed; one existing
 protobuf deprecation warning remains. `git diff --check` passed. Two additional
 isolated probes reproduced R1 and R2 without touching live application state.

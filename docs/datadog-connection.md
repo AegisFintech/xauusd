@@ -107,9 +107,12 @@ hypotheses, rejected_approaches, open_questions and next_steps, each a list of
 validated and saved whole, never silently cut to fit. They are model-authored
 claims, not verified facts or authority to change risk settings. Writes return a
 version and digest; rejections return a structured code and path, keep the old
-notes, and retain a safe payload as pending notes (`bits-memory pending`) until a
-corrected write succeeds. The context carries this status as `history.memory_status`
-and, after repeated rejections, a specific `repair_task`.
+notes, and record the payload as a pending draft with a durable ID, base version
+and evidence references (`bits-memory pending [--draft ID]`). A draft closes only
+when a write names it (`--resolves ID`, merged with the current notes; stale bases
+are rejected) or it is explicitly superseded with a reason; other writes never
+clear it. The context carries `history.memory_status`, the open drafts as
+`history.pending_notes`, and, for unresolved drafts, a specific `repair_task`.
 
 Large current results are explicitly excerpted to 3,200 stdout and 800 stderr
 characters. This keeps historical context around 4,000–6,000 tokens for ordinary
@@ -159,7 +162,9 @@ Every invocation also carries `context.capabilities`, a compact view of the
 shell-job environment manifest (`bits-capabilities`): working directory, service
 interpreter and CLI prefix, `PATH`, available tools with fallbacks, the data entry
 point, and executables that real jobs reported as `command not found`. It is
-persisted, so missing-tool facts survive cycles and restarts.
+persisted, so missing-tool facts survive cycles and restarts. Its `status`
+(`ok`, `partial` or `failed`), safe error codes and `unknown` tool states make an
+incomplete discovery explicit instead of implicitly healthy.
 
 Stored-output pages are unwrapped before prompt compression, retaining the original
 job ID and correct next offset. Follow that cursor instead of paging retrieval jobs.

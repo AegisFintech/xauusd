@@ -28,6 +28,8 @@ EXTRA_PATH_ENV = "BITS_SHELL_EXTRA_PATH"
 VERSION_TIMEOUT_SECONDS = 3
 MAX_OBSERVED = 10
 PROMPT_PATH_ENTRIES = 12
+REFRESH_SECONDS = 900  # the running agent re-probes at least this often
+STALE_AFTER_SECONDS = 3 * REFRESH_SECONDS  # a stored manifest older than this fails --stored --check
 REFRESHED_TOKENS = ("CTRADER_ACCESS_TOKEN", "CTRADER_REFRESH_TOKEN")
 # Optional tools. Only tools with a standard --version flag are probed; an unknown
 # CLI is never run speculatively. Fallbacks keep work possible when one is absent.
@@ -129,12 +131,9 @@ def _version(executable: str, env: dict, cwd: str) -> str | None:
     return None
 
 
-def cli_commands() -> list[str] | None:
-    try:
-        from .cli import build_parser
-        return list(build_parser().subcommands)
-    except Exception:
-        return None
+def cli_commands() -> list[str]:
+    from .cli import build_parser
+    return list(build_parser().subcommands)
 
 
 def operations(cli: str | None = None) -> dict:
@@ -156,22 +155,19 @@ def operations(cli: str | None = None) -> dict:
 def data_access(cwd: str) -> dict:
     """Where the M1 data lives and how to read it with the real data API."""
     python = shlex.quote(python_executable())
-    try:
-        from .data import REQUIRED, HistoricalDataStore
-        store = HistoricalDataStore()
-        path = store.path if store.path.is_absolute() else Path(cwd) / store.path
-        return {"entry_point": "xauusd.data.HistoricalDataStore", "path": str(store.path), "exists": path.is_file(),
-                "format": "parquet", "symbol": store.config.symbol, "timeframe": store.config.timeframe,
-                "index": "timestamp (UTC, bar open time)", "columns": list(REQUIRED),
-                "read_example": python + " -c \"from xauusd.data import HistoricalDataStore as S; s=S(); "
-                                         "bars=s.normalize(s.read()); print(bars.tail(3))\"",
-                "backtester": "xauusd.engine.EventDrivenBacktester",
-                "market_session": "xauusd.paper_trading.market_is_open (New York session; the UTC break "
-                                  "moves with US daylight time)"}
-    except Exception as exc:
-        from .bits import error_details
-        return {"entry_point": "xauusd.data.HistoricalDataStore", "available": False,
-                "error_code": error_details(exc)["error_code"]}
+    from .data import REQUIRED, HistoricalDataStore
+    store = HistoricalDataStore()
+    path = store.path if store.path.is_absolute() else Path(cwd) / store.path
+    return {"entry_point": "xauusd.data.HistoricalDataStore", "state": "discovered", "path": str(store.path),
+            "exists": path.is_file(), "format": "parquet", "symbol": store.config.symbol,
+            "timeframe": store.config.timeframe, "index": "timestamp (UTC, bar open time)", "columns": list(REQUIRED),
+            "read_example": python + " -c \"from xauusd.data import HistoricalDataStore as S; s=S(); "
+                                     "bars=s.normalize(s.read()); print(bars.tail(3))\"",
+            "backtester": "xauusd.engine.EventDrivenBacktester",
+            "market_session": "xauusd.paper_trading.market_is_open (New York session; the UTC break "
+                              "moves with US daylight time)",
+            "weekly_bars": "xauusd.session_calendar.weekly_bars(bars, as_of=cutoff): New York session weeks "
+                           "with status complete, in_progress, incomplete_data or partial_start"}
 
 
 def missing_executables(result: dict) -> list[str]:
@@ -211,75 +207,180 @@ def record_observed(observed: dict | None, names: list[str], job_id: str) -> dic
     return dict(sorted(observed.items(), key=lambda item: item[1]["last_seen"], reverse=True)[:MAX_OBSERVED])
 
 
-def build_manifest(base: dict | None = None, cwd: str | None = None, observed: dict | None = None,
-                   env_file: str = ".env") -> dict:
-    env, path_report = _prepare(base, env_file)
-    cwd = os.path.abspath(cwd or os.getcwd())
-    search = env["PATH"]
+def _error_code(exc: BaseException) -> str:
+    from .bits import error_details
+    return error_details(exc)["error_code"]
+
+
+def _section(errors: list, name: str, compute, fallback):
+    """Discover one section; a failure is recorded by name and never hidden as a healthy value."""
+    try:
+        return compute()
+    except Exception as exc:
+        errors.append({"section": name, "error_code": _error_code(exc)})
+        return fallback
+
+
+def unknown_tools() -> dict:
+    """Tools that were not probed: availability is unknown, never implicitly healthy."""
+    return {name: {"state": "unknown", "available": None, "path": None, "purpose": spec["purpose"],
+                   "version": None, "version_state": "not_probed", "fallback": spec["fallback"]}
+            for name, spec in TOOLS.items()}
+
+
+def _probe_tools(search: str, env: dict, cwd: str) -> dict:
     tools = {}
     for name, spec in TOOLS.items():
         found = shutil.which(name, path=search)
-        tool = {"available": bool(found), "path": found, "purpose": spec["purpose"],
-                "version": _version(found, env, cwd) if found and spec["probe"] else None}
+        version = _version(found, env, cwd) if found and spec["probe"] else None
+        tool = {"state": "available" if found else "missing", "available": bool(found), "path": found,
+                "purpose": spec["purpose"], "version": version,
+                "version_state": ("not_applicable" if not found else "not_probed" if not spec["probe"]
+                                  else "probed" if version else "probe_failed")}
         if not found:
             tool["fallback"] = spec["fallback"]
         tools[name] = tool
+    return tools
+
+
+def tool_state(tool: dict) -> str:
+    """available, missing or unknown; manifests from the previous release lack an explicit state."""
+    if tool.get("state") in ("available", "missing", "unknown"):
+        return tool["state"]
+    return "available" if tool.get("available") else "missing" if tool.get("available") is False else "unknown"
+
+
+def build_manifest(base: dict | None = None, cwd: str | None = None, observed: dict | None = None,
+                   env_file: str = ".env") -> dict:
+    """Probe the shell-job environment. Sections that fail make the status partial, never silently ok."""
+    env, path_report = _prepare(base, env_file)
+    cwd = os.path.abspath(cwd or os.getcwd())
+    search = env["PATH"]
+    errors: list[dict] = []
+    tools = _section(errors, "tools", lambda: _probe_tools(search, env, cwd), unknown_tools())
     python = python_executable()
     bare = shutil.which("python", path=search)
     required = {"bash": os.access(SHELL, os.X_OK), "python": os.path.isabs(python) and os.access(python, os.X_OK)}
-    return {"schema": CAPABILITIES_SCHEMA, "generated_at": _now(), "cwd": cwd,
-            "shell": {"path": SHELL, "available": required["bash"],
-                      "invocation": SHELL + " -c COMMAND: non-login and non-interactive, so no profile or rc file is read"},
-            "python": {"path": python, "version": platform.python_version(), "virtualenv": _in_virtualenv(),
-                       "cli_prefix": cli_prefix(), "bare_python": bare,
-                       "bare_python_is_service_interpreter": bool(bare) and Path(bare).parent == Path(python).parent},
-            "path": path_report, "tools": tools,
-            "required_missing": [name for name, ok in required.items() if not ok],
-            "operations": operations(), "cli_commands": cli_commands(), "data": data_access(cwd),
-            "observed_missing": observed_view(observed, search),
-            "note": "Computed from the shell-job environment. Interactive shells may differ; use absolute "
-                    "paths and the listed fallbacks."}
+    manifest = {"schema": CAPABILITIES_SCHEMA, "generated_at": _now(), "cwd": cwd,
+                "refresh_seconds": REFRESH_SECONDS, "stale_after_seconds": STALE_AFTER_SECONDS,
+                "shell": {"path": SHELL, "available": required["bash"],
+                          "invocation": SHELL + " -c COMMAND: non-login and non-interactive, so no profile or rc file is read"},
+                "python": {"path": python, "version": platform.python_version(), "virtualenv": _in_virtualenv(),
+                           "cli_prefix": cli_prefix(), "bare_python": bare,
+                           "bare_python_is_service_interpreter": bool(bare) and Path(bare).parent == Path(python).parent},
+                "path": path_report, "tools": tools,
+                "required_missing": [name for name, ok in required.items() if not ok],
+                "configuration_errors": [{"kind": "invalid_extra_path", "variable": EXTRA_PATH_ENV, **entry}
+                                         for entry in path_report["ignored"]],
+                "operations": _section(errors, "operations", operations, {}),
+                "cli_commands": _section(errors, "cli_commands", cli_commands, None),
+                "data": _section(errors, "data", lambda: data_access(cwd),
+                                 {"entry_point": "xauusd.data.HistoricalDataStore", "state": "unknown"}),
+                "observed_missing": _section(errors, "observed_missing", lambda: observed_view(observed, search), []),
+                "note": "Computed from the shell-job environment. Interactive shells may differ; use absolute "
+                        "paths and the listed fallbacks."}
+    manifest.update(status="partial" if errors else "ok", errors=errors,
+                    error_code=errors[0]["error_code"] if errors else None)
+    return manifest
 
 
 def minimal_manifest(error_code: str) -> dict:
-    """Used when discovery itself fails: diagnostics must never block the agent."""
+    """Used when discovery itself fails: diagnostics must never block the agent, nor look healthy."""
     python = python_executable()
     return {"schema": CAPABILITIES_SCHEMA, "generated_at": _now(), "cwd": os.path.abspath(os.getcwd()),
-            "error_code": error_code,
+            "refresh_seconds": REFRESH_SECONDS, "stale_after_seconds": STALE_AFTER_SECONDS,
+            "status": "failed", "error_code": error_code, "errors": [{"section": "manifest", "error_code": error_code}],
             "shell": {"path": SHELL, "available": os.access(SHELL, os.X_OK),
                       "invocation": SHELL + " -c COMMAND: non-login and non-interactive"},
             "python": {"path": python, "version": platform.python_version(), "virtualenv": _in_virtualenv(),
                        "cli_prefix": cli_prefix(), "bare_python": None, "bare_python_is_service_interpreter": False},
             "path": {"entries": [], "prepended": [], "ignored": [], "inherited_from": None},
-            "tools": {}, "required_missing": [], "operations": {}, "cli_commands": None,
-            "data": {}, "observed_missing": [], "note": "Capability discovery failed; use absolute paths."}
+            "tools": unknown_tools(), "required_missing": [], "configuration_errors": [], "operations": {},
+            "cli_commands": None, "data": {"entry_point": "xauusd.data.HistoricalDataStore", "state": "unknown"},
+            "observed_missing": [],
+            "note": "Capability discovery failed; tool availability is unknown. Use absolute paths and fallbacks."}
+
+
+def _age_seconds(iso: str | None, now: datetime) -> float | None:
+    try:
+        moment = datetime.fromisoformat(iso)
+    except (TypeError, ValueError):
+        return None
+    if moment.tzinfo is None:
+        return None
+    return round((now - moment).total_seconds(), 1)
+
+
+def check_manifest(manifest: dict, stored: bool = False, now: datetime | None = None) -> dict:
+    """Deployment verdict: only a complete, fresh manifest without required gaps passes."""
+    now = now or datetime.now(timezone.utc)
+    status = manifest.get("status") if manifest.get("status") in ("ok", "partial", "failed") else "unknown"
+    failures = []
+    if status != "ok":
+        failures.append({"kind": "discovery", "status": status, "error_code": manifest.get("error_code"),
+                         "errors": manifest.get("errors") or []})
+    if manifest.get("required_missing"):
+        failures.append({"kind": "required_missing", "names": manifest["required_missing"]})
+    failures += [{**{key: value for key, value in error.items() if key != "kind"}, "kind": "configuration",
+                  "issue": error.get("kind")} for error in manifest.get("configuration_errors") or []]
+    age = _age_seconds(manifest.get("generated_at"), now)
+    verdict = {"status": status, "probed_at": manifest.get("generated_at"), "age_seconds": age}
+    if stored:
+        limit = manifest.get("stale_after_seconds") or STALE_AFTER_SECONDS
+        stale = age is None or age > limit
+        verdict.update(stale=stale, stale_after_seconds=limit)
+        if stale:
+            failures.append({"kind": "stale", "age_seconds": age, "stale_after_seconds": limit})
+    verdict.update(passed=not failures, failures=failures)
+    return verdict
 
 
 def prompt_view(manifest: dict) -> dict:
     """Compact per-cycle facts. Memory commands already appear in history.policy; the
     subcommand list, versions and other detail stay in the stored manifest."""
-    tools = {name: ({"available": True, "path": tool["path"]} if tool["available"]
-                    else {"available": False, "fallback": tool.get("fallback")})
-             for name, tool in manifest["tools"].items()}
-    ops = {key: value for key, value in manifest["operations"].items() if not key.startswith("notes_")}
-    data = {key: manifest["data"][key] for key in ("entry_point", "path", "exists", "index", "read_example")
-            if key in manifest["data"]}
+    def tool_view(tool):
+        state = tool_state(tool)
+        if state == "available":
+            return {"available": True, "path": tool.get("path")}
+        view = {"available": False if state == "missing" else None, "fallback": tool.get("fallback")}
+        if state == "unknown":
+            view["state"] = "unknown"
+        return view
+    tools = {name: tool_view(tool) for name, tool in (manifest.get("tools") or {}).items()}
+    ops = {key: value for key, value in (manifest.get("operations") or {}).items() if not key.startswith("notes_")}
+    data = {key: manifest["data"][key] for key in ("entry_point", "state", "path", "exists", "index", "read_example")
+            if key in (manifest.get("data") or {})}
     entries = manifest["path"]["entries"]
-    return {"generated_at": manifest["generated_at"], "cwd": manifest["cwd"],
+    status = manifest.get("status") if manifest.get("status") in ("ok", "partial", "failed") else "unknown"
+    view = {"status": status}
+    if status != "ok":
+        view["discovery"] = {"error_code": manifest.get("error_code"), "errors": manifest.get("errors") or [],
+                             "note": "Discovery was incomplete: treat tools marked unknown as unavailable, use "
+                                     "absolute paths and the listed fallbacks; the harness retries discovery."}
+    if manifest.get("configuration_errors"):
+        view["configuration_errors"] = manifest["configuration_errors"]
+    return {**view, "generated_at": manifest["generated_at"], "cwd": manifest["cwd"],
             "cli_prefix": manifest["python"]["cli_prefix"], "python_version": manifest["python"]["version"],
             "bare_python": manifest["python"]["bare_python"],
             "shell": "bash -c without a login profile", "path": entries[:PROMPT_PATH_ENTRIES],
             "path_entries_omitted": max(0, len(entries) - PROMPT_PATH_ENTRIES),
             "required_missing": manifest["required_missing"], "tools": tools, "operations": ops, "data": data,
             "observed_missing": [{key: row.get(key) for key in ("name", "last_seen", "job_id", "count", "fallback")}
-                                 for row in manifest["observed_missing"] if not row["now_available"]],
+                                 for row in manifest.get("observed_missing") or [] if not row["now_available"]],
             "full_manifest": manifest["python"]["cli_prefix"] + " bits-capabilities --stored"}
 
 
 def heartbeat_view(manifest: dict | None) -> dict | None:
     if not manifest:
         return None
-    return {"generated_at": manifest.get("generated_at"), "required_missing": manifest.get("required_missing", []),
-            "unavailable_tools": sorted(name for name, tool in manifest.get("tools", {}).items() if not tool["available"]),
-            "observed_missing": sorted(row["name"] for row in manifest.get("observed_missing", [])
+    tools = manifest.get("tools") or {}
+    return {"status": manifest.get("status") if manifest.get("status") in ("ok", "partial", "failed") else "unknown",
+            "error_code": manifest.get("error_code"), "errors": manifest.get("errors") or [],
+            "configuration_errors": manifest.get("configuration_errors") or [],
+            "generated_at": manifest.get("generated_at"),
+            "age_seconds": _age_seconds(manifest.get("generated_at"), datetime.now(timezone.utc)),
+            "required_missing": manifest.get("required_missing", []),
+            "unavailable_tools": sorted(name for name, tool in tools.items() if tool_state(tool) == "missing"),
+            "unknown_tools": sorted(name for name, tool in tools.items() if tool_state(tool) == "unknown"),
+            "observed_missing": sorted(row["name"] for row in manifest.get("observed_missing") or []
                                        if not row["now_available"])}

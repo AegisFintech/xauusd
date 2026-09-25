@@ -387,3 +387,73 @@ def test_bits_capabilities_check_and_stored_manifest(tmp_path, monkeypatch, caps
     monkeypatch.setattr('xauusd.bits_capabilities.SHELL', str(tmp_path / 'no-bash'))
     code, result, _ = _run_cli(monkeypatch, capsys, 'bits-capabilities', '--check')
     assert code == 1 and result['required_missing'] == ['bash']
+
+
+def test_bits_memory_cli_draft_lifecycle(tmp_path, monkeypatch, capsys):
+    import json
+    _isolated_bits_state(tmp_path, monkeypatch)
+    good = _wrapped_notes()
+    code, saved, _ = _run_cli(monkeypatch, capsys, 'bits-memory', 'write', '--input', json.dumps(good))
+    bad = json.loads(json.dumps(good)); bad['notes']['findings'][0]['sources'] = 'job-z'
+    code, report, _ = _run_cli(monkeypatch, capsys, 'bits-memory', 'write', '--input', json.dumps(bad))
+    assert code == 2 and report['pending']['created']
+    draft_id = report['pending']['draft_ids'][0]
+    assert '--resolves DRAFT_ID --base-version 1' in report['pending']['resolve_with']
+    code, unchanged, _ = _run_cli(monkeypatch, capsys, 'bits-memory', 'write', '--input', json.dumps(good))
+    assert code == 0 and unchanged['status'] == 'unchanged' and unchanged['open_drafts'] == [draft_id]
+    code, listing, _ = _run_cli(monkeypatch, capsys, 'bits-memory', 'pending')
+    assert listing['status'] == 'pending' and listing['drafts'][0]['id'] == draft_id
+    assert listing['pending_notes']['payload'] == bad and 'payload' not in listing['drafts'][0]
+    code, one, _ = _run_cli(monkeypatch, capsys, 'bits-memory', 'pending', '--draft', draft_id)
+    assert code == 0 and one['status'] == 'open' and one['draft']['payload'] == bad
+    code, stale, _ = _run_cli(monkeypatch, capsys, 'bits-memory', 'write', '--input', json.dumps(good),
+                              '--resolves', draft_id, '--base-version', '0')
+    assert code == 2 and stale['error']['code'] == 'stale_base' and stale['error']['current_version'] == 1
+    code, resolved, _ = _run_cli(monkeypatch, capsys, 'bits-memory', 'write', '--input', json.dumps(good),
+                                 '--resolves', draft_id, '--base-version', '1')
+    assert code == 0 and resolved['resolved'][0]['draft_id'] == draft_id
+    assert resolved['resolved'][0]['dropped_evidence'] == ['job-z'] and resolved['open_drafts'] == []
+    code, closed, _ = _run_cli(monkeypatch, capsys, 'bits-memory', 'pending', '--draft', draft_id)
+    assert code == 0 and closed['status'] == 'closed' and closed['draft']['resolution'] == 'resolved'
+
+
+def test_bits_memory_cli_supersede_and_misplaced_flags(tmp_path, monkeypatch, capsys):
+    import json
+    _isolated_bits_state(tmp_path, monkeypatch)
+    bad = _wrapped_notes(); bad['notes']['findings'][0]['sources'] = 'job-q'
+    code, report, _ = _run_cli(monkeypatch, capsys, 'bits-memory', 'write', '--input', json.dumps(bad))
+    draft_id = report['pending']['draft_ids'][0]
+    code, result, _ = _run_cli(monkeypatch, capsys, 'bits-memory', 'supersede', '--draft', draft_id)
+    assert code == 2 and result['error']['code'] == 'missing_reason'
+    code, result, _ = _run_cli(monkeypatch, capsys, 'bits-memory', 'supersede', '--draft', draft_id,
+                               '--reason', 'Replaced by a frozen-input reproduction.')
+    assert code == 0 and result['status'] == 'superseded' and result['open_drafts'] == []
+    for argv in (['validate', '--input', '{}', '--resolves', draft_id], ['show', '--draft', draft_id],
+                 ['write', '--input', '{}', '--reason', 'x'], ['pending', '--base-version', '1']):
+        code, result, _ = _run_cli(monkeypatch, capsys, 'bits-memory', *argv)
+        assert code == 2 and result['error']['code'] == 'invalid_argument'
+
+
+def test_bits_capabilities_direct_discovery_exception_still_exits_nonzero(tmp_path, monkeypatch, capsys):
+    _isolated_bits_state(tmp_path, monkeypatch)
+    def broken(*args, **kwargs):
+        raise OSError('probe failed')
+    monkeypatch.setattr('xauusd.bits_capabilities.build_manifest', broken)
+    for argv in (['bits-capabilities'], ['bits-capabilities', '--check']):
+        code, result, _ = _run_cli(monkeypatch, capsys, *argv)
+        assert code == 1 and result['status'] == 'failed' and result['error']['code'] == 'os_error'
+
+
+def test_bits_capabilities_stored_check_rejects_a_stale_manifest(tmp_path, monkeypatch, capsys):
+    import os
+    from datetime import datetime, timedelta, timezone
+    from xauusd.bits_capabilities import STALE_AFTER_SECONDS, build_manifest
+    from xauusd.bits_jobs import BitsStore
+    from xauusd.local_state import SQLiteAgentTranscriptStore
+    _isolated_bits_state(tmp_path, monkeypatch)
+    old = (datetime.now(timezone.utc) - timedelta(seconds=STALE_AFTER_SECONDS + 60)).isoformat()
+    BitsStore(SQLiteAgentTranscriptStore(os.environ['STATE_DB_PATH'])).put('capabilities', {**build_manifest(), 'generated_at': old})
+    code, result, _ = _run_cli(monkeypatch, capsys, 'bits-capabilities', '--stored')
+    assert code == 0 and result['check']['stale'] and not result['check']['passed']
+    code, result, _ = _run_cli(monkeypatch, capsys, 'bits-capabilities', '--stored', '--check')
+    assert code == 1 and [failure['kind'] for failure in result['check']['failures']] == ['stale']

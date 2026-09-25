@@ -50,3 +50,14 @@ def test_bits_alerts_name_missing_executables():
     # An optional tool with a documented fallback is not, by itself, an alert.
     assert bits_alerts({"capabilities": {"required_missing": [], "unavailable_tools": ["graphify"],
                                          "observed_missing": []}}) == []
+
+
+def test_bits_alerts_name_unresolved_memory_drafts():
+    from xauusd.agent_status import bits_alerts
+    heartbeat = {"memory": {"needs_repair": True, "open_drafts": 1, "consecutive_failures": 0,
+                            "repair_reasons": ["later_write_did_not_resolve"],
+                            "last_error": {"code": "invalid_type", "path": "$.findings[0].sources"}}}
+    assert bits_alerts(heartbeat) == ["memory drafts need repair: 1 unresolved rejected write(s), 0 consecutive "
+                                      "rejections (later_write_did_not_resolve; last invalid_type at "
+                                      "$.findings[0].sources)"]
+    assert bits_alerts({"memory": {"needs_repair": False, "open_drafts": 1}}) == []
