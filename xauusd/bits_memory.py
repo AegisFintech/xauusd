@@ -23,7 +23,20 @@ from .bits_jobs import SecretFilter
 from .experiment_registry import canonical_json
 
 NOTES_SCHEMA = "xauusd.notes/1"
-NOTE_CATEGORIES = ("findings", "hypotheses", "rejected_approaches", "open_questions", "next_steps")
+# The five required categories, plus `candidates` which is optional.
+#
+# `rejected_approaches` accumulated 20+ entries over 46 note versions and the
+# model then re-read its own prohibition every cycle ("Remain flat", "Do not trade
+# previously tested..."), which is a large part of why it never proposed a trade.
+# `candidates` gives the ledger somewhere to record untested approaches with their
+# entry and invalidation conditions, so the notes read as a map of the search
+# space rather than a list of refusals.
+#
+# Optional and additive on purpose: making it required would reject every note
+# already stored and break the published schema contract.
+REQUIRED_NOTE_CATEGORIES = ("findings", "hypotheses", "rejected_approaches", "open_questions", "next_steps")
+OPTIONAL_NOTE_CATEGORIES = ("candidates",)
+NOTE_CATEGORIES = REQUIRED_NOTE_CATEGORIES + OPTIONAL_NOTE_CATEGORIES
 NOTE_FIELDS = set(NOTE_CATEGORIES)
 ENTRY_FIELDS = ("text", "sources")
 MAX_ENTRIES = 12
@@ -221,8 +234,10 @@ def _check_categories(inner, base, issues, secrets):
     for category in NOTE_CATEGORIES:
         path = f"{base}.{category}"
         if category not in inner:
-            issues.append(issue("missing_field", path, "every category is required; use [] when it is empty",
-                                "array of entries"))
+            # Optional categories may be absent; required ones may not.
+            if category not in OPTIONAL_NOTE_CATEGORIES:
+                issues.append(issue("missing_field", path, "every category is required; use [] when it is empty",
+                                    "array of entries"))
             continue
         entries = inner[category]
         if not isinstance(entries, list):
@@ -272,13 +287,19 @@ def check_notes(value, secrets=None):
     _check_categories(inner, base, issues, secrets)
     if issues:
         raise NotesRejected(issues)
-    notes = {category: inner[category] for category in NOTE_CATEGORIES}
+    # Optional categories are preserved exactly as written and are NOT injected as
+    # empty lists: a write replaces every note, so reading back must return what
+    # the author wrote. Consumers use notes.get('candidates', []).
+    notes = {category: inner[category] for category in REQUIRED_NOTE_CATEGORIES}
+    for category in OPTIONAL_NOTE_CATEGORIES:
+        if category in inner:
+            notes[category] = inner[category]
     raw = canonical_json(notes)
     if len(raw) > NOTES_BUDGET:
         raise NotesRejected([issue("notes_too_large", base, "canonical notes JSON exceeds the budget; consolidate "
                                    "or remove entries explicitly (nothing is truncated)",
                                    actual_characters=len(raw), maximum_characters=NOTES_BUDGET,
-                                   category_characters={c: len(canonical_json(notes[c])) for c in NOTE_CATEGORIES})])
+                                   category_characters={c: len(canonical_json(notes.get(c, []))) for c in NOTE_CATEGORIES})])
     if secrets.unsafe(raw):
         raise NotesRejected([issue("sensitive_content", base, "notes contain credential-like or sensitive content; "
                                    "remove it (it is never stored or echoed)")])
@@ -291,7 +312,7 @@ def validate_notes(value, secrets=None):
     raw = canonical_json(notes)
     return {"status": "valid", "schema": NOTES_SCHEMA, "input_form": form, "characters": len(raw),
             "maximum_characters": NOTES_BUDGET, "digest": notes_digest(raw),
-            "entries": {category: len(notes[category]) for category in NOTE_CATEGORIES}}
+            "entries": {category: len(notes.get(category, [])) for category in NOTE_CATEGORIES}}
 
 
 def memory_commands(cli=None):
@@ -309,7 +330,8 @@ def memory_commands(cli=None):
 
 def notes_schema(cli=None):
     """The published input schema, limits, source rules, draft lifecycle and complete commands."""
-    empty = {category: [] for category in NOTE_CATEGORIES}
+    empty = {category: [] for category in REQUIRED_NOTE_CATEGORIES}
+    empty.update({category: [] for category in OPTIONAL_NOTE_CATEGORIES})
     return {"schema": NOTES_SCHEMA,
             "accepted_forms": {"canonical": empty,
                                "versioned": {"schema": NOTES_SCHEMA, "notes": empty},
@@ -318,7 +340,8 @@ def notes_schema(cli=None):
             "limits": {"categories": list(NOTE_CATEGORIES), "max_entries_per_category": MAX_ENTRIES,
                        "max_canonical_characters": NOTES_BUDGET, "max_input_characters": MAX_INPUT_CHARACTERS,
                        "max_retained_pending_characters": PENDING_BUDGET},
-            "rules": ["All five categories are required; use [] for an empty category.",
+            "rules": ["The five core categories are required; use [] for an empty one. "
+                      "'candidates' is optional and exists to record untested approaches, not just rejections.",
                       "Each write replaces every note; include everything worth keeping.",
                       "Top-level categories mixed with a notes wrapper, other fields and unknown schema versions are rejected.",
                       "Size is measured on canonical JSON (sorted keys, no spaces); nothing is truncated.",

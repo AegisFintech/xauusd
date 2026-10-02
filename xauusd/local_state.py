@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .experiment_registry import canonical_json
-from .paper_trading import _default_state
+from .paper_trading import _default_state, validated_paper_state
 
 DEFAULT_STATE_DB_PATH = "state/xauusd_local.db"
 
@@ -63,16 +63,10 @@ class SQLitePaperTradingStore:
             db.execute("INSERT INTO paper_trading_state(state_key,state_json,updated_at) VALUES('primary',?,?)",
                        (canonical_json(state), _now().isoformat()))
             return state
-        try:
-            state = json.loads(row["state_json"])
-            if not isinstance(state, dict):
-                raise ValueError("state is not an object")
-            return state
-        except (ValueError, TypeError, json.JSONDecodeError):
-            state = _default_state(self.initial_cash)
-            state["kill_switch_reason"] = "corrupt_state"
+        state = validated_paper_state(row["state_json"], self.initial_cash)
+        if state["kill_switch_reason"] == "corrupt_state":
             self._save(db, state)
-            return state
+        return state
 
     @staticmethod
     def _save(db: sqlite3.Connection, state: dict[str, Any]) -> None:
@@ -87,6 +81,13 @@ class SQLitePaperTradingStore:
                                    (decision_id,)).fetchone()
             if duplicate is not None:
                 result = json.loads(duplicate["result_json"])
+                # Tag the replay so no consumer can mistake a cached outcome for a
+                # fresh fill. Returning the stored `accepted: True` verbatim meant
+                # the propose_trade tool reported `filled: true` for a second
+                # identical proposal inside the same M1 bar, and in paper-only mode
+                # that verdict is the only one the planner sees: it would believe it
+                # held exposure it did not.
+                result["replayed"] = True
                 db.execute("COMMIT")
                 return result
             state = self._locked_state(db)
@@ -169,6 +170,59 @@ class SQLiteAgentTranscriptStore:
                                 "VALUES(?,?,?,?,?) RETURNING id",
                                 (run_id, tick, phase, canonical_json(content), _now().isoformat()))
             return int(cursor.fetchone()["id"])
+
+    def prune(self, keep_runs: int = 5, keep_steps: int = 20_000,
+              preserve_below_id: int = 0) -> dict[str, int]:
+        """Bound transcript growth. Nothing else ever deleted from this table.
+
+        The heartbeat phases alone (``tick_start``, ``data_refresh``) wrote one row
+        per tick, so the table grew without limit: 14,350 rows and 5.4 MB, of
+        which 1.9 MB was pure per-tick noise. Two rules, both conservative:
+
+        * every run except the newest ``keep_runs`` is dropped, so the live view
+          keeps full history for recent runs;
+        * within what remains, the oldest rows beyond ``keep_steps`` are dropped.
+
+        ``preserve_below_id`` is the live view's paging cursor. The view pages
+        newest-first, so after it has displayed down to row *N* it still needs every
+        row below *N*; those are exactly the oldest rows pruning would otherwise
+        take. Passing the cursor therefore narrows pruning to rows the reader has
+        already seen, instead of silently skipping content it has not rendered.
+
+        ``agent_runs`` rows are never deleted, so ``runs()`` still reports the full
+        history; only the step bodies go.
+        """
+        with self.connect() as db:
+            recent = [row["run_id"] for row in db.execute(
+                "SELECT run_id FROM agent_runs ORDER BY created_at DESC LIMIT ?", (keep_runs,))]
+            if not recent:
+                return {"runs_removed": 0, "steps_removed": 0}
+            placeholders = ",".join("?" for _ in recent)
+            old = [row["run_id"] for row in db.execute(
+                f"SELECT run_id FROM agent_runs WHERE run_id NOT IN ({placeholders})", recent)]
+            removed_runs = 0
+            if old:
+                marks = ",".join("?" for _ in old)
+                query = f"DELETE FROM agent_transcript WHERE run_id IN ({marks})"
+                params = list(old)
+                if preserve_below_id > 0:
+                    query += " AND id > ?"
+                    params.append(preserve_below_id)
+                removed_runs = int(db.execute(query, params).rowcount or 0)
+            total = int(db.execute("SELECT COUNT(*) c FROM agent_transcript").fetchone()["c"])
+            removed_steps = 0
+            if total > keep_steps:
+                # Keep exactly the newest keep_steps rows and drop the rest. An
+                # id-threshold comparison is off by one here, so the kept set is
+                # named explicitly instead.
+                query = ("DELETE FROM agent_transcript WHERE id NOT IN "
+                         "(SELECT id FROM agent_transcript ORDER BY id DESC LIMIT ?)")
+                params = [keep_steps]
+                if preserve_below_id > 0:
+                    query += " AND id > ?"
+                    params.append(preserve_below_id)
+                removed_steps = int(db.execute(query, params).rowcount or 0)
+        return {"runs_removed": removed_runs, "steps_removed": removed_steps}
 
     def steps(self, run_id: str | None = None, after_id: int = 0, before_id: int | None = None,
               desc: bool = False, limit: int = 100) -> list[dict[str, Any]]:

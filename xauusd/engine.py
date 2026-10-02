@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import math
 from typing import Literal
 
 import numpy as np
@@ -22,6 +23,15 @@ class ExecutionConfig:
     target_distance: float | None = 3.0
     max_holding_bars: int | None = 30
     intrabar_priority: Literal["stop", "target"] = "stop"
+    # Annualised financing charged on any bar that follows a session gap, i.e. any
+    # overnight hold. XAUUSD spot has no swap, but the position carries a real
+    # funding cost, and `max_holding_bars` reaches 240 in the search grid, so
+    # multi-day holds were modelled with zero carry. Expressed as a fraction of
+    # notional per year, applied per crossed gap.
+    annual_financing_rate: float = 0.0
+    # Seconds; a plain number rather than a Timedelta so ``asdict(config)`` stays
+    # JSON-serialisable, which every research report depends on.
+    session_gap_seconds: float = 60.0
 
     def __post_init__(self) -> None:
         positive = ("initial_cash", "quantity_oz", "ounces_per_lot")
@@ -29,6 +39,16 @@ class ExecutionConfig:
             raise ValueError("cash, quantity, and contract size must be positive")
         if self.spread < 0 or self.slippage < 0 or self.commission_per_lot_side < 0:
             raise ValueError("execution costs cannot be negative")
+        if not math.isfinite(self.annual_financing_rate) or self.annual_financing_rate < 0:
+            raise ValueError("annual_financing_rate must be finite and non-negative")
+        if not math.isfinite(self.session_gap_seconds) or self.session_gap_seconds <= 0:
+            raise ValueError("session_gap_seconds must be finite and positive")
+        if self.intrabar_priority != "stop":
+            # "target" resolves an ambiguous bar optimistically. The search grid
+            # and the tournament gates never set it, so production stays
+            # conservative, but it is an unguarded footgun for a config that can
+            # reach a champion.
+            raise ValueError("intrabar_priority must be 'stop'; 'target' is optimistic and not permitted")
 
 
 @dataclass
@@ -73,13 +93,25 @@ class EventDrivenBacktester:
         lows=frame["low"].to_numpy(dtype=float,copy=False)
         closes=frame["close"].to_numpy(dtype=float,copy=False)
         signal_values=signal.to_numpy(dtype=int,copy=False)
+        # A bar whose predecessor is more than one interval away is an overnight
+        # or weekend hold. Financing is charged on entering such a bar.
+        gaps=frame.index.to_series().diff().dt.total_seconds()
+        crossed_gap=(gaps>self.config.session_gap_seconds).fillna(False).to_numpy()
         cash = self.config.initial_cash
         position: dict | None = None
         trades: list[Trade] = []
         equity_rows: list[tuple[pd.Timestamp, float]] = []
+        financing_total = 0.0
 
         def commission() -> float:
             return self.config.commission_per_lot_side * self.config.quantity_oz / self.config.ounces_per_lot
+
+        def overnight_cost(price: float) -> float:
+            """Financing for one crossed session gap, as a fraction of notional."""
+            if not self.config.annual_financing_rate:
+                return 0.0
+            per_gap = self.config.annual_financing_rate / 365.25
+            return per_gap * abs(price) * self.config.quantity_oz
 
         def fill_price(mid: float, side: int, opening: bool) -> float:
             direction = side if opening else -side
@@ -98,6 +130,14 @@ class EventDrivenBacktester:
             position = None
 
         for i,timestamp in enumerate(timestamps):
+            # A hold carried across a session gap pays financing, charged on the
+            # bar that crosses it and before any exit is evaluated: the position
+            # was open across the closed market, so the cost is owed regardless of
+            # what this bar then does.
+            if position is not None and i > position["entry_i"] and crossed_gap[i]:
+                carry = overnight_cost(closes[i - 1])
+                financing_total += carry
+                cash -= position["side"] * carry
             desired = int(signal_values[i - 1]) if i else 0
             if position is not None and desired != position["side"]:
                 close(timestamp, opens[i], "signal", i - position["entry_i"])
@@ -136,7 +176,9 @@ class EventDrivenBacktester:
 
         equity = pd.Series((value for _,value in equity_rows),index=timestamps,name="equity",dtype=float)
         ledger = pd.DataFrame([asdict(trade) for trade in trades])
-        return {"metrics": self._metrics(equity, ledger, frame), "trades": ledger, "equity": equity}
+        metrics = self._metrics(equity, ledger, frame)
+        metrics["overnight_financing"] = float(financing_total)
+        return {"metrics": metrics, "trades": ledger, "equity": equity}
 
     def _metrics(self, equity: pd.Series, trades: pd.DataFrame, bars: pd.DataFrame) -> dict:
         returns = equity.pct_change().fillna(0)
@@ -180,18 +222,66 @@ class EventDrivenBacktester:
             "implicit_execution_cost": total_implicit_cost,
             "commission_cost": total_commission,
             "total_cost": total_cost,
-            "cost_to_gross_profit_ratio": float(total_cost / positive_pre_cost) if positive_pre_cost else 0.0,
+            "cost_to_gross_profit_ratio": float(total_cost / positive_pre_cost) if positive_pre_cost else None,
             "turnover": turnover,
             "expected_shortfall": expected_shortfall,
             "profit_concentration": profit_concentration,
-            "cagr": float((equity.iloc[-1] / self.config.initial_cash) ** (1 / years) - 1),
-            "sharpe": float(scale * returns.mean() / returns.std()) if returns.std() else 0.0,
-            "sortino": float(scale * returns.mean() / downside.std()) if len(downside) > 1 and downside.std() else 0.0,
+            "cagr": _cagr(float(equity.iloc[-1]), self.config.initial_cash, years),
+            # Undefined rather than zero. A strategy with no losing trades has an
+            # infinite profit factor, and `inf` was the value that broke every
+            # report write: json.dumps(..., allow_nan=False) raises, so the *best*
+            # strategy in the space could not be recorded at all. Every gate treats
+            # None as a failure, which is the conservative direction.
+            "sharpe": float(scale * returns.mean() / returns.std()) if returns.std() else None,
+            "sortino": float(scale * returns.mean() / downside.std()) if len(downside) > 1 and downside.std() else None,
             "max_drawdown": float(drawdown.min()),
-            "profit_factor": float(profits / losses) if losses else (float("inf") if profits else 0.0),
-            "win_rate": float((pnl > 0).mean()) if len(pnl) else 0.0,
-            "expectancy": float(pnl.mean()) if len(pnl) else 0.0,
+            "profit_factor": _profit_factor(profits, losses),
+            "win_rate": float((pnl > 0).mean()) if len(pnl) else None,
+            "expectancy": float(pnl.mean()) if len(pnl) else None,
             "trades": int(len(trades)),
-            "average_hold_bars": float(trades.bars_held.mean()) if len(trades) else 0.0,
-            "exposure": float(sum(trades.bars_held) / len(bars)) if len(trades) else 0.0,
+            "average_hold_bars": float(trades.bars_held.mean()) if len(trades) else None,
+            # Guarded on len(trades), not len(bars): with no trades the ledger is
+            # an empty frame with no columns, so touching .bars_held raises.
+            "exposure": float(sum(trades.bars_held) / len(bars)) if len(trades) and len(bars) else None,
         }
+
+
+def metric_above(value: float | None, threshold: float) -> bool:
+    """True only when a metric is defined and strictly above ``threshold``.
+
+    ``None`` is how the engine reports an undefined metric (no losing trades, no
+    return variance, no trades at all). Comparing it directly raises TypeError, and
+    treating it as zero would let an unmeasurable strategy pass a zero threshold.
+    Every gate in this repository uses these helpers so an undefined metric always
+    fails closed.
+    """
+    return value is not None and float(value) > threshold
+
+
+def metric_at_least(value: float | None, threshold: float) -> bool:
+    return value is not None and float(value) >= threshold
+
+
+def _profit_factor(profits: float, losses: float) -> float | None:
+    """Gross profit over gross loss, or ``None`` when it is undefined.
+
+    ``None`` covers no trades at all and no losing trades. The previous ``inf``
+    was not just a serialisation problem: ``inf >= 1.0`` passes the profit-factor
+    gate, so the metric also inverted a threshold check in the strategy's favour.
+    """
+    if losses > 0:
+        return float(profits / losses)
+    return None if profits > 0 else 0.0
+
+
+def _cagr(final_equity: float, initial_cash: float, years: float) -> float | None:
+    """Compound annual growth rate, or ``None`` when the account is not positive.
+
+    A negative or zero terminal equity raised a fractional power to a fractional
+    exponent, which yields NaN (or a complex number) and again broke the report
+    write for exactly the strategies an operator most needs to see.
+    """
+    if final_equity <= 0 or initial_cash <= 0:
+        return None
+    value = (final_equity / initial_cash) ** (1 / years) - 1
+    return float(value) if math.isfinite(value) else None

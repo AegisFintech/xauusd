@@ -4,6 +4,16 @@ import json
 from pathlib import Path
 
 RESEARCH_POLICY = (
+    'You are the SUPERVISOR. A deterministic engine executes trades on the market feed; you do not '
+    'decide each entry. Your job is to judge whether that engine should keep running, and to improve '
+    'the research that would justify a change. '
+    'Each response: (1) review what the engine decided, (2) question your own reasoning explicitly in '
+    'the optional "interrogation" field as ordered {question, answer, evidence} pairs, then (3) take at '
+    'most one action. '
+    'A proposal is justified when the engine signal, your cost-aware evidence, and the deterministic '
+    'gates all agree. If they do, propose it through propose_trade. If they do not, say so plainly and '
+    'halt or retune the engine with the engine halt/resume commands. Never manufacture a trade to look '
+    'productive, and never keep an engine running that your own review cannot justify. '
     'Continue research across cycles; do not repeat bootstrap on every invocation. '
     'Current account and freshness are already supplied. Read repository guidance once per revision; '
     'when bootstrap.reviewed is true, do not reread it or CLI help without a specific new need. '
@@ -11,10 +21,13 @@ RESEARCH_POLICY = (
     'then calculate indicators and run a cost-aware historical experiment. Save source-linked findings, '
     'hypotheses, rejected approaches and next steps with the bits-memory write command from history.policy '
     '(always through the CLI prefix given there; use validate first when unsure of the shape). '
+    'Record both what you rejected AND untested candidates worth trying, so the notes are a map of the '
+    'search space rather than a list of refusals. A notes file that only accumulates rejections is not '
+    'progress: add at least one untested candidate with its entry and invalidation conditions. '
     'When context.repair_task is present, complete that specific task before starting new research. '
     'Do not infer an edge from five closes or wait indefinitely because an edge has not yet been tested. '
     'A wait must identify measurable entry/invalidation conditions, the evidence supporting them, '
-    'or a specific blocker and the next experiment. Never manufacture evidence or force a trade. '
+    'or a specific blocker and the next experiment. '
     'Keep command output concise, with findings first; do not dump guidance and memory repeatedly. '
     'Working notes are already in context.history. If needed use its bits-memory show --notes-only command, '
     'not the full conversation history. Code lives in xauusd/ (not src/); inspect '
@@ -63,16 +76,56 @@ def market_research(source):
         return {'available': False, 'next_step': 'Inspect historical dataset through shell.'}
 
 
-def finish_research_cycle(store, cycle_id):
+def fills_since(store, paper) -> bool:
+    """True when the paper account has filled since the last time we looked.
+
+    The fill usually comes from the deterministic engine, not from this agent, so
+    the runner cannot be handed a boolean by the model. Counting ledger entries
+    against a durable marker is the only honest way to tell whether a cycle
+    actually moved the account.
+    """
+    try:
+        count = len(paper.state().get('ledger', []))
+    except Exception:
+        return False
+    seen = store.get('fill_marker', {}).get('ledger_count')
+    if seen is None:
+        # First observation: record it without claiming a fill we cannot see.
+        store.put('fill_marker', {'ledger_count': count})
+        return False
+    if count != seen:
+        store.put('fill_marker', {'ledger_count': count})
+        return True
+    return False
+
+
+def finish_research_cycle(store, cycle_id, filled: bool = False):
+    """Per-cycle progress accounting.
+
+    A fill is progress. The only metric that used to advance the loop was a changed
+    notes fingerprint, so a cycle that correctly proposed a qualifying trade read
+    as "no progress" and pushed the model toward more research. The fill branch
+    exists so a correct trade advances the loop rather than appearing to be a
+    failed cycle.
+
+    This is a progress signal for the operator. It is never a *reason to trade*:
+    no counter here can authorise a fill, and every fill still goes through the
+    deterministic gates.
+    """
     progress = store.get('research_progress', {})
     if progress.get('cycle_id') == cycle_id:
         return progress
     notes = store.get('working_notes') or {}
     fingerprint = hashlib.sha256(json.dumps(notes.get('notes'), sort_keys=True).encode()).hexdigest()
     changed = bool(notes.get('notes')) and fingerprint != progress.get('notes_fingerprint')
-    count = 0 if changed else progress.get('cycles_without_new_notes', 0) + 1
+    if filled or changed:
+        count = 0
+    else:
+        count = progress.get('cycles_without_new_notes', 0) + 1
     progress = {'cycle_id': cycle_id, 'notes_fingerprint': fingerprint,
                 'cycles_without_new_notes': count, 'needs_attention': count >= 3,
-                'description': 'Completed cycles without changed research notes; this is a progress proxy, not a trade requirement.'}
+                'filled_this_cycle': bool(filled),
+                'description': 'Cycles without changed research notes or a fill; '
+                               'this is a progress proxy, not a trade requirement.'}
     store.put('research_progress', progress)
     return progress

@@ -5,14 +5,25 @@ from pathlib import Path
 import json
 import logging
 import os
+import shutil
+import subprocess
+import sys
+import tempfile
 from typing import Any
 
 import pandas as pd
 
 from .ctrader_auth import DEMO_HOST
+from .paper_trading import market_is_open
 
 log = logging.getLogger(__name__)
 REQUIRED = ("open", "high", "low", "close", "volume")
+# Bounded wall clock for a retried download in a fresh interpreter. The Twisted
+# reactor in the child has its own request timeouts; this bounds the parent.
+DOWNLOAD_TIMEOUT_SECONDS = 900.0
+# The CLI entry point resolves `xauusd` from the working directory, so the retry
+# child must run from the repository root rather than inherit the caller's cwd.
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 class CTraderAuthError(RuntimeError):
@@ -63,15 +74,41 @@ class HistoricalDataStore:
     def validate(self, bars: pd.DataFrame) -> dict:
         x=self.normalize(bars)
         if x.empty:
-            return {"rows": 0, "start": None, "end": None, "absent_minutes": 0, "gap_events": 0, "gaps": [], "duplicates": int(bars.index.duplicated().sum())}
-        expected=pd.date_range(x.index.min(),x.index.max(),freq="min",tz="UTC"); gaps=expected.difference(x.index)
+            return {"rows": 0, "start": None, "end": None, "absent_minutes": 0, "closed_minutes": 0, "gap_events": 0, "gaps": [], "duplicates": int(bars.index.duplicated().sum())}
+        expected=pd.date_range(x.index.min(),x.index.max(),freq="min",tz="UTC")
+        # Separate "the market was closed" from "data is missing". Counting every
+        # absent minute reported the whole weekend and the daily New York break as
+        # data loss, which made a perfectly healthy store look like it had holes in
+        # it and hid the gaps that actually mattered.
+        absent=expected.difference(x.index)
+        closed=sum(1 for minute in absent if not market_is_open(minute.to_pydatetime()))
+        missing_minutes=len(absent)-closed
         deltas=x.index.to_series().diff(); events=x.index[deltas>pd.Timedelta(minutes=1)]
         gap_events=[{"after":(timestamp-delta).isoformat(),"before":timestamp.isoformat(),"minutes":int(delta/pd.Timedelta(minutes=1))-1} for timestamp,delta in ((t,deltas.loc[t]) for t in events)]
-        return {"rows":len(x),"start":x.index.min().isoformat(),"end":x.index.max().isoformat(),"absent_minutes":int(len(gaps)),"gap_events":len(gap_events),"gaps":gap_events[:100],"duplicates":int(bars.index.duplicated().sum())}
+        return {"rows":len(x),"start":x.index.min().isoformat(),"end":x.index.max().isoformat(),
+                # Kept for compatibility: every absent minute, closed or not.
+                "absent_minutes":int(len(absent)),
+                # The honest number: minutes that were open and have no bar.
+                "missing_market_minutes":int(missing_minutes),
+                "closed_minutes":int(closed),
+                "gap_events":len(gap_events),"gaps":gap_events[:100],
+                "duplicates":int(bars.index.duplicated().sum())}
     def write(self, bars: pd.DataFrame, merge=True) -> pd.DataFrame:
+        # Written to a temporary file and swapped into place. `to_parquet` writes
+        # the target in place, and three writers touch this file concurrently: the
+        # agent's in-loop refresh, the data-update timer, and every reader in the
+        # tick and the monitor. A torn read raised, or returned a shorter frame
+        # whose last bar was older than the caller expected.
         self.config.processed_dir.mkdir(parents=True,exist_ok=True); x=self.normalize(bars)
         if merge and self.path.exists(): x=pd.concat([pd.read_parquet(self.path),x]).sort_index(); x=x[~x.index.duplicated(keep="last")]
-        x.to_parquet(self.path, engine="pyarrow"); return x
+        temporary=self.path.with_name(self.path.name+".tmp")
+        try:
+            x.to_parquet(temporary, engine="pyarrow")
+            os.replace(temporary, self.path)
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
+        return x
     def read(self) -> pd.DataFrame:
         if not self.path.exists(): raise FileNotFoundError(self.path)
         return pd.read_parquet(self.path)
@@ -171,6 +208,8 @@ class CTraderOpenApiDownloader:
         return int(timestamp.timestamp() * 1000)
 
     def download(self, start: str | datetime, end: str | datetime | None = None, page_size: int = 5000) -> dict:
+        # Boundary check first, so a refusal never reaches the network.
+        self.config.validate()
         if not 1 <= page_size <= 5000:
             raise ValueError("page_size must be between 1 and 5000")
         start_ms = self._timestamp_ms(start)
@@ -185,7 +224,14 @@ class CTraderOpenApiDownloader:
             tokens = self._refresh_tokens()
             self.config = replace(self.config, access_token=tokens["access_token"],
                                   refresh_token=tokens.get("refresh_token", self.config.refresh_token))
-            pages, metadata = self._fetch(start_ms, end_ms, page_size)
+            # The refreshed token is persisted, but _fetch cannot be re-entered here:
+            # it drives the process-global Twisted reactor, and the first call already
+            # stopped it. Twisted refuses a second run(), so retrying in this process
+            # always failed with ReactorNotRestartable and the real auth error was
+            # replaced by a transport one. Re-run the whole download in a fresh
+            # interpreter instead; that child performs the merge and returns its
+            # result, so this call ends there.
+            return self._rerun_in_subprocess(start_ms, end_ms, page_size)
         frames = [trendbars_to_frame(page["trendbars"], metadata["digits"]) for page in pages]
         bars = pd.concat(frames).sort_index() if frames else trendbars_to_frame([])
         bars = bars[~bars.index.duplicated(keep="last")]
@@ -218,7 +264,55 @@ class CTraderOpenApiDownloader:
             raise CTraderAuthError("CH_ACCESS_TOKEN_INVALID", f"could not persist refreshed tokens: {exc}") from exc
         return tokens
 
+    def _rerun_in_subprocess(self, start_ms: int, end_ms: int, page_size: int) -> dict:
+        """Re-run the whole download in a fresh interpreter and return its result.
+
+        A second ``_fetch`` in this process cannot work: the first call stopped the
+        global Twisted reactor, and ``reactor.run()`` raises ReactorNotRestartable
+        afterwards. The child re-reads the now-persisted token from ``.env``,
+        performs the read-only download and merges it into the same store, and
+        reports the outcome through a small result file.
+
+        This is not a blind retry of an uncertain broker action. The refresh has
+        already succeeded and its token is durable, so the child is guaranteed a
+        working credential, and the request is a read-only historical download.
+        """
+        workspace = Path(tempfile.mkdtemp(prefix="xauusd-refetch-"))
+        result_path = workspace / "result.json"
+        command = [sys.executable, "-m", "xauusd.cli", "data", "download",
+                   "--start", str(start_ms), "--end", str(end_ms), "--page-size", str(page_size),
+                   "--result-file", str(result_path)]
+        try:
+            completed = subprocess.run(command, capture_output=True, text=True,
+                                       timeout=DOWNLOAD_TIMEOUT_SECONDS, cwd=str(REPO_ROOT))
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise CTraderAuthError("CH_ACCESS_TOKEN_INVALID",
+                                   f"refresh succeeded but the retried download could not start: "
+                                   f"{type(exc).__name__}") from exc
+        finally:
+            shutil.rmtree(workspace, ignore_errors=True)
+        if not result_path.is_file():
+            # Report the auth failure the child hit, not a generic transport error.
+            # `state: failed` with a null error_code would hide a credential
+            # problem from reports/data_update_status.json and the live view.
+            raise CTraderAuthError("CH_ACCESS_TOKEN_INVALID",
+                                   "refreshed download produced no result")
+        try:
+            payload = json.loads(result_path.read_text(encoding="utf-8"))
+        except (ValueError, OSError) as exc:
+            raise CTraderAuthError("CH_ACCESS_TOKEN_INVALID",
+                                   "refreshed download returned unreadable output") from exc
+        result = payload.get("result") if isinstance(payload, dict) else None
+        if not isinstance(result, dict):
+            raise CTraderAuthError("CH_ACCESS_TOKEN_INVALID", "refreshed download returned no result")
+        return result
+
     def _fetch(self, start_ms: int, end_ms: int, page_size: int) -> tuple[list[dict], dict]:
+        # Re-check the execution boundary at the network boundary, not only when
+        # the config was read from the environment. The execution adapter does the
+        # same immediately before every connect; without it a mutated config
+        # object or a new caller bypasses both the demo host pin and the flag.
+        self.config.validate()
         # Twisted's global reactor is intentionally isolated to one CLI invocation.
         from twisted.internet import reactor
         from ctrader_open_api import Client, Protobuf, TcpProtocol

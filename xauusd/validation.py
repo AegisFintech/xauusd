@@ -7,7 +7,9 @@ import json
 import numpy as np
 import pandas as pd
 
-from .engine import EventDrivenBacktester, ExecutionConfig
+from .engine import (EventDrivenBacktester, ExecutionConfig, metric_above,
+                      metric_at_least)
+from .research import _score
 from .research import StrategySpec, build_features, generate_signal
 
 
@@ -24,6 +26,12 @@ class ValidationConfig:
     bootstrap_samples: int = 500
     bootstrap_seed: int = 17
     bootstrap_block_length: int = 5
+    # Bars dropped from the end of every training window. A feature with a
+    # 30-bar rolling channel, or a label looking `prediction_horizon` bars ahead,
+    # reaches across the boundary into the evaluation window it is being scored
+    # on. Without this the last rows of each training window encode the first rows
+    # of the window after it.
+    embargo_bars: int = 32
 
     def __post_init__(self) -> None:
         if not 0 < self.train_fraction < 1 or not 0 < self.validation_fraction < 1:
@@ -32,6 +40,8 @@ class ValidationConfig:
             raise ValueError("train and validation fractions must leave a test set")
         if self.walk_forward_folds < 2 or self.bootstrap_samples < 1 or self.bootstrap_block_length < 1:
             raise ValueError("at least two folds and one bootstrap sample are required")
+        if self.embargo_bars < 0:
+            raise ValueError("embargo_bars must be zero or positive")
 
 
 def chronological_split(frame: pd.DataFrame, config: ValidationConfig) -> dict[str, pd.DataFrame]:
@@ -43,16 +53,37 @@ def chronological_split(frame: pd.DataFrame, config: ValidationConfig) -> dict[s
     return {"train": frame.iloc[:train_end], "validation": frame.iloc[train_end:validation_end], "test": frame.iloc[validation_end:]}
 
 
-def walk_forward_splits(frame: pd.DataFrame, folds: int) -> list[tuple[pd.DataFrame, pd.DataFrame]]:
-    """Anchored training windows followed by non-overlapping test windows."""
+def apply_embargo(frame: pd.DataFrame, boundary: int, embargo: int) -> pd.DataFrame:
+    """The training window ``frame.iloc[:boundary]``, purged by ``embargo`` bars.
+
+    Rolling features and forward-looking labels both reach across a split
+    boundary, so the tail of a training window contains information about the head
+    of the window that follows it. Purging the tail is the standard remedy; the
+    evaluation window itself is never touched. ``embargo=0`` is the plain
+    truncation and is not a special case that returns the whole frame.
+    """
+    cut = boundary - embargo if embargo > 0 else boundary
+    return frame.iloc[:max(0, cut)]
+
+
+def walk_forward_splits(frame: pd.DataFrame, folds: int, embargo: int = 0) -> list[tuple[pd.DataFrame, pd.DataFrame]]:
+    """Anchored training windows followed by non-overlapping test windows.
+
+    The training window is purged by ``embargo`` bars so its tail cannot encode
+    the start of the test window it is scored on.
+    """
     block = len(frame) // (folds + 1)
     if block < 2:
         raise ValueError("not enough rows for requested walk-forward folds")
+    if embargo > 0 and block <= embargo:
+        # Silently yielding an empty training window would fit on nothing and then
+        # report a fold result, which reads as a legitimate negative result.
+        raise ValueError(f"embargo of {embargo} bars leaves no training rows in a {block}-bar fold block")
     result = []
     for fold in range(folds):
         train_end = block * (fold + 1)
         test_end = block * (fold + 2) if fold < folds - 1 else len(frame)
-        result.append((frame.iloc[:train_end], frame.iloc[train_end:test_end]))
+        result.append((apply_embargo(frame, train_end, embargo), frame.iloc[train_end:test_end]))
     return result
 
 
@@ -117,7 +148,8 @@ class StrategyValidator:
         splits = chronological_split(features, self.config)
         split_results = {name: self._run(part, spec) for name, part in splits.items()}
         folds = []
-        for number, (train, test) in enumerate(walk_forward_splits(features, self.config.walk_forward_folds), 1):
+        for number, (train, test) in enumerate(
+                walk_forward_splits(features, self.config.walk_forward_folds, self.config.embargo_bars), 1):
             result = self._run(test, spec)
             folds.append({"fold": number, "train_start": train.index.min().isoformat(),
                           "train_end": train.index.max().isoformat(), "test_start": test.index.min().isoformat(),
@@ -135,9 +167,9 @@ class StrategyValidator:
         test = test_result["metrics"]
         gates = {
             "minimum_trades": test["trades"] >= self.config.minimum_trades,
-            "maximum_drawdown": test["max_drawdown"] >= self.config.maximum_drawdown,
-            "positive_expectancy": test["expectancy"] > 0,
-            "profit_factor": test["profit_factor"] >= self.config.minimum_profit_factor,
+            "maximum_drawdown": metric_at_least(test["max_drawdown"], self.config.maximum_drawdown),
+            "positive_expectancy": metric_above(test["expectancy"], 0),
+            "profit_factor": metric_at_least(test["profit_factor"], self.config.minimum_profit_factor),
             "walk_forward_consistency": positive_folds >= self.config.minimum_positive_folds,
             "parameter_stability": stable_neighbors >= self.config.minimum_stable_neighbors,
             "bootstrap_p05_positive": bootstrap["p05_net_pnl"] > 0,
@@ -150,6 +182,12 @@ class StrategyValidator:
             "walk_forward": folds, "positive_fold_fraction": positive_folds,
             "sensitivity": neighbors, "stable_neighbor_fraction": stable_neighbors,
             "bootstrap": bootstrap, "gates": gates, "passed": all(gates.values()),
+            # Ranking statistic for this exact report, computed from the same
+            # metrics the gates read. It is a tie-break among candidates that
+            # already passed, never a substitute for the gates. The report had no
+            # score at all, so any consumer ranking reports by score silently saw
+            # nothing.
+            "score": _score(test),
         }
         output_dir.mkdir(parents=True, exist_ok=True)
         (output_dir / f"{spec.name}.json").write_text(json.dumps(report, indent=2, allow_nan=False))

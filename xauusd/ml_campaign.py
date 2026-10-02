@@ -19,6 +19,18 @@ class EnsembleConfig:
     backends: tuple[str, ...] = ("hist_gradient_boosting", "random_forest", "extra_trees")
     regimes: int = 3
     folds: int = 4
+    # Labels look `prediction_horizon` bars ahead, so the last rows of a training
+    # window read closes from inside the evaluation window. `folds` was also
+    # unvalidated: zero made np.mean([]) NaN, which crashed the report write.
+    embargo_bars: int = 8
+
+    def __post_init__(self) -> None:
+        if self.folds < 2:
+            raise ValueError("at least two folds are required")
+        if self.regimes < 1:
+            raise ValueError("at least one regime is required")
+        if self.embargo_bars < 0:
+            raise ValueError("embargo_bars must be zero or positive")
 
 
 class WalkForwardMLCampaign:
@@ -32,7 +44,8 @@ class WalkForwardMLCampaign:
         x, y, _ = supervised_frame(bars, self.ml)
         price_features = build_features(bars)
         folds, all_trades = [], []
-        for number, (train_x, test_x) in enumerate(walk_forward_splits(x, self.ensemble.folds), 1):
+        for number, (train_x, test_x) in enumerate(
+                walk_forward_splits(x, self.ensemble.folds, self.ensemble.embargo_bars), 1):
             train_y, test_y = y.loc[train_x.index], y.loc[test_x.index]
             regime_columns = ["return_1", "atr_14", "range_ratio", "trend_strength"]
             regime = RegimeTransformer(self.ensemble.regimes, self.ml.random_state + number).fit(train_x[regime_columns])

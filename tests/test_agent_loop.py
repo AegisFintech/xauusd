@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from threading import Event
 
 import pandas as pd
@@ -20,13 +20,21 @@ from xauusd.agent_status import read_status
 from xauusd.canary_strategy import ConfirmedBreakoutCanarySource, LocalHistoricalMarketDataSource
 from xauusd.data import DataConfig, HistoricalDataStore
 from xauusd.demo_execution import PaperToCTraderDemoCoordinator
-from xauusd.paper_trading import (ACCEPTED, MAX_POSITION, InMemoryPaperTradingStore, PaperRiskConfig,
-                                  PaperTrading)
+from xauusd.paper_trading import (ACCEPTED, DUPLICATE_DECISION, MAX_POSITION, InMemoryPaperTradingStore,
+                                  PaperRiskConfig, PaperTrading)
+
+
+# A fixed, market-open instant. Every market fixture is built relative to it so
+# the bar timestamps and `now` are consistent: a bar stamped in the future
+# relative to `now` is now rejected as an invalid observation rather than being
+# clamped to zero age and read as perfectly fresh.
+OPEN_NOW = datetime(2026, 9, 17, 12, tzinfo=timezone.utc)  # Thursday 08:00 New York, market open
+LAST_BAR = OPEN_NOW - timedelta(minutes=1)  # closes exactly at OPEN_NOW
 
 
 def market_store(tmp_path, periods=80):
-    end = datetime.now(timezone.utc).replace(second=0, microsecond=0)
-    index = pd.date_range(end - pd.Timedelta(minutes=periods), periods=periods, freq="min", tz="UTC")
+    end = LAST_BAR
+    index = pd.date_range(end - pd.Timedelta(minutes=periods - 1), periods=periods, freq="min", tz="UTC")
     bars = pd.DataFrame({"open": range(100, 100 + periods), "high": range(101, 101 + periods),
                          "low": range(99, 99 + periods), "close": range(100, 100 + periods),
                          "volume": [1] * periods}, index=index)
@@ -36,8 +44,8 @@ def market_store(tmp_path, periods=80):
 
 
 def stale_market_store(tmp_path, stale_minutes=120, periods=80):
-    end = (datetime.now(timezone.utc).replace(second=0, microsecond=0) - pd.Timedelta(minutes=stale_minutes))
-    index = pd.date_range(end - pd.Timedelta(minutes=periods), periods=periods, freq="min", tz="UTC")
+    end = LAST_BAR - pd.Timedelta(minutes=stale_minutes)
+    index = pd.date_range(end - pd.Timedelta(minutes=periods - 1), periods=periods, freq="min", tz="UTC")
     bars = pd.DataFrame({"open": range(100, 100 + periods), "high": range(101, 101 + periods),
                          "low": range(99, 99 + periods), "close": range(100, 100 + periods),
                          "volume": [1] * periods}, index=index)
@@ -47,8 +55,7 @@ def stale_market_store(tmp_path, stale_minutes=120, periods=80):
 
 
 def write_new_bar(store):
-    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
-    index = pd.DatetimeIndex([now], name="timestamp", tz="UTC")
+    index = pd.DatetimeIndex([LAST_BAR], name="timestamp", tz="UTC")
     bars = pd.DataFrame({"open": [1.0], "high": [1.0], "low": [1.0], "close": [1.0], "volume": [1]}, index=index)
     store.write(bars, merge=True)
 
@@ -69,7 +76,8 @@ def refresh_runner(tmp_path, refresh, config=None, stale_minutes=120):
     coordinator = paper_only_coordinator(pt)
     cfg = config or refresh_config()
     registry = build_agent_registry(source, pt, coordinator, cfg,
-                                    canary=ConfirmedBreakoutCanarySource(store, 1))
+                                    canary=ConfirmedBreakoutCanarySource(store, 1),
+                                    now_provider=lambda: OPEN_NOW)
     transcript = InMemoryAgentTranscriptStore()
     runner = ContinuousAgentRunner(ScriptedPlanner([("(raw)", {"action": "final", "summary": "ok"})]),
                                    registry, transcript, source, pt, coordinator, cfg, refresh_source=refresh,
@@ -87,9 +95,6 @@ def fresh_source(tmp_path):
     return LocalHistoricalMarketDataSource(market_store(tmp_path))
 
 
-OPEN_NOW = datetime(2026, 9, 17, 12, tzinfo=timezone.utc)  # Thursday midday, market open
-
-
 def paper_only_coordinator(pt):
     return PaperToCTraderDemoCoordinator(pt, paper_only=True)
 
@@ -97,7 +102,8 @@ def paper_only_coordinator(pt):
 def test_read_market_tool_reports_price_freshness_and_closes(tmp_path):
     source = fresh_source(tmp_path)
 
-    out = read_market_tool(source, AgentConfig(max_market_data_age_seconds=120)).handler({})
+    out = read_market_tool(source, AgentConfig(max_market_data_age_seconds=120),
+                          now_provider=lambda: OPEN_NOW).handler({})
 
     assert out["symbol"] == "XAUUSD"
     assert out["price"] == 179.0
@@ -120,7 +126,7 @@ def test_canary_signal_tool_returns_side(tmp_path):
     generator = lambda features, spec: pd.Series([0, -1], index=features.index[-2:])
     canary = ConfirmedBreakoutCanarySource(store, 1, signal_generator=generator)
 
-    out = canary_signal_tool(canary).handler({})
+    out = canary_signal_tool(canary, now_provider=lambda: OPEN_NOW).handler({})
 
     assert out["signal"] == "SELL"
     assert out["quantity"] == 1.0
@@ -172,9 +178,17 @@ def test_propose_trade_tool_duplicate_is_idempotent(tmp_path):
     second = tool.handler({"side": "BUY", "quantity": 0.25, "reason": "b"})
 
     assert first["filled"] is True
+    assert first["replayed"] is False
     assert second["decision_id"] == first["decision_id"]
-    assert second["filled"] is True
+    # A replay is not a second fill. Reporting `filled: true` told the planner a
+    # position had changed when nothing did, and in paper-only mode that verdict
+    # is the only one it receives.
+    assert second["filled"] is False
+    assert second["replayed"] is True
+    assert second["gate_reason"] == DUPLICATE_DECISION
+    assert second["sent_to_broker"] is False
     assert pt.state()["position"] == pytest.approx(0.25)
+    assert len(pt.state()["ledger"]) == 1
 
 
 def test_redact_bounds_untrusted_content():
@@ -201,7 +215,8 @@ def agent_runner(tmp_path, script, transcript=None, config=None, store=None, sta
     coordinator = paper_only_coordinator(pt)
     cfg = config or AgentConfig(max_steps_per_tick=2)
     registry = build_agent_registry(source, pt, coordinator, cfg,
-                                    canary=ConfirmedBreakoutCanarySource(store, 1))
+                                    canary=ConfirmedBreakoutCanarySource(store, 1),
+                                    now_provider=lambda: OPEN_NOW)
     transcript = transcript or InMemoryAgentTranscriptStore()
     runner = ContinuousAgentRunner(ScriptedPlanner(script), registry, transcript,
                                    source, pt, coordinator, cfg, now_provider=lambda: OPEN_NOW,
@@ -433,7 +448,6 @@ def test_runner_respects_refresh_cooldown(tmp_path):
 
 
 def test_runner_skips_planner_when_market_is_closed(tmp_path):
-    from datetime import datetime, timezone
     runner, transcript = agent_runner(
         tmp_path, [("(raw)", {"action": "final", "summary": "should not run"})],
         config=AgentConfig(max_market_data_age_seconds=120, max_steps_per_tick=2))
@@ -508,3 +522,22 @@ def test_runner_heartbeat_tracks_consecutive_errors(tmp_path):
     status = json.loads(Path(status_file).read_text())
     assert status["consecutive_errors"] == 2
     assert status["last_tick_status"] == "planner_error"
+
+@pytest.mark.parametrize("name,value", [
+    ("AGENT_MAX_MARKET_DATA_AGE_SECONDS", "inf"),
+    ("AGENT_MAX_MARKET_DATA_AGE_SECONDS", "nan"),
+    ("AGENT_POLL_SECONDS", "nan"),
+    ("AGENT_POLL_SECONDS", "inf"),
+    ("AGENT_MAX_MARKET_DATA_AGE_SECONDS", "-1"),
+])
+def test_agent_config_rejects_non_finite_limits(monkeypatch, name, value):
+    """`nan <= 0` and `inf <= 0` are both False, so the original check passed them.
+
+    An infinite max market-data age disabled the loop's staleness pre-gate and its
+    in-loop refresh; a NaN poll interval made `Event.wait(nan)` return immediately,
+    turning run_forever into a spin loop. The paper gate always checked finiteness;
+    the loop did not.
+    """
+    monkeypatch.setenv(name, value)
+    with pytest.raises(ValueError):
+        AgentConfig.from_env()

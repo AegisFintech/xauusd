@@ -15,6 +15,36 @@ def _field(value: Any, name: str, default: Any = None) -> Any:
     return value.get(name, default) if isinstance(value, dict) else getattr(value, name, default)
 
 
+def _is_explicitly_demo(account: Any) -> bool:
+    """True only when the broker positively reported this account as non-live.
+
+    Presence has to be checked explicitly. ``isLive`` is a proto3 ``optional``
+    (explicit-presence) field, so an account whose live/demo status the broker
+    never sent reads back as ``False`` through ``getattr`` and a plain default
+    argument is never consulted. Relying on that default therefore admits an
+    account of unknown type, and account type is the one thing standing between
+    this code and a live account.
+    """
+    if isinstance(account, dict):
+        if "isLive" not in account:
+            return False
+        flag = account["isLive"]
+    elif hasattr(account, "HasField"):
+        try:
+            if not account.HasField("isLive"):
+                return False
+        except ValueError:
+            # Field without presence tracking: fall back to the value itself.
+            pass
+        flag = getattr(account, "isLive", None)
+    else:
+        if not hasattr(account, "isLive"):
+            return False
+        flag = account.isLive
+    # Anything other than a definite false is unknown, and unknown is not demo.
+    return flag is False
+
+
 def is_error(message: Any) -> tuple[str, str] | None:
     """Return ``(code, description)`` when a cTrader message carries an error, else None."""
     code = _field(message, "errorCode")
@@ -30,8 +60,12 @@ def is_error(message: Any) -> tuple[str, str] | None:
 
 
 def demo_accounts(accounts: list[Any]) -> list[Any]:
-    """Reduce a cTrader account list to non-live (demo) accounts."""
-    return [account for account in accounts if not bool(_field(account, "isLive", True))]
+    """Reduce a cTrader account list to non-live (demo) accounts.
+
+    An account the broker did not classify is excluded, not admitted: see
+    :func:`_is_explicitly_demo`.
+    """
+    return [account for account in accounts if _is_explicitly_demo(account)]
 
 
 def resolve_symbol(symbols: list[Any], wanted: str) -> tuple[int, str] | None:

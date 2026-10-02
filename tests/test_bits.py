@@ -49,9 +49,11 @@ def test_transport_submission_and_polling(monkeypatch):
     monkeypatch.setattr(client, "_request", request)
     assert client.submit({"message_id":"message"}) == "instance"
     assert json.loads(calls[0][1]["meta"]["payload"]["input"])["message_id"] == "message"
-    assert client.poll("instance", "cycle", "message")["actions"] == []
+    # poll returns (envelope, messages): one request yields both.
+    reply, messages = client.poll("instance", "cycle", "message")
+    assert reply["actions"] == [] and messages == []
     monkeypatch.setattr(client, "_request", lambda *a: {"data":{"attributes":{"instanceStatus":{"detailsKind":"IN_PROGRESS"}}}})
-    assert client.poll("instance", "cycle", "message") is None
+    assert client.poll("instance", "cycle", "message")[0] is None
     monkeypatch.setattr(client, "_request", lambda *a: {"data":{"attributes":{"instanceStatus":{"detailsKind":"FAILED"}}}})
     with pytest.raises(BitsError): client.poll("instance", "cycle", "message")
 

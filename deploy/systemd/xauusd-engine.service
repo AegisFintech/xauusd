@@ -1,0 +1,34 @@
+[Unit]
+Description=XAUUSD deterministic paper-trading engine (demo-only)
+After=network-online.target
+Wants=network-online.target
+# The engine may not trade on data it cannot see is fresh, and it needs the feed
+# to be keeping the store current.
+After=xauusd-data-feed.service
+Wants=xauusd-data-feed.service
+# One AgentLock per container: the engine and the agent must not both run.
+Before=xauusd-agent.service
+
+[Service]
+Type=simple
+WorkingDirectory=/root/xauusd
+EnvironmentFile=/root/xauusd/.env
+ExecStart=/root/xauusd/.venv/bin/python -m xauusd.cli engine run
+Restart=on-failure
+RestartSec=30
+# The engine holds the trading decision path, so it takes the control group:
+# stopping it must stop the decision loop it owns, not orphan a child.
+KillMode=control-group
+TimeoutStopSec=30
+# No console log, matching the agent's observability contract. Engine decisions
+# are recorded in the transcript and shown on the live view.
+StandardOutput=null
+StandardError=null
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/root/xauusd/state /root/xauusd/reports /root/xauusd/data
+
+[Install]
+WantedBy=multi-user.target

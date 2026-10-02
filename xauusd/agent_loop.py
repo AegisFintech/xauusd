@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 import os
 from threading import Event
 import time
@@ -28,8 +29,10 @@ from .firecrawl_research import FirecrawlResearchClient, firecrawl_fetch_tool
 from .paper_trading import PaperTrading
 from .paper_trading import (
     DEFAULT_MAX_MARKET_DATA_AGE_SECONDS,
+    DUPLICATE_DECISION,
     market_data_age_seconds,
     market_is_open,
+    observation_is_future,
 )
 
 DEFAULT_AGENT_GOAL = (
@@ -58,8 +61,9 @@ class AgentConfig:
     transcript_content_limit: int = MAX_TRANSCRIPT_CONTENT_CHARS
 
     def validate(self) -> None:
-        if not self.goal.strip() or self.poll_seconds <= 0 or self.max_steps_per_tick < 1:
-            raise ValueError("goal, positive poll seconds, and positive steps per tick are required")
+        if not self.goal.strip() or not math.isfinite(self.poll_seconds) or self.poll_seconds <= 0 \
+                or self.max_steps_per_tick < 1:
+            raise ValueError("goal, positive finite poll seconds, and positive steps per tick are required")
         if not self.symbol.strip():
             raise ValueError("symbol is required")
         if self.max_market_data_age_seconds <= 0 or self.transcript_content_limit < 1:
@@ -87,9 +91,14 @@ class AgentConfig:
 
 
 def _positive_float(name: str, default: float) -> float:
+    # Finite as well as positive. `nan <= 0` and `inf <= 0` are both False, so the
+    # original check accepted them: AGENT_MAX_MARKET_DATA_AGE_SECONDS=inf disabled
+    # the loop's staleness pre-gate, and AGENT_POLL_SECONDS=nan made Event.wait
+    # return immediately, turning run_forever into a busy loop. The paper gate has
+    # always checked finiteness; this is the same rule for the loop.
     value = float(os.getenv(name, str(default)))
-    if value <= 0:
-        raise ValueError(f"{name} must be positive")
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{name} must be a positive finite number")
     return value
 
 
@@ -226,6 +235,16 @@ class InMemoryAgentTranscriptStore:
         return [{"run_id": rid, "status": run["status"], "ticks": int(ticks.get(rid, 0))}
                 for rid, run in self._runs.items()][:limit]
     def run_status(self, run_id): return self._runs.get(run_id, {}).get("status")
+    def prune(self, keep_runs=5, keep_steps=20_000):
+        """Mirror of the SQLite retention so both backends behave the same."""
+        recent = [row["run_id"] for row in self.runs(limit=keep_runs)]
+        kept = [step for step in self._steps if not recent or step["run_id"] in recent]
+        dropped = len(self._steps) - len(kept)
+        if len(kept) > keep_steps:
+            dropped += len(kept) - keep_steps
+            kept = kept[-keep_steps:]
+        self._steps = kept
+        return {"runs_removed": 0, "steps_removed": dropped}
     def reconcile_running_runs(self, excluding=None):
         closed = 0
         for rid, run in self._runs.items():
@@ -279,10 +298,16 @@ def _redact_for_transcript(result: dict[str, Any], limit: int) -> dict[str, Any]
     return result
 
 
-def read_market_tool(source: LocalHistoricalMarketDataSource, config: AgentConfig) -> ToolSpec:
+def read_market_tool(source: LocalHistoricalMarketDataSource, config: AgentConfig,
+                     now_provider: Callable[[], datetime] | None = None) -> ToolSpec:
     def handler(value: dict[str, Any]) -> dict[str, Any]:
+        now = now_provider() if now_provider is not None else datetime.now(timezone.utc)
         market = source.read()
-        age_seconds = market_data_age_seconds(market.observed_at, datetime.now(timezone.utc))
+        age_seconds = market_data_age_seconds(market.observed_at, now)
+        # A bar dated beyond one interval ahead of the clock is a bad observation,
+        # not a fresh one; the zero clamp in market_data_age_seconds would otherwise
+        # report it as zero-age and let the planner act on it.
+        future = observation_is_future(market.observed_at, now)
         recent_closes: list[float] = []
         try:
             normalized = source.store.normalize(source.store.read())
@@ -291,16 +316,20 @@ def read_market_tool(source: LocalHistoricalMarketDataSource, config: AgentConfi
             recent_closes = []
         return {"symbol": config.symbol, "price": float(market.price),
                 "bar_time_utc": market.observed_at.astimezone(timezone.utc).isoformat(),
-                "age_seconds": round(age_seconds, 1), "fresh": age_seconds <= config.max_market_data_age_seconds,
-                "market_open": market_is_open(datetime.now(timezone.utc)),
+                "age_seconds": round(age_seconds, 1),
+                "fresh": not future and age_seconds <= config.max_market_data_age_seconds,
+                "future_dated": future,
+                "market_open": market_is_open(now),
                 "recent_closes": recent_closes}
 
     input_schema = {"type": "object", "properties": {}, "required": [], "additionalProperties": False}
     output_schema = {"type": "object", "properties": {
         "symbol": {"type": "string"}, "price": {"type": "number"}, "bar_time_utc": {"type": "string"},
-        "age_seconds": {"type": "number"}, "fresh": {"type": "boolean"}, "market_open": {"type": "boolean"},
+        "age_seconds": {"type": "number"}, "fresh": {"type": "boolean"}, "future_dated": {"type": "boolean"},
+        "market_open": {"type": "boolean"},
         "recent_closes": {"type": "array", "items": {"type": "number"}},
-    }, "required": ["symbol", "price", "bar_time_utc", "age_seconds", "fresh", "market_open", "recent_closes"], "additionalProperties": False}
+    }, "required": ["symbol", "price", "bar_time_utc", "age_seconds", "fresh", "future_dated",
+                    "market_open", "recent_closes"], "additionalProperties": False}
     return ToolSpec("read_market", "Read the latest market observation and freshness from the local M1 data.", input_schema, output_schema, handler)
 
 
@@ -329,25 +358,30 @@ def paper_state_tool(paper_trading: PaperTrading) -> ToolSpec:
     return ToolSpec("paper_state", "Read the current paper account state and recent fills.", input_schema, output_schema, handler)
 
 
-def canary_signal_tool(canary: ConfirmedBreakoutCanarySource) -> ToolSpec:
+def canary_signal_tool(canary: ConfirmedBreakoutCanarySource,
+                       now_provider: Callable[[], datetime] | None = None) -> ToolSpec:
     def handler(value: dict[str, Any]) -> dict[str, Any]:
+        now = now_provider() if now_provider is not None else datetime.now(timezone.utc)
         decision = canary.read(_mock_market_for_read(canary))
         if decision is None:
             return {"signal": "NONE", "quantity": 0.0}
         bar_time = decision.market_data_at.astimezone(timezone.utc)
         return {"signal": decision.side, "quantity": float(decision.quantity),
                 "signal_bar_utc": bar_time.isoformat(),
-                "signal_age_seconds": round(market_data_age_seconds(bar_time, datetime.now(timezone.utc)), 1)}
+                "signal_age_seconds": round(market_data_age_seconds(bar_time, now), 1),
+                "signal_future_dated": observation_is_future(bar_time, now)}
 
     input_schema = {"type": "object", "properties": {}, "required": [], "additionalProperties": False}
     output_schema = {"type": "object", "properties": {
         "signal": {"type": "string", "enum": ["NONE", "BUY", "SELL"]}, "quantity": {"type": "number"},
         "signal_bar_utc": {"type": "string"}, "signal_age_seconds": {"type": "number"},
-    }, "required": ["signal", "quantity"], "additionalProperties": False}
+        "signal_future_dated": {"type": "boolean"},
+    }, "required": ["signal", "quantity", "signal_future_dated"], "additionalProperties": False}
     return ToolSpec("canary_signal",
                     "Run the deterministic confirmed-breakout signal on closed M1 bars. Each new transition is "
                     "emitted once. signal_bar_utc is the bar that triggered it and may sit a bar or two behind the "
-                    "newest bar when a tick was skipped, so check signal_age_seconds before treating it as current.",
+                    "newest bar when a tick was skipped, so check signal_age_seconds before treating it as current. "
+                    "signal_future_dated true means the bar is dated beyond the clock and must be ignored.",
                     input_schema, output_schema, handler)
 
 
@@ -374,16 +408,24 @@ def propose_trade_tool(coordinator: PaperToCTraderDemoCoordinator, paper_trading
         paper = outcome.get("paper", {})
         paper_only = bool(outcome.get("paper_only", False))
         paper_accepted = bool(paper.get("accepted", False))
+        # A replayed decision returns the persisted outcome verbatim. Reporting
+        # `filled: true` for it told the planner a position had changed when nothing
+        # did, and in paper-only mode that verdict is the only one it receives, so
+        # the model could believe it held exposure it did not.
+        replayed = bool(paper.get("replayed") or outcome.get("replayed"))
         if paper_only:
             # The paper gate is the whole lifecycle: nothing is sent to a broker,
             # so its verdict is the only verdict that exists.
-            filled, gate_reason = paper_accepted, paper.get("reason")
+            filled, gate_reason = paper_accepted and not replayed, paper.get("reason")
         else:
-            filled = bool(outcome.get("accepted", False))
+            filled = bool(outcome.get("accepted", False)) and not replayed
             gate_reason = (paper.get("reason") if not paper_accepted
                            else (outcome.get("demo") or {}).get("reason") or paper.get("reason"))
+        if replayed:
+            gate_reason = DUPLICATE_DECISION
         return {"filled": filled, "gate_reason": gate_reason, "paper_only": paper_only,
                 "sent_to_broker": not paper_only, "decision_id": decision.decision_id,
+                "replayed": replayed,
                 "proposal_reason": value.get("reason", "")}
 
     input_schema = {"type": "object", "properties": {
@@ -392,12 +434,16 @@ def propose_trade_tool(coordinator: PaperToCTraderDemoCoordinator, paper_trading
     output_schema = {"type": "object", "properties": {
         "filled": {"type": "boolean"}, "gate_reason": {"type": "string"}, "paper_only": {"type": "boolean"},
         "sent_to_broker": {"type": "boolean"}, "decision_id": {"type": "string"},
+        "replayed": {"type": "boolean"},
         "proposal_reason": {"type": "string"},
-    }, "required": ["filled", "gate_reason", "paper_only", "sent_to_broker", "decision_id", "proposal_reason"],
+    }, "required": ["filled", "gate_reason", "paper_only", "sent_to_broker", "decision_id", "replayed",
+                    "proposal_reason"],
         "additionalProperties": False}
     return ToolSpec("propose_trade",
                     "Propose a trade. The deterministic risk gates decide it and `filled` is their authoritative "
-                    "verdict: true means the position changed. In paper-only mode `sent_to_broker` is false "
+                    "verdict: true means the position changed. If `replayed` is true this exact decision was already "
+                    "processed, `filled` is false and `gate_reason` is DUPLICATE_DECISION, and no fill occurred. "
+                    "In paper-only mode `sent_to_broker` is false "
                     "because nothing reaches a broker, and `filled` reports the paper fill.",
                     input_schema, output_schema, handler)
 
@@ -405,13 +451,17 @@ def propose_trade_tool(coordinator: PaperToCTraderDemoCoordinator, paper_trading
 def build_agent_registry(source: LocalHistoricalMarketDataSource, paper_trading: PaperTrading,
                          coordinator: PaperToCTraderDemoCoordinator, config: AgentConfig,
                          canary: ConfirmedBreakoutCanarySource | None = None,
-                         firecrawl_client: FirecrawlResearchClient | None = None) -> ToolRegistry:
+                         firecrawl_client: FirecrawlResearchClient | None = None,
+                         now_provider: Callable[[], datetime] | None = None) -> ToolRegistry:
+    # The same clock for every tool: a registry whose freshness tools read a
+    # different "now" than the gate that enforces them can report a bar as fresh
+    # that the gate is about to refuse.
     registry = ToolRegistry()
-    registry.register(read_market_tool(source, config))
+    registry.register(read_market_tool(source, config, now_provider))
     registry.register(paper_state_tool(paper_trading))
-    registry.register(propose_trade_tool(coordinator, paper_trading, source, config))
+    registry.register(propose_trade_tool(coordinator, paper_trading, source, config, now_provider))
     if canary is not None:
-        registry.register(canary_signal_tool(canary))
+        registry.register(canary_signal_tool(canary, now_provider))
     if firecrawl_client is not None:
         registry.register(firecrawl_fetch_tool(firecrawl_client))
     return registry
@@ -470,10 +520,14 @@ class ContinuousAgentRunner:
         payload.update(extra)
         write_status(payload, self.status_path)
 
-    @staticmethod
-    def _age(market) -> float:
+    def _age(self, market) -> float:
         # Seconds since the newest persisted bar *closed*, not since it opened.
-        return market_data_age_seconds(market.observed_at, datetime.now(timezone.utc))
+        # Measured on the runner's own clock so the staleness pre-gate, the tools
+        # and the paper gate all judge freshness against the same instant.
+        return market_data_age_seconds(market.observed_at, self._now())
+
+    def _observation_is_future(self, market) -> bool:
+        return observation_is_future(market.observed_at, self._now())
 
     def _refresh_if_stale(self, tick: int, age: float) -> bool:
         """Blocking, bounded, opt-in refresh that never interrupts the tick loop.
@@ -540,7 +594,7 @@ class ContinuousAgentRunner:
         if self._refresh_if_stale(tick, self._age(market)):
             market = self.source.read()
         age = self._age(market)
-        if age > self.config.max_market_data_age_seconds:
+        if age > self.config.max_market_data_age_seconds or self._observation_is_future(market):
             # Money gate: with data this stale nothing is actionable serious enough
             # to justify a planner (LLM) call or any broker-side order. Back off,
             # record the refusal, and leave reasoning for a tick when the feed lives.

@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Query
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, Query, Request
+from fastapi.responses import HTMLResponse, StreamingResponse
 
 from .agent_loop import AgentTranscriptStore
 from .paper_trading import PaperTrading, paper_from_env, state_backend
@@ -20,6 +21,57 @@ DEFAULT_VIEW_PORT = 8100
 # the feed keeps downloading, so liveness checks alone cannot see a stuck loop.
 # At the default 60s poll this fires after roughly ten unproductive minutes.
 STALE_TICK_ALERT_THRESHOLD = 10
+# The Bits risk monitor runs every five seconds. Three missed cycles plus slack is
+# enough to conclude it is dead rather than slow.
+MONITOR_STALE_SECONDS = 45
+# Largest `/api/steps` response body. A captured shell job can contribute up to
+# its max_output_bytes (1 MiB) in a single step, so a row limit alone does not
+# bound the response.
+STEPS_BYTE_BUDGET = 2_000_000
+
+
+def _read_json_file(path: str) -> dict[str, Any] | None:
+    """Read a small status file, or None when it is absent or unreadable.
+
+    A status file that cannot be read is a normal condition (the service may not
+    be deployed), not an error to surface on the page.
+    """
+    try:
+        target = Path(path)
+        if not target.is_file():
+            return None
+        payload = json.loads(target.read_text())
+        return payload if isinstance(payload, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def read_status_file() -> dict[str, Any] | None:
+    from .agent_status import read_status
+    return read_status()
+
+
+def _engine_display_text(phase: str, c: dict[str, Any]) -> str:
+    """One line describing a deterministic engine event.
+
+    Engine events are decided by code, not by a model, so the wording states the
+    gate verdict plainly rather than summarising intent.
+    """
+    side = c.get("side")
+    direction = {"BUY": "long", "SELL": "short"}.get(side, "flat")
+    if phase == "engine_signal":
+        if not side:
+            return "Engine: no qualifying signal on this bar."
+        return f"Engine signal: {direction} {c.get('quantity', '')}".strip() + "."
+    if phase == "engine_decision":
+        reason = str(c.get("gate_reason", "")).replace("_", " ").lower()
+        accepted = c.get("accepted") is True
+        return (f"Engine proposal accepted: {direction} {c.get('quantity', '')}".strip() + "."
+                if accepted else f"Engine proposal refused: {reason or 'a risk gate'}.")
+    if phase == "engine_fill":
+        return (f"Engine filled {direction} {c.get('quantity', '')} at ${c.get('price', 0):,.2f}."
+                .replace("  ", " "))
+    return str(c.get("summary") or "Engine halted.")
 
 
 def step_display(step: dict[str, Any]) -> dict[str, str]:
@@ -29,7 +81,10 @@ def step_display(step: dict[str, Any]) -> dict[str, str]:
     titles = {"assistant": "Decision", "tool_call": "Tool call", "tool_result": "Tool result",
               "tick_start": "Market check", "tick_end": "Review complete", "data_refresh": "Market data",
               "bits_submit": "Analyzing", "tick_error": "Needs attention", "planner_error": "Needs attention",
-              "session_start": "Fresh start"}
+              "session_start": "Fresh start", "agent_message": "Thinking",
+              "engine_signal": "Engine signal", "engine_decision": "Engine decision",
+              "engine_fill": "Engine fill", "engine_halt": "Engine halted",
+              "interrogation": "Self-review"}
     title = titles.get(phase, "System update")
     text = "An update was recorded. Expand details to inspect it."
     if phase == "assistant":
@@ -65,6 +120,26 @@ def step_display(step: dict[str, Any]) -> dict[str, str]:
         if c.get("truncated"): text += " Captured output was shortened."
     elif phase == "bits_submit":
         text = "Sent the latest market information, account state, and relevant history to Bits for analysis."
+    elif phase == "agent_message":
+        # The real agent turn, from the workflow's message stream. The last
+        # assistant turn is the most informative, so it leads.
+        messages = c.get("messages") or []
+        turns = [m for m in messages if isinstance(m, dict) and m.get("content")]
+        if not turns:
+            text = "The workflow published no message stream for this cycle."
+        else:
+            last = [m for m in turns if m.get("role") == "assistant"] or turns
+            preview = str(last[-1].get("content", "")).strip().replace("\n", " ")
+            text = f"{len(turns)} turn(s). Latest: {preview[:280]}"
+    elif phase == "interrogation":
+        pairs = c.get("pairs") or []
+        if not pairs:
+            text = c.get("summary") or "The agent reviewed its own reasoning."
+        else:
+            first = pairs[0] if isinstance(pairs[0], dict) else {}
+            text = f"{len(pairs)} self-question(s). First: {str(first.get('question', ''))[:200]}"
+    elif phase in {"engine_signal", "engine_decision", "engine_fill", "engine_halt"}:
+        text = _engine_display_text(phase, c)
     elif phase == "data_refresh":
         if c.get("ok"): text = f"Market data updated with {c.get('downloaded_rows', 0):,} downloaded bars."
         elif c.get("skipped"): text = "Waiting before the next market-data refresh."
@@ -312,11 +387,134 @@ def create_app(store: AgentTranscriptStore | None = None,
               before: int | None = Query(default=None, ge=1),
               limit: int = Query(default=100, ge=1, le=500)) -> dict[str, Any]:
         desc = before is not None or after is None
+        # A byte budget as well as a row limit. `limit` alone is not a bound on
+        # response size: a shell-job step can carry a captured stdout of up to the
+        # job's max_output_bytes, so a single request could serialise tens of
+        # megabytes and the page then runs JSON.stringify over all of it.
         rows = transcript.steps(run_id, after_id=after or 0, before_id=before, desc=desc, limit=limit)
-        rows = [{**row, "display": step_display(row)} for row in rows]
+        served: list[dict[str, Any]] = []
+        used = 0
+        truncated = False
+        for row in rows:
+            # Measure the serialised size, not len(str(content)): the budget is a
+            # response-body bound and a Python repr is neither the bytes sent nor
+            # proportional to them.
+            size = len(json.dumps(row.get("content"), default=str))
+            if served and used + size > STEPS_BYTE_BUDGET:
+                truncated = True
+                break
+            used += size
+            served.append({**row, "display": step_display(row)})
         run_status = transcript.run_status(run_id) if run_id else None
         return {"run_id": run_id, "run_status": run_status, "order": "desc" if desc else "asc",
-                "after": after, "before": before, "count": len(rows), "steps": rows}
+                "after": after, "before": before, "count": len(served), "steps": served,
+                "truncated": truncated, "bytes": used, "byte_budget": STEPS_BYTE_BUDGET}
+
+    @app.get("/harness", response_class=HTMLResponse)
+    def harness_page() -> str:
+        """The nof1-style live harness page.
+
+        A second page rather than a replacement: the original compact view is
+        still the right tool for reading a specific cycle, and this one is for
+        watching the harness work. Read-only by construction, so an operator
+        command can never be issued from a browser.
+        """
+        from .harness_page import _HARNESS_PAGE
+        return _HARNESS_PAGE
+
+    @app.get("/api/harness")
+    def harness() -> dict[str, Any]:
+        """Everything the page shows at a glance, in one call.
+
+        The 1 Hz sweep made five sequential requests per second for the whole
+        page. This is one request for the same facts: the engine, the current
+        cycle phase, the memory and notes, and the live feed. It is the polled
+        companion to the event stream, so a page still works without SSE.
+        """
+        from .bits_jobs import BitsStore
+        try:
+            store = BitsStore(transcript)
+            cycle = store.get("cycle") or {}
+            notes = (store.get("working_notes") or {}).get("notes", {})
+            progress = store.get("research_progress", {})
+        except Exception:
+            # A non-SQLite transcript store (the in-memory double, or a backend
+            # without bits_state) must not take the page down; the panel simply
+            # shows less.
+            cycle, notes, progress = {}, {}, {}
+        heartbeat = read_status_file()
+        return {
+            "engine": _read_json_file(os.getenv("ENGINE_STATUS_PATH", "reports/engine_status.json")),
+            "data_feed": _read_json_file(os.getenv("DATA_FEED_STATUS_PATH",
+                                                   "reports/data_feed_status.json")),
+            "cycle": {"phase": cycle.get("phase", "idle"), "steps": cycle.get("steps", 0),
+                      "submitted_at": cycle.get("submitted_at"),
+                      "next_at": cycle.get("next_at"),
+                      "instance": cycle.get("instance"),
+                      "job_id": cycle.get("job_id")},
+            "working_notes": notes,
+            "research_progress": progress,
+            "heartbeat": {k: (heartbeat or {}).get(k) for k in
+                          ("status", "last_tick_status", "tick", "recorded_at", "next_review_at",
+                           "kill_switch_reason", "monitor", "monitor_error")},
+        }
+
+    @app.get("/api/stream")
+    async def stream(request: Request, after: int = Query(default=0, ge=0)) -> StreamingResponse:
+        """Server-sent events for transcript rows, newest-first like the page.
+
+        Polling replaced this: while a model round trip is in flight (22.8s
+        median) the transcript receives nothing, so the page looked frozen for a
+        minute at a time with no indication anything was happening. Each new row is
+        pushed the moment it is committed, because the agent and this view share
+        the same SQLite database in WAL mode.
+
+        A heartbeat comment is sent on every idle tick so proxies keep the
+        connection open and the client can show "connected, nothing new".
+        """
+        import asyncio
+
+        async def events():
+            cursor = after
+            last_keepalive = 0.0
+            while not await request.is_disconnected():
+                rows = await asyncio.to_thread(transcript.steps, None, cursor, None, True, 100)
+                for row in rows:
+                    cursor = max(cursor, int(row["id"]))
+                    payload = {**row, "display": step_display(row)}
+                    yield f"event: step\nid: {row['id']}\ndata: {json.dumps(payload, default=str)}\n\n"
+                if not rows:
+                    now = time.monotonic()
+                    if now - last_keepalive >= 10:
+                        last_keepalive = now
+                        yield ": keepalive\n\n"
+                await asyncio.sleep(1)
+
+        return StreamingResponse(events(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    @app.get("/api/job")
+    def job_output(job_id: str = Query(...), stream: str = Query(default="stdout", pattern="^(stdout|stderr)$"),
+                   offset: int = Query(default=0, ge=0), limit: int = Query(default=8000, ge=1, le=65536)) -> dict[str, Any]:
+        """A page of one shell job's captured output.
+
+        The transcript caps each stored result, so most of a large capture was
+        unreachable from the UI and only retrievable by the agent through the CLI.
+        """
+        from .bits_jobs import BitsStore
+        try:
+            record = BitsStore(transcript).job(job_id)
+        except Exception as exc:
+            return {"status": "unavailable", "error_type": type(exc).__name__}
+        text = record.get(stream) or ""
+        if offset > len(text):
+            return {"status": "rejected", "error": {"code": "offset_out_of_range",
+                                                    "stored_characters": len(text)}}
+        end = min(len(text), offset + limit)
+        return {"job_id": job_id, "status": record.get("status"), "stream": stream,
+                "offset": offset, "text": text[offset:end],
+                "next_offset": end if end < len(text) else None,
+                "stored_characters": len(text), "truncated": record.get("truncated")}
 
     @app.get("/api/paper")
     def paper_endpoint() -> dict[str, Any]:
@@ -339,8 +537,18 @@ def create_app(store: AgentTranscriptStore | None = None,
     def health() -> dict[str, Any]:
         from .agent_status import bits_alerts, read_status
         alerts: list[str] = []
-        pt = paper_or_default()
-        paper_state = pt.state()
+        # The health endpoint is the designated observability surface. A state
+        # store outage must report `degraded`, not raise: an unhandled exception
+        # here returned HTTP 500, which reads as "the agent is fine, the view is
+        # broken" rather than "we cannot see the account at all".
+        try:
+            pt = paper_or_default()
+            paper_state = pt.state()
+            market_open = pt.summary().get("market_open")
+        except Exception as exc:
+            return {"status": "degraded",
+                    "alerts": [f"state store unavailable ({type(exc).__name__})"],
+                    "agent": {}, "paper": {}, "data_update": {}, "database": {}}
         heartbeat = read_status()
         heartbeat_age = _age_seconds((heartbeat or {}).get("recorded_at"))
         runs = transcript.runs(limit=1)
@@ -361,6 +569,16 @@ def create_app(store: AgentTranscriptStore | None = None,
         monitor = (heartbeat or {}).get("monitor") or {}
         if monitor.get("status") in {"unavailable", "stale_data"}:
             alerts.append("position monitor " + monitor["status"])
+        # The monitor's status *string* alone was not enough: a monitor that died
+        # after one healthy cycle kept reporting {status: ok} forever with a frozen
+        # timestamp, and no risk_limit stop was ever persisted. Age is the check.
+        monitor_age = _age_seconds(monitor.get("recorded_at"))
+        if monitor and (monitor_age is None or monitor_age > MONITOR_STALE_SECONDS):
+            alerts.append(f"position monitor stale ({int(monitor_age or 0)}s)")
+        if (heartbeat or {}).get("monitor_error"):
+            alerts.append(f"position monitor error ({heartbeat['monitor_error']})")
+        if (heartbeat or {}).get("monitor_thread_alive") is False:
+            alerts.append("position monitor thread is not running")
         stale_ticks = int((heartbeat or {}).get("consecutive_stale_ticks") or 0)
         if stale_ticks >= STALE_TICK_ALERT_THRESHOLD:
             alerts.append(f"agent unproductive: {stale_ticks} consecutive stale-data ticks")
@@ -380,14 +598,26 @@ def create_app(store: AgentTranscriptStore | None = None,
             except Exception as exc:
                 integrity = f"error ({type(exc).__name__})"
                 alerts.append("state database integrity check failed")
+        # Storage size in the health payload. These tables previously grew with no
+        # bound and no reader anywhere reported their size, so growth was invisible
+        # until the database became a problem.
+        try:
+            from .bits_jobs import BitsStore
+            storage = BitsStore(transcript).storage()
+        except Exception as exc:
+            storage = {"error_type": type(exc).__name__}
         return {"status": "ok" if not alerts else "degraded", "alerts": alerts,
                 "agent": {"heartbeat": heartbeat, "heartbeat_age_seconds": heartbeat_age,
                           "latest_run_id": latest["run_id"] if latest else None,
                           "latest_run_status": latest["status"] if latest else None},
                 "paper": {"stopped": paper_state.get("stopped"),
                           "kill_switch_reason": paper_state.get("kill_switch_reason"),
-                          "market_open": pt.summary().get("market_open")},
+                          "market_open": market_open},
+                "monitor": {"status": monitor.get("status"), "age_seconds": monitor_age,
+                            "error": (heartbeat or {}).get("monitor_error"),
+                            "thread_alive": (heartbeat or {}).get("monitor_thread_alive")},
                 "data_update": {**data, "age_seconds": _age_seconds(data.get("recorded_at"))},
+                "storage": storage,
                 "database": {"backend": state_backend(), "integrity": integrity}}
 
     return app

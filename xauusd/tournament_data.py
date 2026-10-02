@@ -20,8 +20,13 @@ class TournamentDataConfig:
     validation_fraction: float = .20
     symbol: str = "XAUUSD"
     timeframe: str = "M1"
-    cost_model_version: str = "fixed-v1"
-    engine_version: str = "event-v1"
+    # Both default to a digest of the code and parameters they describe, so a
+    # backtester edit or a cost change invalidates stored results automatically.
+    # They were hardcoded literals, so changing the simulator or the cost model
+    # left every stored experiment with an unchanged identity, and old-code and
+    # new-code results were then pooled, ranked and compared as if commensurable.
+    cost_model_version: str | None = None
+    engine_version: str | None = None
 
     def __post_init__(self):
         if self.days < 30:
@@ -30,6 +35,41 @@ class TournamentDataConfig:
             raise ValueError("split fractions must be between zero and one")
         if self.train_fraction + self.validation_fraction >= 1:
             raise ValueError("split fractions must leave a test partition")
+
+    @property
+    def resolved_cost_model_version(self) -> str:
+        return self.cost_model_version or cost_model_fingerprint()
+
+    @property
+    def resolved_engine_version(self) -> str:
+        return self.engine_version or engine_fingerprint()
+
+
+def _source_fingerprint(relative: str) -> str:
+    """Short digest of a module's own source, so behaviour changes are visible."""
+    try:
+        source = (Path(__file__).resolve().parent / relative).read_bytes()
+    except OSError:
+        return "unavailable"
+    return hashlib.sha256(source).hexdigest()[:12]
+
+
+def engine_fingerprint() -> str:
+    """Identity of the backtester itself.
+
+    Covers the simulator and the research features it consumes, so a change to
+    next-open execution, intrabar priority, or a feature definition produces a new
+    engine version rather than silently reusing every stored result.
+    """
+    parts = [_source_fingerprint(name) for name in ("engine.py", "research.py")]
+    return "event-" + hashlib.sha256("|".join(parts).encode()).hexdigest()[:12]
+
+
+def cost_model_fingerprint() -> str:
+    """Identity of the cost model: the default execution parameters themselves."""
+    from .engine import ExecutionConfig
+    defaults = json.dumps(asdict(ExecutionConfig()), sort_keys=True, default=str)
+    return "cost-" + hashlib.sha256(defaults.encode()).hexdigest()[:12]
 
 
 def frame_digest(frame: pd.DataFrame) -> str:
@@ -82,7 +122,8 @@ class TournamentDataset:
                     "timeframe": self.config.timeframe, "rows": n,
                     "start": snapshot.index.min().isoformat(), "end": snapshot.index.max().isoformat(),
                     "source": str(HistoricalDataStore().path), "data_path": str(data_path),
-                    "engine_version": self.config.engine_version, "cost_model_version": self.config.cost_model_version,
+                    "engine_version": self.config.resolved_engine_version,
+                    "cost_model_version": self.config.resolved_cost_model_version,
                     "columns": list(snapshot.columns), "dtypes": {c:str(t) for c,t in snapshot.dtypes.items()},
                     "partitions": partitions, "config": {**asdict(self.config), "root": str(self.config.root),
                                                           "active_path": str(self.config.active_path)}}

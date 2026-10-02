@@ -1,0 +1,33 @@
+[Unit]
+Description=XAUUSD live M1 market data feed (demo-only)
+After=network-online.target
+Wants=network-online.target
+# The engine and the agent both gate on market-data freshness. The scheduled
+# downloader runs four times a day, which cannot satisfy a 180-second freshness
+# gate, so this unit keeps the persisted store continuously current.
+Before=xauusd-engine.service xauusd-agent.service
+
+[Service]
+Type=simple
+WorkingDirectory=/root/xauusd
+EnvironmentFile=/root/xauusd/.env
+ExecStart=/root/xauusd/.venv/bin/python -m xauusd.cli data-feed run
+Restart=always
+RestartSec=10
+# A broker client in its own process: the SDK drives Twisted's process-global,
+# non-restartable reactor, so it must never share a process with the trading loop.
+KillMode=control-group
+TimeoutStopSec=20
+# The feed writes no console log; reports/data_feed_status.json and /api/health
+# are the operator signal, matching the agent's observability contract.
+StandardOutput=null
+StandardError=null
+# Read-only except the two directories it legitimately writes.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/root/xauusd/state /root/xauusd/reports /root/xauusd/data
+
+[Install]
+WantedBy=multi-user.target

@@ -202,34 +202,48 @@ def test_agent_controller_refuses_on_corrupt_state(tmp_path, monkeypatch):
 
 
 def test_data_update_retries_transient_failures(monkeypatch):
-    class FlakyDownloader:
-        def __init__(self):
-            self.calls = 0
+    """Each attempt is a separate process, so the retry is driven by a runner.
 
-        def download(self, *args, **kwargs):
-            self.calls += 1
-            if self.calls < 3:
-                raise ConnectionError("transient")
-            return {"ok": True}
+    In-process retry could never work: a download stops Twisted's global reactor
+    and the next call raises ReactorNotRestartable, replacing the real cause with
+    a transport error. The runner is the process boundary the policy is applied to.
+    """
+    calls = {"n": 0}
 
-    downloader = FlakyDownloader()
+    def flaky(start, end, page_size):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise ConnectionError("transient")
+        return {"ok": True, "rows": page_size}
+
     monkeypatch.setattr(cli.time, "sleep", lambda seconds: None)
-    result = cli._download_with_retry(downloader, "2026-09-01")
-    assert result == {"ok": True}
-    assert downloader.calls == 3
+    result = cli._download_with_retry("2026-09-01", "2026-09-02", attempt_runner=flaky)
+    assert result == {"ok": True, "rows": 5000}
+    assert calls["n"] == 3
+
+
+def test_data_update_reraises_the_first_transient_failure(monkeypatch):
+    """The reported cause is the real one, not the last attempt's wrapper."""
+    monkeypatch.setattr(cli.time, "sleep", lambda seconds: None)
+
+    def always(start, end, page_size):
+        raise ConnectionError("first-cause")
+
+    with pytest.raises(ConnectionError, match="first-cause"):
+        cli._download_with_retry("2026-09-01", "2026-09-02", attempt_runner=always)
 
 
 def test_data_update_does_not_retry_auth_errors(monkeypatch):
     from xauusd.data import CTraderAuthError
     calls = {"n": 0}
 
-    class AuthDownloader:
-        def download(self, *args, **kwargs):
-            calls["n"] += 1
-            raise CTraderAuthError("CH_ACCESS_TOKEN_INVALID")
+    def unauthorized(start, end, page_size):
+        calls["n"] += 1
+        raise CTraderAuthError("CH_ACCESS_TOKEN_INVALID")
 
+    monkeypatch.setattr(cli.time, "sleep", lambda seconds: None)
     with pytest.raises(CTraderAuthError):
-        cli._download_with_retry(AuthDownloader(), "2026-09-01")
+        cli._download_with_retry("2026-09-01", "2026-09-02", attempt_runner=unauthorized)
     assert calls["n"] == 1
 
 

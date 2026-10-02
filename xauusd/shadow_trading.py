@@ -86,9 +86,16 @@ class ShadowTradingReadiness:
    experiment=self.registry.get(champion["experiment_id"]); raw=experiment["parameters"]
    features=build_features(bars); spec=StrategySpec(experiment["strategy_family"],raw.get("strategy",raw))
    signal=int(generate_signal(features,spec).iloc[-1]) if not features.empty else 0
-   age=(pd.Timestamp.now("UTC")-bars.index.max()).total_seconds()/60
+   # A bar dated in the future gives a negative age, which passes the staleness
+   # limit; clamp at zero and treat a future-dated bar as stale instead.
+   age=max(0.0,(pd.Timestamp.now("UTC")-bars.index.max()).total_seconds()/60)
+   future=bool(bars.index.max()>pd.Timestamp.now("UTC")+pd.Timedelta(minutes=1))
   except Exception as error:
-   return self._flat("flat_evaluation_failed",str(error))
+   # Never the exception text: it can carry a path or an argument, and this is
+   # written to a persisted audit artifact. Every other module in the risk layer
+   # records a classified code instead.
+   return self._flat("flat_evaluation_failed",type(error).__name__)
+  if future: return self._flat("flat_future_dated_bar","newest bar is dated beyond the clock",alert=True)
   if age>self.limits.stale_data_minutes:
    return self._flat("flat_stale_data",f"data age {age:.2f} minutes exceeds limit",alert=True)
   state={"mode":"shadow_only","status":"observing" if signal else "flat","signal":signal,

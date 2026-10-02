@@ -143,6 +143,14 @@ def operations(cli: str | None = None) -> dict:
     memory = memory_commands(cli)
     return {"read_market": f"{cli} agent-tool read_market",
             "paper_state": f"{cli} agent-tool paper_state",
+            # The deterministic confirmed-breakout signal. It was registered on the
+            # tool registry but filtered out of the advertised tool list and absent
+            # from the CLI choices, so a signal firing ~44 times a day was
+            # unreachable by the agent. It needs no broker and places no order.
+            "canary_signal": f"{cli} agent-tool canary_signal",
+            "engine_status": f"{cli} engine status",
+            "engine_halt": f"{cli} engine halt --reason 'evidence-linked reason'",
+            "engine_resume": f"{cli} engine resume --reason 'evidence-linked reason'",
             "propose_trade": f"{cli} agent-tool propose_trade --input "
                              "'{\"side\":\"BUY|SELL\",\"quantity\":QUANTITY,\"reason\":\"evidence-linked reason\"}'",
             "job_output": memory["job_output"],

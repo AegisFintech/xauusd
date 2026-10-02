@@ -1,8 +1,9 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 import time
 import pytest
 from xauusd.agent_loop import AgentConfig, build_agent_registry
+from xauusd.agent_status import read_status
 from xauusd.bits_runner import BitsAgentRunner
 from xauusd.demo_execution import PaperToCTraderDemoCoordinator
 from xauusd.local_state import SQLiteAgentTranscriptStore
@@ -10,6 +11,8 @@ from xauusd.paper_trading import PaperTrading, InMemoryPaperTradingStore
 from xauusd.bits import BitsError
 
 NOW = datetime(2026, 9, 23, 10, tzinfo=timezone.utc)
+AGENT_MESSAGES = [{"role": "user", "content": "what is the plan?"},
+                 {"role": "assistant", "content": "I will check the market and the paper account."}]
 
 
 class Planner:
@@ -21,9 +24,12 @@ class Planner:
         actions=[]
         if len(self.invocations)==1:
             actions=[dict(id="one",type="shell",args=dict(command="printf 42",cwd="/tmp",timeout_sec=2,max_output_bytes=1024))]
-        return dict(protocol="xauusd/1",cycle_id=cycle,reply_to=message,
-                    status="action_required" if actions else "completed",summary="ok",actions=actions,
-                    next_review_at=None,blocker=None)
+        envelope = dict(protocol="xauusd/1",cycle_id=cycle,reply_to=message,
+                        status="action_required" if actions else "completed",summary="ok",actions=actions,
+                        next_review_at=None,blocker=None)
+        # poll returns (envelope, messages): one request yields both the decision
+        # and the agent turns that produced it.
+        return envelope, AGENT_MESSAGES
 
 
 def runner(tmp_path, planner=None, paper=None):
@@ -34,7 +40,8 @@ def runner(tmp_path, planner=None, paper=None):
     config=AgentConfig()
     registry=build_agent_registry(source,paper,coordinator,config)
     agent=BitsAgentRunner(planner or Planner(),registry,SQLiteAgentTranscriptStore(str(tmp_path/'state.db')),
-                          source,paper,coordinator,config,now_provider=lambda:NOW)
+                          source,paper,coordinator,config,now_provider=lambda:NOW,
+                          status_path=str(tmp_path/'status.json'))
     agent._age=lambda market: 0
     return agent
 
@@ -161,14 +168,16 @@ def test_base_runner_records_codes_for_planner_and_tick_errors(tmp_path):
     from datetime import datetime, timezone
     from threading import Event
     from xauusd.agent_loop import ContinuousAgentRunner, InMemoryAgentTranscriptStore
-    now = datetime.now(timezone.utc)
-    source = SimpleNamespace(read=lambda: SimpleNamespace(price=3000., observed_at=now))
-    paper = PaperTrading(InMemoryPaperTradingStore()); paper.start("test")
+    # The bar must be dated on the runner's own clock: the staleness pre-gate,
+    # the tools and the paper gate all measure against NOW, not the wall clock.
+    bar = NOW - timedelta(seconds=30)
+    source = SimpleNamespace(read=lambda: SimpleNamespace(price=3000., observed_at=bar))
+    paper = PaperTrading(InMemoryPaperTradingStore()); paper.start('test')
     class Down:
         def plan_with_raw(self, *args):
             raise TimeoutError("planner down; password=hunter2")
     coordinator = PaperToCTraderDemoCoordinator(paper, paper_only=True)
-    registry = build_agent_registry(source, paper, coordinator, AgentConfig())
+    registry = build_agent_registry(source, paper, coordinator, AgentConfig(), now_provider=lambda: NOW)
     store = InMemoryAgentTranscriptStore()
     agent = ContinuousAgentRunner(Down(), registry, store, source, paper, coordinator, AgentConfig(),
                                   status_path=str(tmp_path / 's.json'), now_provider=lambda: NOW)
@@ -208,10 +217,10 @@ def test_repeated_memory_rejections_become_a_specific_repair_task(tmp_path):
 
 class MissingToolPlanner(Planner):
     def poll(self, instance, cycle, message):
-        reply = super().poll(instance, cycle, message)
+        reply, messages = super().poll(instance, cycle, message)
         if reply['actions']:
             reply['actions'][0]['args']['command'] = 'definitely-missing-tool-xyz --version'
-        return reply
+        return reply, messages
 
 
 def test_missing_executables_are_retained_across_cycles_and_restarts(tmp_path):
@@ -278,3 +287,84 @@ def test_capability_discovery_failure_never_blocks_the_agent(tmp_path, monkeypat
         assert code == 0 and result['check']['passed']
     finally:
         agent.stop()
+
+
+def test_a_stranded_running_job_stops_paper_instead_of_looping_forever(tmp_path):
+    """A `running` job past the executor ceiling is dead, not alive.
+
+    The worker thread was gone but no terminal status was ever written, so the
+    runner reported shell_running on every tick, the heartbeat stayed fresh, no
+    alert fired, and the whole decision loop stalled until the process restarted.
+    """
+    agent = runner(tmp_path)
+    # Claim the action without ever starting a worker: that is exactly the stranded
+    # state, where the row says running and no thread exists to finish it.
+    result, _created = agent.jobs.store.claim("cycle-x", dict(id="ghost", type="shell",
+                                                             args=dict(command="printf 1", cwd="/tmp",
+                                                                       timeout_sec=2, max_output_bytes=1024)))
+    assert agent.jobs.store.job(result["job_id"])["status"] == "running"
+    # Stamped far in the past, well beyond twice the server ceiling.
+    agent.bits_store.put("cycle", {"phase": "job", "job_id": result["job_id"],
+                                   "cycle_id": "cycle-x",
+                                   "submitted_at": (NOW - timedelta(hours=4)).isoformat()})
+
+    outcome = agent.run_tick()
+
+    assert outcome["status"] == "recovery_failed"
+    stranded = agent.jobs.store.job(result["job_id"])
+    assert stranded["status"] == "unknown"
+    assert stranded["error_code"] == "shell_job_stranded"
+    assert agent.paper_trading.state()["kill_switch_reason"] == "recovery_failed"
+
+
+def test_a_recent_running_job_is_still_polled(tmp_path):
+    """The staleness check must not stop the runner polling a live command."""
+    agent = runner(tmp_path)
+    result, _created = agent.jobs.store.claim("cycle-y", dict(id="live", type="shell",
+                                                             args=dict(command="sleep 30", cwd="/tmp",
+                                                                       timeout_sec=120, max_output_bytes=1024)))
+    agent.bits_store.put("cycle", {"phase": "job", "job_id": result["job_id"],
+                                   "cycle_id": "cycle-y",
+                                   "submitted_at": (NOW - timedelta(seconds=5)).isoformat()})
+    try:
+        assert agent.run_tick()["status"] == "shell_running"
+        assert not agent.paper_trading.state()["stopped"]
+    finally:
+        agent.stop()
+
+
+def test_monitor_escalates_to_a_stop_after_repeated_failures(tmp_path):
+    """The risk monitor cannot fail silently behind a healthy heartbeat."""
+    agent = runner(tmp_path)
+    agent.paper_trading.start("test")
+    agent.source.read = lambda: (_ for _ in ()).throw(RuntimeError("store unreachable"))
+
+    statuses = [agent.monitor_once()["status"] for _ in range(3)]
+
+    assert statuses == ["unavailable"] * 3
+    # Escalated: paper stopped with recovery_failed rather than retried forever.
+    assert agent.paper_trading.state()["kill_switch_reason"] == "recovery_failed"
+    assert agent.monitor_error
+    assert agent._stop.is_set()
+
+
+def test_monitor_recovers_without_escalating(tmp_path):
+    """A transient failure must not persist a stop that was never warranted."""
+    agent = runner(tmp_path)
+    agent.paper_trading.start("test")
+    healthy = agent.source.read
+    agent.source.read = lambda: (_ for _ in ()).throw(RuntimeError("blip"))
+    assert agent.monitor_once()["status"] == "unavailable"
+    agent.source.read = healthy
+    assert agent.monitor_once()["status"] in {"ok", "stopped"}
+    assert not agent._stop.is_set()
+
+
+def test_monitor_error_and_liveness_are_reported_in_the_heartbeat(tmp_path):
+    """`monitor_error` used to be assigned and then read by nothing at all."""
+    agent = runner(tmp_path)
+    agent.monitor_error = "state_monitor_failed"
+    agent._outcome("ok")
+    heartbeat = read_status(agent.status_path)
+    assert heartbeat["monitor_error"] == "state_monitor_failed"
+    assert "monitor" in heartbeat

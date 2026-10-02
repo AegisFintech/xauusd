@@ -129,8 +129,11 @@ def test_open_api_transport_discovers_demo_account_and_normalizes_reconciliation
         CTraderDemoOpenApiConfig("id", "secret", "token", 7), client_factory=lambda host, port: client,
         extract=lambda value: value, message_types=messages,
     )
-    assert transport.discover() == CTraderDemoAccount(7, 99)
+    # A configured account id never queries the account list, so the broker never
+    # classified it: the account is usable but unconfirmed, and must say so.
+    assert transport.discover() == CTraderDemoAccount(7, 99, demo_confirmed=False)
     details = transport.send({"type": "ProtoOAReconcileReq"}, 1)
+    assert details["is_demo"] is False
     assert details["open_orders"][0]["order_id"] == 123
     assert details["request_outcomes"] == {}
     assert client.started and len(client.requests) == 4
@@ -194,7 +197,7 @@ def test_open_api_transport_selects_the_only_authorized_demo_account(monkeypatch
                                             "ProtoOAAccountAuthReq", "ProtoOASymbolsListReq")}
     transport = CTraderDemoOpenApiTransport(CTraderDemoOpenApiConfig("id", "secret", "token"),
         client_factory=lambda host, port: client, extract=lambda value: value, message_types=messages)
-    assert transport.discover() == CTraderDemoAccount(7, 99)
+    assert transport.discover() == CTraderDemoAccount(7, 99, demo_confirmed=True)
 
 
 def test_open_api_transport_reads_symbol_volume_metadata(monkeypatch):
@@ -221,7 +224,7 @@ def test_configured_account_id_bypasses_account_list_scope(monkeypatch):
     transport = CTraderDemoOpenApiTransport(CTraderDemoOpenApiConfig("id", "secret", "token", 7),
         client_factory=lambda host, port: client, extract=lambda value: value, message_types=messages)
 
-    assert transport.discover() == CTraderDemoAccount(7, 99)
+    assert transport.discover() == CTraderDemoAccount(7, 99, demo_confirmed=False)
     assert not any(type(request).__name__ == "ProtoOAGetAccountListByAccessTokenReq" for request in client.requests)
 
 

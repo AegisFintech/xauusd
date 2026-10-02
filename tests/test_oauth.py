@@ -1,4 +1,6 @@
 import json
+from threading import Event, Thread
+import time
 import urllib.error
 import urllib.request
 
@@ -6,6 +8,7 @@ import pytest
 
 from xauusd.oauth import (
     CTraderOAuthError,
+    _env_lock,
     authorize_url,
     exchange_authorization_code,
     persist_tokens_env,
@@ -124,3 +127,123 @@ def test_persist_tokens_appends_missing_key_and_sets_0600(tmp_path):
     assert "CTRADER_REFRESH_TOKEN" not in text
     assert "A=1" in text
     assert (env.stat().st_mode & 0o777) == 0o600
+
+
+def test_persist_tokens_keeps_the_stored_refresh_token_when_none_is_returned(tmp_path):
+    """cTrader does not always return a new refresh token.
+
+    Dropping the stored one turns a routine refresh into a permanent
+    ``auth_error`` for every later process, because nothing can refresh it back.
+    The old behaviour asserted the opposite; that assertion was the bug.
+    """
+    env = tmp_path / "app.env"
+    env.write_text("CTRADER_ACCESS_TOKEN=old-at\nCTRADER_REFRESH_TOKEN=keep-me\n")
+
+    persist_tokens_env("new-at", None, env)
+
+    lines = env.read_text().splitlines()
+    assert "CTRADER_ACCESS_TOKEN=new-at" in lines
+    assert "CTRADER_REFRESH_TOKEN=keep-me" in lines
+
+
+def test_persist_tokens_never_truncates_the_file(tmp_path):
+    """A crash mid-write must not destroy the other credentials.
+
+    ``write_text`` truncates before writing, so a failure between truncation and
+    completion leaves an empty ``.env`` and with it CTRADER_CLIENT_SECRET, the
+    Datadog keys and every other setting. The swap is now atomic.
+    """
+    env = tmp_path / "app.env"
+    env.write_text("CTRADER_CLIENT_SECRET=shh\nCTRADER_ACCESS_TOKEN=old\nCTRADER_REFRESH_TOKEN=rt\n")
+
+    persist_tokens_env("fresh-at", "fresh-rt", env)
+
+    text = env.read_text()
+    assert "CTRADER_CLIENT_SECRET=shh" in text
+    assert "CTRADER_ACCESS_TOKEN=fresh-at" in text
+    assert "CTRADER_REFRESH_TOKEN=fresh-rt" in text
+    # No temporary residue left behind by the swap.
+    assert [p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp")] == []
+
+
+def test_persist_tokens_rewrites_an_exported_assignment(tmp_path):
+    """An ``export KEY=`` line must not survive alongside the rewritten key.
+
+    Otherwise the file carries the old token twice and which one wins depends on
+    the loader, which is worse than either outcome.
+    """
+    env = tmp_path / "app.env"
+    env.write_text("export CTRADER_ACCESS_TOKEN=old-at\nOTHER=1\n")
+
+    persist_tokens_env("new-at", "new-rt", env)
+
+    text = env.read_text()
+    assert "old-at" not in text
+    assert text.count("CTRADER_ACCESS_TOKEN") == 1
+    assert "CTRADER_ACCESS_TOKEN=new-at" in text
+    assert "OTHER=1" in text
+
+
+def test_persist_tokens_keeps_the_last_duplicate_assignment(tmp_path):
+    """The last assignment is the one that loaded, so it is the one rewritten."""
+    env = tmp_path / "app.env"
+    env.write_text("CTRADER_ACCESS_TOKEN=first\nCTRADER_ACCESS_TOKEN=last\n")
+
+    persist_tokens_env("new-at", None, env)
+
+    text = env.read_text()
+    assert "first" not in text
+    assert text.count("CTRADER_ACCESS_TOKEN") == 1
+    assert "CTRADER_ACCESS_TOKEN=new-at" in text
+
+
+def test_persist_tokens_takes_an_exclusive_lock_for_the_read_modify_write(tmp_path):
+    """The rewrite must hold a lock for the whole read-modify-write.
+
+    Two independent producers refresh the same ``.env``: the data-update timer
+    and the agent's in-tick refresh. cTrader rotates refresh tokens, so if both
+    read, both refresh, and both write, the survivor may already be invalidated.
+    Asserting the lock is held is deterministic; a test that merely runs many
+    writers proves nothing, because without a lock they still tend to pass.
+    """
+    env = tmp_path / "app.env"
+    env.write_text("CTRADER_ACCESS_TOKEN=0\n")
+    progress = Event()
+
+    def writer():
+        progress.set()
+        persist_tokens_env("new-at", "new-rt", env)
+
+    with _env_lock(env):
+        thread = Thread(target=writer, daemon=True)
+        thread.start()
+        assert progress.wait(timeout=5), "writer never started"
+        # The writer must be blocked on the lock, not halfway through the file.
+        time.sleep(0.3)
+        assert thread.is_alive(), "writer completed while the lock was held"
+        assert env.read_text() == "CTRADER_ACCESS_TOKEN=0\n"
+
+    thread.join(timeout=30)
+    assert not thread.is_alive()
+    assert "CTRADER_ACCESS_TOKEN=new-at" in env.read_text()
+
+
+def test_persist_tokens_leaves_a_valid_file_after_many_writers(tmp_path):
+    """Smoke test: concurrent writers never produce an unparseable env file."""
+    env = tmp_path / "app.env"
+    env.write_text("CTRADER_CLIENT_SECRET=shh\nCTRADER_ACCESS_TOKEN=0\n")
+
+    def writer(index):
+        persist_tokens_env(f"at-{index}", f"rt-{index}", env)
+
+    threads = [Thread(target=writer, args=(index,)) for index in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+        assert not thread.is_alive()
+
+    lines = env.read_text().splitlines()
+    assert "CTRADER_CLIENT_SECRET=shh" in lines
+    assert len([line for line in lines if line.startswith("CTRADER_ACCESS_TOKEN=")]) == 1
+    assert len([line for line in lines if line.startswith("CTRADER_REFRESH_TOKEN=")]) == 1

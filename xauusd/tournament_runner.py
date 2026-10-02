@@ -11,7 +11,8 @@ import time
 import numpy as np
 import pandas as pd
 
-from .engine import EventDrivenBacktester, ExecutionConfig
+from .engine import (EventDrivenBacktester, ExecutionConfig, metric_above,
+                      metric_at_least)
 from .experiment_registry import ExperimentRegistry
 from .research import StrategySpec, build_features, generate_signal
 from .tournament_data import TournamentDataset
@@ -75,9 +76,20 @@ class TournamentRunner:
         return strategy, execution
 
     @staticmethod
-    def score(metrics: dict) -> float:
-        profit_factor = min(float(metrics["profit_factor"]), 3.0)
-        return float(metrics["sharpe"] + 0.25 * profit_factor + 5 * metrics["max_drawdown"])
+    def score(metrics: dict) -> float | None:
+        """Champion-selection statistic, or ``None`` when a component is undefined.
+
+        Returning ``None`` rather than a sentinel number matters: a strategy whose
+        profit factor or Sharpe is undefined cannot be ranked, and inventing a
+        value for it would either crash the report write or hand it a score it did
+        not earn. ``None`` propagates to the caller, which fails the candidate.
+        """
+        sharpe = metrics.get("sharpe")
+        profit_factor = metrics.get("profit_factor")
+        max_drawdown = metrics.get("max_drawdown")
+        if sharpe is None or profit_factor is None or max_drawdown is None:
+            return None
+        return float(float(sharpe) + 0.25 * min(float(profit_factor), 3.0) + 5 * float(max_drawdown))
 
     def _backtest(self, partition: str, strategy: StrategySpec, execution: ExecutionConfig) -> dict:
         bars = self.dataset.read(partition)
@@ -92,14 +104,18 @@ class TournamentRunner:
     def _validation(self, metrics: dict, result: dict | None = None,
                     features=None, strategy: StrategySpec | None = None,
                     execution: ExecutionConfig | None = None) -> dict:
+        score = self.score(metrics)
         checks = {
             "minimum_trades": metrics["trades"] >= self.gates.validation_min_trades,
-            "positive_expectancy": metrics["expectancy"] > self.gates.min_expectancy,
-            "profit_factor": metrics["profit_factor"] > self.gates.min_profit_factor,
-            "drawdown": metrics["max_drawdown"] >= self.gates.max_drawdown,
-            "positive_net_profit": metrics["net_profit"] > 0,
+            "positive_expectancy": metric_above(metrics["expectancy"], self.gates.min_expectancy),
+            "profit_factor": metric_above(metrics["profit_factor"], self.gates.min_profit_factor),
+            "drawdown": metric_at_least(metrics["max_drawdown"], self.gates.max_drawdown),
+            "positive_net_profit": metric_above(metrics["net_profit"], 0),
+            # An undefined component means the candidate cannot be ranked, which is
+            # a failure, not a pass.
+            "scored": score is not None,
         }
-        report = {"passed": all(checks.values()), "gates": checks, "score": self.score(metrics),
+        report = {"passed": all(checks.values()), "gates": checks, "score": score,
                   "walk_forward": None, "bootstrap": None}
         if not report["passed"] or result is None or features is None or strategy is None or execution is None:
             return report
@@ -126,28 +142,55 @@ class TournamentRunner:
         if not validation["passed"]:
             return False,None,{}
         previous=self.registry.champion(experiment["dataset_version"])
+        # Promotion is decided on the validation score alone. Comparing holdout
+        # scores across promotions turned the protected holdout into a selection
+        # set: from the second promotion onward, `champion.json`'s score and
+        # metrics were chosen partly on the data that was supposed to be
+        # untouched, which is exactly the quantity an operator reads as the
+        # champion's edge.
         if previous and float(previous["validation_score"]) >= validation["score"]:
             return False,None,{"eligible":False,"reason":"validation_score_not_better"}
-        holdout=self._backtest("test",strategy,execution)
-        holdout_validation=self._validation(holdout["metrics"])
-        holdout_score=holdout_validation["score"]
+        # The holdout is consumed at most once per dataset version, as a reported
+        # one-time estimate. After that it is never re-read for a decision.
+        consumed=bool(previous and previous.get("holdout_evaluated"))
+        holdout=None
+        holdout_score=None
+        holdout_metrics={}
+        if not consumed:
+            holdout=self._backtest("test",strategy,execution)
+            holdout_validation=self._validation(holdout["metrics"])
+            holdout_score=holdout_validation["score"]
+            holdout_metrics=_finite(holdout["metrics"])
+            holdout["trades"].to_csv(directory/"holdout_trades.csv.gz",index=False,compression="gzip")
+            holdout["equity"].to_frame().to_parquet(directory/"holdout_equity.parquet")
         finalist={"eligible":True,"evaluated_at":datetime.now(timezone.utc).isoformat(),
-                  "passed":holdout_validation["passed"],"score":holdout_score,
-                  "gates":holdout_validation["gates"],"metrics":_finite(holdout["metrics"])}
-        holdout["trades"].to_csv(directory/"holdout_trades.csv.gz",index=False,compression="gzip")
-        holdout["equity"].to_frame().to_parquet(directory/"holdout_equity.parquet")
-        if not finalist["passed"] or (previous and float(previous["holdout_score"])>=holdout_score):
-            finalist["reason"]="holdout_gates_failed" if not finalist["passed"] else "holdout_score_not_better"
+                  "holdout_evaluated":not consumed,
+                  "passed":True if consumed else holdout_validation["passed"],
+                  "score":validation["score"],
+                  "gates":validation["gates"],
+                  "metrics":holdout_metrics,
+                  "holdout_score":holdout_score}
+        if not consumed and not finalist["passed"]:
+            # A first-time holdout that fails its own gates blocks the promotion:
+            # the validation score looked good out of sample and was not.
+            finalist["reason"]="holdout_gates_failed"
             return False,holdout,finalist
         self.registry.promote_champion(experiment["dataset_version"],experiment["id"],validation["score"],
-                                       holdout_score,_finite(holdout["metrics"]))
+                                       holdout_score if holdout_score is not None else 0.0,holdout_metrics)
         champion_dir=self.output_root/experiment["dataset_version"]
         champion_dir.mkdir(parents=True,exist_ok=True)
         path=champion_dir/"champion.json"
         champion = {"experiment_id": experiment["id"], "fingerprint": experiment["fingerprint"],
                     "strategy": strategy.name, "parameters": strategy.parameters,
-                    "score": holdout_score, "validation_score":validation["score"],
-                    "metrics": _finite(holdout["metrics"]),
+                    # `score` is the validation score, which is the only number
+                    # that was actually used to choose this champion.
+                    "score": validation["score"], "validation_score":validation["score"],
+                    "holdout_evaluated":not consumed,
+                    "holdout_score":holdout_score,
+                    "holdout_note": ("one-time unbiased estimate; the holdout is never used to choose a champion"
+                                     if not consumed else
+                                     "not re-evaluated: the holdout for this dataset version was already consumed"),
+                    "metrics": holdout_metrics,
                     "promoted_at": datetime.now(timezone.utc).isoformat()}
         temporary = path.with_suffix(".json.tmp")
         temporary.write_text(json.dumps(champion, indent=2, allow_nan=False))

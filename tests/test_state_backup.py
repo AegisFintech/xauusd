@@ -40,9 +40,30 @@ def test_backup_restore_round_trip_preserves_state(tmp_path):
     assert result["sha256_ok"] is True
     reopened = PaperTrading(SQLitePaperTradingStore(db_path=str(restored_target)),
                             PaperRiskConfig(max_market_data_age_seconds=120))
+    # A snapshot taken mid-session carries stopped=false. Restoring it verbatim
+    # reinstated a running kill switch and discarded any operator stop, so the
+    # restored state is forced back to stopped with a named reason.
+    assert reopened.state()["stopped"] is True
+    assert reopened.state()["kill_switch_reason"] == "state_restored"
+    # Everything else about the account survives the restore.
+    assert len(reopened.state()["ledger"]) == 1
+    assert reopened.state()["position"] == pytest.approx(1.0)
+
+
+def test_restore_can_explicitly_preserve_a_running_account(tmp_path):
+    source = seeded_db(tmp_path)
+    backup_root = tmp_path / "backups"
+    manifest = backup_local_state(source_db=source, dest_root=backup_root)
+    restored_target = tmp_path / "restored-running.db"
+
+    result = restore_local_state(backup_root / manifest["run_id"], target_db=restored_target,
+                                 allow_running=True)
+
+    assert result["kill_switch_reason"] is None
+    reopened = PaperTrading(SQLitePaperTradingStore(db_path=str(restored_target)),
+                            PaperRiskConfig(max_market_data_age_seconds=120))
     assert reopened.state()["stopped"] is False
     assert reopened.state()["kill_switch_reason"] == "test"
-    assert len(reopened.state()["ledger"]) == 1
 
 
 def test_backup_refuses_corrupt_source(tmp_path):

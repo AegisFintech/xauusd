@@ -7,7 +7,8 @@ import json
 import numpy as np
 import pandas as pd
 
-from .engine import EventDrivenBacktester, ExecutionConfig
+from .engine import (EventDrivenBacktester, ExecutionConfig, metric_at_least,
+                      metric_above)
 
 
 @dataclass(frozen=True)
@@ -25,6 +26,21 @@ DEFAULT_STRATEGIES = (
     StrategySpec("session_momentum", {"start_hour": 7, "end_hour": 17}),
     StrategySpec("regime_switch", {"trend_threshold": 0.35, "entry_z": 1.25}),
 )
+
+
+def _score(metrics: dict) -> float | None:
+    """Selection statistic, or ``None`` when a component is undefined.
+
+    ``sharpe + 0.25 * min(profit_factor, 3) + 5 * max_drawdown``. A strategy with
+    no losing trades has an undefined profit factor; it is unrankable rather than
+    infinitely good, and the caller sorts it last.
+    """
+    sharpe = metrics.get("sharpe")
+    profit_factor = metrics.get("profit_factor")
+    max_drawdown = metrics.get("max_drawdown")
+    if sharpe is None or profit_factor is None or max_drawdown is None:
+        return None
+    return float(float(sharpe) + 0.25 * min(float(profit_factor), 3) + 5 * float(max_drawdown))
 
 
 def build_features(bars: pd.DataFrame) -> pd.DataFrame:
@@ -50,6 +66,19 @@ def build_features(bars: pd.DataFrame) -> pd.DataFrame:
     x["channel_low_30"] = low.rolling(30, min_periods=30).min().shift(1)
     x["trend_strength"] = (x.ema_8 - x.ema_34).abs() / x.atr_14.replace(0, np.nan)
     x["hour_utc"] = x.index.hour
+    x["weekday_utc"] = x.index.dayofweek
+    # XAUUSD M1 has no weekend bars and no 17:00-18:00 New York break bars, so a
+    # bar-count horizon silently spans those gaps: "15 bars" is a 15-minute return
+    # on Tuesday and roughly a three-day return across Friday's close. Features
+    # that claim to be short-horizon must therefore be null across a gap, and
+    # consumers treat null as "no observation" rather than zero.
+    gaps = x.index.to_series().diff()
+    x["session_break"] = (gaps > pd.Timedelta(minutes=1)).fillna(False).to_numpy()
+    # Null the short-horizon returns that straddle a session gap. Without this a
+    # "15-minute" return measured across Friday's close is really a three-day
+    # return, and it enters a signal as if it were a short one.
+    for horizon in ("return_1", "return_5", "return_15"):
+        x.loc[x["session_break"], horizon] = np.nan
     return x.replace([np.inf, -np.inf], np.nan).dropna()
 
 
@@ -91,7 +120,11 @@ def generate_signal(features: pd.DataFrame, spec: StrategySpec) -> pd.Series:
         active = (f.range_ratio >= float(p["range_ratio"])) & (f.body_fraction >= float(p["body_fraction"]))
         return directional((f.direction.where(active, 0)).astype(int))
     if spec.name == "session_momentum":
-        active = (f.hour_utc >= int(p["start_hour"])) & (f.hour_utc < int(p["end_hour"]))
+        # The window was a bare UTC-hour filter with no weekday component, so a
+        # "session" could be selected on a Saturday. The weekday is part of the
+        # session definition, and the return is null across a session gap.
+        active = ((f.hour_utc >= int(p["start_hour"])) & (f.hour_utc < int(p["end_hour"]))
+                  & (f.weekday_utc < 5))
         period=int(p.get("return_period",15)); returns=f.close.pct_change(period).fillna(0)
         return directional(pd.Series(np.where(active, np.sign(returns), 0), index=f.index, dtype=int))
     if spec.name == "regime_switch":
@@ -153,12 +186,16 @@ class ResearchCampaign:
         for spec in specs:
             result = EventDrivenBacktester(self.execution).run(features, generate_signal(features, spec))
             metrics = result["metrics"]
-            score = metrics["sharpe"] + 0.25 * min(metrics["profit_factor"], 3) + 5 * metrics["max_drawdown"]
-            summary = {"strategy": spec.name, "parameters": spec.parameters, "score": float(score), **metrics}
+            score = _score(metrics)
+            summary = {"strategy": spec.name, "parameters": spec.parameters, "score": score, **metrics}
             leaderboard.append(summary)
             result["trades"].to_csv(output_dir / f"{spec.name}_trades.csv", index=False)
             result["equity"].to_frame().to_parquet(output_dir / f"{spec.name}_equity.parquet")
-        leaderboard.sort(key=lambda row: row["score"], reverse=True)
+        # Unrankable candidates sort last rather than raising: the previous
+        # `float(score)` would have failed the whole campaign for a strategy with
+        # an undefined profit factor or Sharpe.
+        leaderboard.sort(key=lambda row: (row["score"] is not None, row["score"] if row["score"] is not None else 0.0),
+                         reverse=True)
         manifest = {"start": features.index.min().isoformat(), "end": features.index.max().isoformat(),
                     "bars": len(features), "execution": asdict(self.execution), "strategies": leaderboard}
         (output_dir / "leaderboard.json").write_text(json.dumps(manifest, indent=2, allow_nan=False))

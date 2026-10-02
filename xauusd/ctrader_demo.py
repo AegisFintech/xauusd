@@ -86,15 +86,25 @@ def _canonical_json(value: Any) -> str:
 class CTraderDemoAccount:
     account_id: int
     symbol_id: int
+    # The configured execution boundary this adapter is allowed to target.
     account_type: str = "DEMO"
     symbol: str = "XAUUSD"
     host: str = DEMO_HOST
+    # Whether the broker positively reported this account as non-live. This is a
+    # separate fact from ``account_type``: a token scoped only for direct account
+    # authorization cannot answer the account-list request, so a configured
+    # account id can be usable without ever being classified. ``account_type``
+    # used to be a literal this module chose, which made every downstream
+    # ``is_demo`` check a tautology over a constant.
+    demo_confirmed: bool = False
 
     def validate(self) -> None:
         if self.host != DEMO_HOST:
             raise CTraderDemoSafetyError("cTrader execution is restricted to demo.ctraderapi.com")
         if self.account_type != "DEMO":
             raise CTraderDemoSafetyError("cTrader account type must be DEMO")
+        if self.demo_confirmed and self.account_type != "DEMO":
+            raise CTraderDemoSafetyError("a broker-confirmed demo account must carry account_type DEMO")
         if self.symbol != "XAUUSD":
             raise CTraderDemoSafetyError("cTrader execution supports only XAUUSD")
         if (not isinstance(self.account_id, int) or isinstance(self.account_id, bool) or self.account_id <= 0 or
@@ -226,15 +236,21 @@ class CTraderDemoOpenApiTransport:
         messages = self._messages()
         self._request(messages["ProtoOAApplicationAuthReq"](
             clientId=self.config.client_id, clientSecret=self.config.client_secret), self.config.timeout_seconds)
+        # The account list is requested whenever the token scope allows it, so the
+        # broker classifies the account. A configured account id may skip that
+        # request, because a token scoped only for direct account authorization
+        # cannot answer it; that path is then *unconfirmed* rather than verified.
+        demo_confirmed = False
         if self.config.account_id is None:
             accounts = self._extract_message(self._request(messages["ProtoOAGetAccountListByAccessTokenReq"](
                 accessToken=self.config.access_token), self.config.timeout_seconds))
             self._raise_for_error(accounts, "account list")
             account = self._find_account(accounts)
             account_id = self._field(account, "ctidTraderAccountId")
+            demo_confirmed = True
         else:
-            # A configured demo account id bypasses the account-list request, which can require
-            # a token scope that is unnecessary for direct account authorization.
+            # A configured demo account id bypasses the account-list request, which can
+            # require a token scope that is unnecessary for direct account authorization.
             account_id = self.config.account_id
         self._request(messages["ProtoOAAccountAuthReq"](
             ctidTraderAccountId=account_id, accessToken=self.config.access_token), self.config.timeout_seconds)
@@ -243,7 +259,7 @@ class CTraderDemoOpenApiTransport:
         self._raise_for_error(symbols, "symbol list")
         symbol_id = self._find_symbol_id(symbols)
         self._account = CTraderDemoAccount(account_id, symbol_id, account_type="DEMO", symbol=self.config.symbol,
-                                           host=self.config.host)
+                                           host=self.config.host, demo_confirmed=demo_confirmed)
         self._account.validate()
 
     def _connect(self) -> Any:
@@ -462,7 +478,11 @@ class CTraderDemoOpenApiTransport:
             # Reconcile lists live pending orders, not historical fills. Their presence
             # cannot prove an uncertain submission completed.
             orders = [self._order_receipt(order) for order in self._values(message, "order")]
-            return {"account_id": self._account.account_id, "is_demo": True, "symbol": self._account.symbol,
+            # ``is_demo`` reports the broker's own classification, not a literal
+            # this module chose. It can only be true because ``validate()`` refused
+            # to construct the account without broker confirmation.
+            return {"account_id": self._account.account_id, "is_demo": self._account.demo_confirmed,
+                    "symbol": self._account.symbol,
                     "symbol_id": self._account.symbol_id, "request_outcomes": {},
                     "positions": positions, "open_orders": orders}
         return self._order_receipt(message)

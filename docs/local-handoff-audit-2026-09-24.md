@@ -1,4 +1,4 @@
-# Local handoff audit — 2026-09-24
+# Local audit — 2026-09-24
 
 Scope: merged baseline `35d9ccf`, issues #12 and #13. Deployment remains paused.
 No services started, enabled or restarted; no broker requests, recovery operations,

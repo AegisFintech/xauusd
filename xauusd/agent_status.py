@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .atomic import atomic_write_json
+
 AGENT_STATUS_FILE = "reports/agent_status.json"
 
 
@@ -19,17 +21,16 @@ def agent_status_path() -> Path:
 
 
 def write_status(payload: dict[str, Any], path: str | Path | None = None) -> None:
-    """Persist one heartbeat atomically (temp file + fsync + rename)."""
+    """Persist one heartbeat atomically (temp file + fsync + rename).
+
+    Delegates to the shared atomic writer, so this file and every other status
+    file have identical durability and no writer shares a temporary inode with
+    another.
+    """
     target = Path(path) if path is not None else agent_status_path()
-    target.parent.mkdir(parents=True, exist_ok=True)
     body = dict(payload)
     body.setdefault("recorded_at", datetime.now(timezone.utc).isoformat())
-    temporary = target.with_name(target.name + ".tmp")
-    with temporary.open("w", encoding="utf-8") as handle:
-        json.dump(body, handle, sort_keys=True)
-        handle.flush()
-        os.fsync(handle.fileno())
-    temporary.replace(target)
+    atomic_write_json(target, body, sort_keys=True)
 
 
 def bits_alerts(heartbeat: dict[str, Any] | None) -> list[str]:

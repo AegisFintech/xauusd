@@ -22,6 +22,10 @@ MAX_POSITION = "MAX_POSITION"
 DAILY_LOSS_LIMIT = "DAILY_LOSS_LIMIT"
 MAX_DRAWDOWN = "MAX_DRAWDOWN"
 ACCEPTED = "ACCEPTED"
+# Reported by the propose_trade tool when the store returned a persisted outcome
+# for a decision id it had already processed. Not a gate reason: no gate refused,
+# the proposal was simply not a new one.
+DUPLICATE_DECISION = "DUPLICATE_DECISION"
 
 # Restart policy shared by every persistent kill switch (paper and cTrader demo execution).
 # This is an allowlist: an unattended restart may only start a fresh account that nothing has
@@ -91,10 +95,27 @@ def market_data_age_seconds(bar_time: datetime, now: datetime,
     from the clock: a closed M1 bar stamped 01:09 is only knowable at 01:10, so
     measuring from the open time makes the newest bar intrinsically older than
     any per-minute threshold and the gate can never pass. The result is clamped
-    at zero because a bar still forming has a close time in the future.
+    at zero for a bar still forming, whose close time is up to one interval ahead.
+
+    That clamp is only honest for a bar at most one interval into the future. A
+    bar further ahead than that is not a forming bar, it is a bad observation:
+    it would report age zero forever, pass every freshness gate, and supply the
+    fill price. Callers must pair this with :func:`observation_is_future` rather
+    than relying on a large age to reject it.
     """
     closed_at = bar_time.astimezone(timezone.utc) + timedelta(seconds=bar_seconds)
     return max(0.0, (now.astimezone(timezone.utc) - closed_at).total_seconds())
+
+
+def observation_is_future(bar_time: datetime, now: datetime,
+                          bar_seconds: float = BAR_INTERVAL_SECONDS) -> bool:
+    """True when a bar closes more than one interval after ``now``.
+
+    Rejects a future-dated observation instead of letting the zero clamp above
+    mark it perpetually fresh.
+    """
+    closed_at = bar_time.astimezone(timezone.utc) + timedelta(seconds=bar_seconds)
+    return closed_at > now.astimezone(timezone.utc) + timedelta(seconds=bar_seconds)
 
 
 def _positive_env_float(name: str, default: float) -> float:
@@ -156,6 +177,56 @@ def _default_state(initial_cash: float = 100_000.0) -> dict[str, Any]:
             "trades_today": 0, "ledger": []}
 
 
+# Every key the gates index directly. A state missing any of them cannot be
+# evaluated, so it is corruption rather than a partial account.
+REQUIRED_STATE_KEYS = frozenset({
+    "stopped", "kill_switch_reason", "cash", "position", "average_entry_price", "mark_price",
+    "high_water_equity", "day", "day_start_equity", "trades_today", "ledger",
+})
+
+# Numeric fields that must stay finite. A NaN or inf here silently turns every
+# comparison in _gate into a pass or a trip depending on its direction.
+NUMERIC_STATE_KEYS = ("cash", "position", "average_entry_price", "mark_price",
+                      "high_water_equity", "day_start_equity", "trades_today")
+
+
+def _corrupt_state(initial_cash: float) -> dict[str, Any]:
+    state = _default_state(initial_cash)
+    state["kill_switch_reason"] = "corrupt_state"
+    return state
+
+
+def validated_paper_state(state: Any, initial_cash: float) -> dict[str, Any]:
+    """Validate persisted paper state, falling back to a stopped corrupt account.
+
+    Accepts either a raw JSON string (a database row) or an already-decoded value
+    (the in-memory store). Corruption is anything that cannot be evaluated safely:
+    unparseable JSON, a non-object, a missing required key, a non-boolean
+    ``stopped``, a non-list ``ledger``, or a non-finite numeric field.
+
+    Returning a *stopped* default is what makes this fail closed for every
+    consumer at once: the fill gate refuses with KILL_SWITCH, :func:`restart_policy`
+    refuses the unattended resume, and ``paper status`` names the reason. Without
+    this, a valid-JSON but incomplete row is trusted, every gate raises, and the
+    kill switch is never consulted again.
+    """
+    if isinstance(state, (str, bytes, bytearray)):
+        try:
+            state = json.loads(state)
+        except (ValueError, TypeError):
+            return _corrupt_state(initial_cash)
+    if not isinstance(state, dict) or not REQUIRED_STATE_KEYS <= state.keys():
+        return _corrupt_state(initial_cash)
+    if not isinstance(state["stopped"], bool) or not isinstance(state["ledger"], list):
+        return _corrupt_state(initial_cash)
+    if not all(isinstance(state[key], (int, float)) and not isinstance(state[key], bool)
+               and math.isfinite(state[key]) for key in NUMERIC_STATE_KEYS):
+        return _corrupt_state(initial_cash)
+    if state["day"] is not None and not isinstance(state["day"], str):
+        return _corrupt_state(initial_cash)
+    return state
+
+
 class PaperTradingStore(Protocol):
     def initialize(self) -> None: ...
     def run(self, decision_id: str, transition: Callable[[dict[str, Any]], dict[str, Any]]) -> dict[str, Any]: ...
@@ -191,16 +262,10 @@ class CockroachPaperTradingStore:
             db.execute("INSERT INTO paper_trading_state(state_key,state_json,updated_at) VALUES('primary',?,?)",
                        (canonical_json(state), _now().isoformat()))
             return state
-        try:
-            state = json.loads(row["state_json"])
-            if not isinstance(state, dict):
-                raise ValueError("state is not an object")
-            return state
-        except (ValueError, TypeError, json.JSONDecodeError):
-            state = _default_state(self.initial_cash)
-            state["kill_switch_reason"] = "corrupt_state"
+        state = validated_paper_state(row["state_json"], self.initial_cash)
+        if state["kill_switch_reason"] == "corrupt_state":
             self._save(db, state)
-            return state
+        return state
 
     @staticmethod
     def _save(db: Any, state: dict[str, Any]) -> None:
@@ -211,7 +276,10 @@ class CockroachPaperTradingStore:
         with self.connect() as db:
             duplicate = db.execute("SELECT result_json FROM paper_trading_decisions WHERE decision_id=?", (decision_id,)).fetchone()
             if duplicate is not None:
-                return json.loads(duplicate["result_json"])
+                result = json.loads(duplicate["result_json"])
+                # See SQLitePaperTradingStore.run: a replay is never a fresh fill.
+                result["replayed"] = True
+                return result
             state = self._locked_state(db)
             result = transition(state)
             self._save(db, state)
@@ -243,7 +311,9 @@ class InMemoryPaperTradingStore:
 
     def run(self, decision_id: str, transition: Callable[[dict[str, Any]], dict[str, Any]]) -> dict[str, Any]:
         if decision_id in self._results:
-            return json.loads(canonical_json(self._results[decision_id]))
+            replayed = json.loads(canonical_json(self._results[decision_id]))
+            replayed["replayed"] = True
+            return replayed
         state = self._load()
         result = transition(state)
         self._state = state
@@ -262,11 +332,10 @@ class InMemoryPaperTradingStore:
     def _load(self) -> dict[str, Any]:
         if self._state is None:
             self._state = _default_state(self.initial_cash)
-        required = {"stopped", "cash", "position", "high_water_equity", "ledger"}
-        if not required <= self._state.keys():
-            self._state = _default_state(self.initial_cash)
-            self._state["kill_switch_reason"] = "corrupt_state"
-        return self._state
+        state = validated_paper_state(self._state, self.initial_cash)
+        if state is not self._state:
+            self._state = state
+        return state
 
 
 def _now() -> datetime:
@@ -331,7 +400,7 @@ class PaperTrading:
         realized = sum(float(fill.get("realized_pnl") or 0.0) for fill in state.get("ledger", []))
         fills = [dict(fill) for fill in state.get("ledger", [])[-6:]][::-1]
         return {
-            "stopped": bool(state.get("stopped")),
+            "stopped": state.get("stopped") is True,
             "kill_switch_reason": state.get("kill_switch_reason"),
             "cash": float(state.get("cash", 0.0)),
             "position": position,
@@ -357,6 +426,8 @@ class PaperTrading:
             return {"status": "invalid_price"}
         if not market_is_open(now):
             return {"status": "market_closed"}
+        if observation_is_future(observed_at, now):
+            return {"status": "invalid_observation"}
         if market_data_age_seconds(observed_at, now) > self.config.max_market_data_age_seconds:
             return {"status": "stale_data"}
         def transition(state):
@@ -364,10 +435,10 @@ class PaperTrading:
             equity = self._equity(state)
             breached = (state["day_start_equity"] - equity >= self.config.daily_loss_limit or
                         (state["high_water_equity"] - equity) / state["high_water_equity"] >= self.config.max_drawdown)
-            if breached and not state["stopped"]:
+            if breached and state["stopped"] is False:
                 state["stopped"] = True
                 state["kill_switch_reason"] = "risk_limit"
-            return {"status": "stopped" if state["stopped"] else "ok", "equity": equity,
+            return {"status": "stopped" if state["stopped"] is True else "ok", "equity": equity,
                     "position": state["position"], "mark_price": price}
         # The monitor is stateful but never places an order. One mark per observation.
         key = "monitor:" + observed_at.isoformat() + ":" + str(price)
@@ -388,7 +459,11 @@ class PaperTrading:
         return self.store.run(decision.decision_id, transition)
 
     def _gate(self, state: dict[str, Any], decision: PaperDecision, now: datetime) -> str | None:
-        if state["stopped"]:
+        # ``is True`` rather than truthiness: restart_policy reads this field by
+        # identity, so a non-boolean must never mean "running" here. The state
+        # validator rejects non-booleans outright; this keeps the two readers
+        # consistent if one is ever relaxed.
+        if state["stopped"] is not False:
             return KILL_SWITCH
         if (decision.symbol != "XAUUSD" or decision.side not in {"BUY", "SELL"} or
                 not all(isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0
@@ -397,6 +472,8 @@ class PaperTrading:
             return INVALID_DECISION if decision.symbol == "XAUUSD" else UNSUPPORTED_SYMBOL
         if not market_is_open(now):
             return MARKET_CLOSED
+        if observation_is_future(decision.market_data_at, now):
+            return STALE_MARKET_DATA
         if market_data_age_seconds(decision.market_data_at, now) > self.config.max_market_data_age_seconds:
             return STALE_MARKET_DATA
         self._mark(state, decision.price, now)
@@ -413,11 +490,18 @@ class PaperTrading:
         return None
 
     def _mark(self, state: dict[str, Any], price: float, now: datetime) -> None:
-        state["mark_price"] = price
+        # Order matters. The previous day's close is read from the mark that is
+        # still in state, *before* this observation is applied, so a move that
+        # straddles the day boundary is measured against yesterday's close
+        # instead of being absorbed by the reset.
         day = now.date().isoformat()
+        previous_equity = self._equity(state)
+        state["mark_price"] = price
         equity = self._equity(state)
         if state["day"] != day:
-            state["day"] = day; state["day_start_equity"] = equity; state["trades_today"] = 0
+            state["day"] = day
+            state["day_start_equity"] = previous_equity
+            state["trades_today"] = 0
         state["high_water_equity"] = max(state["high_water_equity"], equity)
 
     @staticmethod

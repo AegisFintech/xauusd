@@ -34,13 +34,34 @@ The cTrader demo adapter requires all of the following before it can send a requ
 
 - `CTRADER_DEMO_ONLY=true`
 - cTrader host exactly `demo.ctraderapi.com`
-- verified demo account metadata and the configured XAUUSD symbol
+- verified demo account metadata and the configured XAUUSD symbol. The account list is
+  the only response that states whether an account is live, so an account the broker
+  never classified is treated as **not** demo. A configured
+  `CTRADER_CTID_TRADER_ACCOUNT_ID` skips that request when the token scope cannot
+  answer it; that account then reports `is_demo: false` in reconciliation details
+  rather than claiming a verification that never happened.
 - successful account and pending-order reconciliation after restart; only a fresh (never-stopped) execution switch starts automatically, every persisted stop needs `demo-automation start --reason ...`
 - fresh market data and a healthy state store
 - a clear persistent kill switch
 - deterministic risk and idempotency checks
 
 On uncertainty, restart recovery failure, data staleness, or API failure, the system will stop and alert rather than act. A broker error reply is recorded as `BROKER_REJECTED`. A transport failure or timeout after sending is recorded as `OUTCOME_UNKNOWN`, because the order may still have executed. Either one stops paper (`broker_execution_failed`) and demo execution, and neither switch resumes on its own. Check the account's broker positions before restarting.
+
+### Known accepted limitation: broker TLS is encrypted but not authenticated
+
+The `ctrader-open-api` SDK builds its endpoint as Twisted's `ssl:` URI, which creates a
+bare `SSL.Context` with `verify_mode=CERT_NONE` and `check_hostname=False`. Only the
+`tls:` URI (`optionsForClientTLS`, hostname + platform trust root) verifies. The
+endpoint string is hardcoded inside the vendor package, so this repository cannot
+influence it without replacing the SDK's client construction.
+
+Consequence: the `client_secret` and all order traffic travel over an encrypted but
+unauthenticated channel, so a network-level attacker who can intercept could capture
+the app secret and forge order or fill replies, defeating the fail-closed order
+lifecycle below. This is accepted for the demo-only deployment, where the blast radius
+is a demo account. It is **not** acceptable for a real-money account, and it must be
+resolved by constructing the client over a verified endpoint before any live trading
+is considered.
 
 ## Configuration
 

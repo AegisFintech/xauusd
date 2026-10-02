@@ -101,6 +101,8 @@ def model_card(bars: pd.DataFrame, config: MLConfig, model_name: str) -> dict:
         "prediction_time_information": list(FEATURE_COLUMNS),
         "label_construction": "close[t+horizon] / close[t] - 1; positive is class 1",
         "feature_timestamps": "features at t use bars at or before t",
+        "split_isolation": ("the final prediction_horizon rows of the train and validation windows are purged, "
+                            "because their labels are forward returns that read closes from the next window"),
         "random_seed": config.random_state, "calibration": "reported only; probabilities are not recalibrated",
         "retraining_policy": "manual research rerun after approved dataset/model change; no automatic production retraining",
         "abstention": {"long_at_or_above": config.probability_threshold,
@@ -124,10 +126,18 @@ class GradientBoostingResearch:
     def run(self, bars: pd.DataFrame, output_dir: Path = Path("reports/ml")) -> dict:
         features = build_features(bars)
         x, y, _ = supervised_frame(bars, self.ml_config)
+        # The label is a `prediction_horizon` forward return, so the final training
+        # rows are labelled with closes from inside the next split. Purge them:
+        # without this, every split boundary leaks `horizon` bars of future
+        # information into the training set.
+        embargo = max(self.ml_config.prediction_horizon, 1)
         split_x = chronological_split(x, ValidationConfig())
-        boundaries = {name: part.index for name, part in split_x.items()}
-        train_x, validation_x, test_x = (split_x[name] for name in ("train", "validation", "test"))
+        purged = {name: part.iloc[:max(0, len(part) - embargo)] if name != "test" else part
+                  for name, part in split_x.items()}
+        boundaries = {name: part.index for name, part in purged.items()}
+        train_x, validation_x, test_x = (purged[name] for name in ("train", "validation", "test"))
         train_y, validation_y, test_y = (y.loc[boundaries[name]] for name in ("train", "validation", "test"))
+        embargo_bars = {name: len(split_x[name]) - len(purged[name]) for name in ("train", "validation")}
 
         model = self._model()
         model.fit(train_x, train_y)

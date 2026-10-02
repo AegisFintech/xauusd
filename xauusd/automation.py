@@ -4,14 +4,17 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 import hashlib
+import html
 import json
+import math
 import os
 import shutil
+import subprocess
 import time
-import traceback
 
 import pandas as pd
 
+from .atomic import atomic_write_json
 from .data import HistoricalDataStore
 from .engine import ExecutionConfig
 from .research import DEFAULT_STRATEGIES, ResearchCampaign, StrategySpec
@@ -30,10 +33,7 @@ class AutomationConfig:
 
 
 def atomic_json(path: Path, payload: dict | list) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(payload, indent=2, allow_nan=False))
-    temporary.replace(path)
+    atomic_write_json(path, payload, indent=2)
 
 
 def append_jsonl(path: Path, payload: dict) -> None:
@@ -66,33 +66,80 @@ class RunLock:
 
 
 class ChampionRegistry:
+    """Champion record bound to the exact data and code that authorised it.
+
+    The record used to be a bare dict written to ``reports/champion.json``, so a
+    consumer could not tell which bars, which dataset digest or which backtester
+    version produced it, and ``consider`` compared a candidate score from the
+    current window against an incumbent score computed on a *different* trailing
+    window. A months-old score therefore blocked promotion permanently, or was
+    displaced by a score that was not comparable.
+    """
+    SCHEMA = "xauusd.champion/2"
+
     def __init__(self, path: Path):
         self.path = path
 
     def read(self) -> dict | None:
         return json.loads(self.path.read_text()) if self.path.exists() else None
 
-    def consider(self, candidate: dict) -> dict:
+    def consider(self, candidate: dict, dataset_fingerprint: str | None = None,
+                 dataset_version: str | None = None, code_commit: str | None = None) -> dict:
         current = self.read()
-        eligible = bool(candidate.get("passed"))
-        promoted = eligible and (current is None or candidate["score"] > current["score"])
+        eligible = bool(candidate.get("passed")) and candidate.get("score") is not None
+        if not eligible:
+            return {"eligible": False, "promoted": False, "previous": current,
+                    "champion": current,
+                    "reason": "candidate did not pass validation" if not candidate.get("passed")
+                              else "candidate has no score"}
+        if current is None:
+            promoted, reason = True, "promoted (first champion)"
+        elif dataset_fingerprint and current.get("dataset_fingerprint") == dataset_fingerprint:
+            # Same bars on both sides: the two scores are comparable.
+            promoted = candidate["score"] > current["score"]
+            reason = "promoted (higher validation score)" if promoted else "incumbent score is not beaten"
+        elif dataset_fingerprint and current.get("dataset_fingerprint"):
+            # The dataset changed, so the incumbent's score was computed on bars
+            # that no longer exist. A candidate that passed validation on the new
+            # data stands on its own; the stale number is not compared against it.
+            promoted, reason = True, "promoted (dataset changed; incumbent score not comparable)"
+        else:
+            # Either side is unbound to a dataset, so nothing can be shown to be
+            # comparable. Keep the incumbent rather than replace it on a guess.
+            promoted, reason = False, "incumbent is not bound to a dataset; score comparison refused"
         if promoted:
-            atomic_json(self.path, candidate)
-        return {"eligible": eligible, "promoted": promoted, "previous": current, "champion": candidate if promoted else current}
+            record = {**candidate, "schema": self.SCHEMA, "dataset_fingerprint": dataset_fingerprint,
+                      "dataset_version": dataset_version, "code_commit": code_commit,
+                      "promoted_at": datetime.now(timezone.utc).isoformat()}
+            atomic_json(self.path, record)
+            return {"eligible": True, "promoted": True, "previous": current,
+                    "champion": record, "reason": reason}
+        return {"eligible": True, "promoted": False, "previous": current, "champion": current,
+                "reason": reason}
 
 
 def render_html(manifest: dict) -> str:
+    def number(value: object, spec: str = ".3f") -> str:
+        # A metric can legitimately be None (undefined profit factor, no return
+        # variance). Formatting it directly raised for exactly the candidates an
+        # operator most needs to see.
+        if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value):
+            return "n/a"
+        return format(float(value), spec if spec != "d" else ".0f")
+
     rows = "".join(
-        f"<tr><td>{item['strategy']}</td><td>{item['score']:.3f}</td>"
-        f"<td>{item['net_profit']:.2f}</td><td>{item['profit_factor']:.3f}</td>"
+        f"<tr><td>{html.escape(str(item['strategy']))}</td><td>{number(item.get('score'))}</td>"
+        f"<td>{number(item.get('net_profit'), '.2f')}</td><td>{number(item.get('profit_factor'))}</td>"
         f"<td>{'PASS' if item.get('passed') else 'FAIL'}</td></tr>"
         for item in manifest["candidates"]
     )
+    data = manifest["data"]
     return ("<!doctype html><html><head><meta charset='utf-8'><title>XAUUSD Research Run</title>"
             "<style>body{font-family:sans-serif;background:#111;color:#eee;margin:2rem}"
             "table{border-collapse:collapse}td,th{padding:.5rem;border:1px solid #555}</style></head><body>"
-            f"<h1>XAUUSD Research Run</h1><p>Run: {manifest['run_id']}</p>"
-            f"<p>Data: {manifest['data']['start']} — {manifest['data']['end']} ({manifest['data']['rows']} bars)</p>"
+            f"<h1>XAUUSD Research Run</h1><p>Run: {html.escape(str(manifest['run_id']))}</p>"
+            f"<p>Data: {html.escape(str(data['start']))} — {html.escape(str(data['end']))} "
+            f"({number(data.get('rows'), 'd')} bars)</p>"
             "<table><thead><tr><th>Strategy</th><th>Score</th><th>Net P&amp;L</th><th>PF</th><th>Gate</th></tr></thead>"
             f"<tbody>{rows}</tbody></table></body></html>")
 
@@ -165,7 +212,13 @@ class DailyResearchPipeline:
         if not freshness["fresh"]:
             raise RuntimeError(f"historical data is stale by {age_hours:.1f} hours; run data update")
 
-        fingerprint = hashlib.sha256(f"{sample.index.min()}|{sample.index.max()}|{len(sample)}".encode()).hexdigest()[:12]
+        # Content-addressed run id. The previous identity was bounds + row count,
+        # so a broker data revision that preserved the start, end and row count
+        # produced the *same* run_id and short-circuited the whole run: the stored
+        # manifest, and therefore reports/champion.json, stayed silently stale.
+        # tournament_data.frame_digest hashes content, columns, dtypes and index.
+        from .tournament_data import frame_digest
+        fingerprint = frame_digest(sample)
         run_id = f"{now:%Y%m%dT%H%M%SZ}-{fingerprint}"
         final_dir = self.config.reports_dir / run_id
         working_dir = self.config.reports_dir / f".{run_id}.working"
@@ -175,27 +228,66 @@ class DailyResearchPipeline:
             shutil.rmtree(working_dir)
         working_dir.mkdir(parents=True)
 
-        ranked = ResearchCampaign(self.execution).run(sample, DEFAULT_STRATEGIES, working_dir / "research")
+        # Rank, validate and finally select on three disjoint partitions.
+        #
+        # The old order ranked every candidate on the whole 180-day sample and then
+        # validated the top N on a split *carved out of that same sample*, so the
+        # held-out "test" segment was inside the data that chose the candidate. The
+        # candidates are now ranked on the training partition only, gated on
+        # validation, and the final champion is the validation winner.
+        train_end = sample.index[int(len(sample) * self.validation.train_fraction)]
+        validation_end = sample.index[int(len(sample) * (self.validation.train_fraction
+                                                         + self.validation.validation_fraction))]
+        partitions = {"train": sample.loc[sample.index <= train_end],
+                      "validation": sample.loc[(sample.index > train_end) & (sample.index <= validation_end)],
+                      "test": sample.loc[sample.index > validation_end]}
+        if min(len(frame) for frame in partitions.values()) < 100:
+            raise RuntimeError("not enough bars for the configured train/validation/test proportions")
+
+        ranked = ResearchCampaign(self.execution).run(partitions["train"], DEFAULT_STRATEGIES,
+                                                      working_dir / "research")
         specs = {spec.name: spec for spec in DEFAULT_STRATEGIES}
         validations = {}
         for candidate in ranked[:self.config.validate_top]:
             spec = specs[candidate["strategy"]]
             validations[spec.name] = StrategyValidator(self.execution, self.validation).validate(
-                sample, spec, working_dir / "validation")
+                partitions["validation"], spec, working_dir / "validation")
         candidates = []
         for candidate in ranked:
             report = validations.get(candidate["strategy"])
-            candidates.append({**candidate, "passed": bool(report and report["passed"]),
+            candidates.append({**candidate,
+                               "passed": bool(report and report["passed"]),
+                               "validation_score": report.get("score") if report else None,
                                "gates": report["gates"] if report else None})
-        best = candidates[0]
+        # The champion is the best *validation* performer, not the best ranker: the
+        # ranking is a screen to limit how many candidates get validated at all.
+        eligible = [row for row in candidates if row["passed"] and row["validation_score"] is not None]
+        if not eligible:
+            raise RuntimeError("no candidate passed validation on the held-out validation partition")
+        best = max(eligible, key=lambda row: row["validation_score"])
         registry = ChampionRegistry(self.config.registry_path)
-        promotion = registry.consider({"run_id": run_id, **best})
+        promotion = registry.consider({"run_id": run_id, **best},
+                                      dataset_fingerprint=fingerprint, dataset_version=None,
+                                      code_commit=self._code_commit())
         manifest = {"run_id": run_id, "created_at": now.isoformat(), "mode": "research-only",
                     "data": {"start": sample.index.min().isoformat(), "end": sample.index.max().isoformat(),
-                             "rows": len(sample), **freshness},
+                             "rows": len(sample), "fingerprint": fingerprint,
+                             "partitions": {name: {"start": frame.index.min().isoformat(),
+                                                   "end": frame.index.max().isoformat(),
+                                                   "rows": len(frame)}
+                                            for name, frame in partitions.items()},
+                             **freshness},
                     "execution": asdict(self.execution), "candidates": candidates, "promotion": promotion}
         atomic_json(working_dir / "manifest.json", manifest)
         (working_dir / "report.html").write_text(render_html(manifest))
         working_dir.replace(final_dir)
         atomic_json(self.config.reports_dir / "latest.json", {"run_id": run_id, "path": str(final_dir)})
         return manifest
+
+    @staticmethod
+    def _code_commit() -> str | None:
+        try:
+            return subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True,
+                                  timeout=10).stdout.strip() or None
+        except (OSError, subprocess.SubprocessError):
+            return None

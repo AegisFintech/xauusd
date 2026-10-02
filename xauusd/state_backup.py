@@ -15,6 +15,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .atomic import atomic_write_json
+from .experiment_registry import canonical_json
 from .local_state import state_db_path
 
 DEFAULT_BACKUP_ROOT = "backups/local-state"
@@ -41,10 +43,7 @@ def _quick_check(db_path: str | Path) -> str:
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True))
-    temporary.replace(path)
+    atomic_write_json(path, payload, indent=2)
 
 
 def backup_local_state(source_db: str | Path | None = None,
@@ -90,8 +89,16 @@ def backup_local_state(source_db: str | Path | None = None,
     return manifest
 
 
-def restore_local_state(backup_ref: str | Path, target_db: str | Path | None = None) -> dict[str, Any]:
-    """Restore an archive or a backup directory into the configured state database."""
+def restore_local_state(backup_ref: str | Path, target_db: str | Path | None = None,
+                        allow_running: bool = False) -> dict[str, Any]:
+    """Restore an archive or a backup directory into the configured state database.
+
+    The restored paper state is forced back to ``stopped`` with reason
+    ``state_restored`` unless the operator explicitly passes ``allow_running``.
+    A snapshot taken mid-session carries ``stopped: false``, so an unguarded
+    restore would reinstate a running kill switch and discard an operator stop,
+    which is the one guarantee a restore must not break.
+    """
     reference = Path(backup_ref)
     gz_path: Path
     manifest: dict[str, Any]
@@ -117,6 +124,11 @@ def restore_local_state(backup_ref: str | Path, target_db: str | Path | None = N
     if integrity != "ok":
         staged.unlink()
         raise ValueError(f"restored database failed quick_check: {integrity}")
+    # A snapshot taken while the account was running carries stopped=false, so a
+    # plain restore silently reinstates a running kill switch and discards an
+    # operator stop. Force the restored state back to stopped with a named reason
+    # unless the caller explicitly asked for a running account.
+    forced_reason = _force_stopped(staged) if not allow_running else None
     for sidecar in (Path(str(target) + "-wal"), Path(str(target) + "-shm")):
         try:
             if sidecar.exists():
@@ -126,4 +138,29 @@ def restore_local_state(backup_ref: str | Path, target_db: str | Path | None = N
     staged.replace(target)
     return {"restored": True, "target_db": str(target), "run_id": manifest.get("run_id"),
             "sha256_ok": expected is None or actual == expected, "integrity": integrity,
-            "archive": str(gz_path)}
+            "kill_switch_reason": forced_reason, "archive": str(gz_path)}
+
+
+def _force_stopped(staged: Path) -> str:
+    """Stamp a restored paper state as stopped, and return the reason it set."""
+    reason = "state_restored"
+    connection = sqlite3.connect(staged)
+    try:
+        connection.execute("PRAGMA journal_mode=WAL")
+        row = connection.execute("SELECT state_json FROM paper_trading_state WHERE state_key='primary'").fetchone()
+        if row is None:
+            return reason
+        try:
+            state = json.loads(row[0])
+        except (ValueError, TypeError):
+            state = None
+        if not isinstance(state, dict) or "stopped" not in state:
+            return reason
+        state["stopped"] = True
+        state["kill_switch_reason"] = reason
+        connection.execute("UPDATE paper_trading_state SET state_json=? WHERE state_key='primary'",
+                           (canonical_json(state),))
+        connection.commit()
+    finally:
+        connection.close()
+    return reason

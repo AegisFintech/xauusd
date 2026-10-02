@@ -1,10 +1,11 @@
 from __future__ import annotations
-import argparse,json,logging,os,time
+import argparse,json,logging,os,shutil,signal,time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 from dotenv import load_dotenv
 from .core import synthetic_bars, features, Backtester
+from .atomic import atomic_write_json
 from .data import HistoricalDataStore, CTraderHistoricalAdapter, CTraderOpenApiConfig, CTraderOpenApiDownloader
 from .engine import EventDrivenBacktester, ExecutionConfig
 from .research import ResearchCampaign, StrategySpec
@@ -181,18 +182,55 @@ def _agent_status_view() -> dict:
 def _agent_status_path() -> str:
  return os.getenv("AGENT_STATUS_FILE","reports/agent_status.json")
 
-def _download_with_retry(downloader: Any,*args: Any,attempts: int=3,
-                         backoff: tuple[float,...]=(5.0,20.0),**kwargs: Any) -> Any:
- """Transient-failure retry around a scheduled data download; auth errors are permanent."""
+DOWNLOAD_SUBPROCESS_TIMEOUT_SECONDS = 900.0
+
+def _download_attempt_subprocess(start: Any,end: Any,page_size: int) -> dict:
+ """One single-shot ``data download`` in a fresh interpreter; returns its result.
+
+ A download drives Twisted's process-global reactor and stops it, so a second one
+ in the same process raises ReactorNotRestartable. The child is ``download`` and
+ never ``update``, because ``update`` is the caller and would recurse.
+ """
+ import subprocess, sys, json as _json, tempfile, shutil as _shutil
+ from pathlib import Path
+ workspace=Path(tempfile.mkdtemp(prefix="xauusd-dlattempt-")); result_path=workspace/"result.json"
+ command=[sys.executable,"-m","xauusd.cli","data","download","--start",str(start),
+          "--end",str(end),"--page-size",str(page_size),"--result-file",str(result_path)]
+ try:
+  subprocess.run(command,capture_output=True,text=True,timeout=DOWNLOAD_SUBPROCESS_TIMEOUT_SECONDS)
+  payload=_json.loads(result_path.read_text()) if result_path.is_file() else None
+ except (ValueError,OSError):
+  payload=None
+ finally:
+  _shutil.rmtree(workspace,ignore_errors=True)
+ result=payload.get("result") if isinstance(payload,dict) else None
+ if not isinstance(result,dict): raise RuntimeError("data download produced no result")
+ return result
+
+def _download_with_retry(start: Any,end: Any=None,attempts: int=3,
+                         backoff: tuple[float,...]=(5.0,20.0),page_size: int=5000,
+                         attempt_runner: Callable[[Any,Any,int],dict]|None=None) -> Any:
+ """Transient-failure retry around a scheduled data download; auth errors are permanent.
+
+ Not a blind retry of an uncertain broker action: a data download is a read-only
+ historical request, and the durable idempotency is the store's content-merged
+ parquet write. ``attempt_runner`` exists so the retry policy is testable without
+ spawning interpreters.
+ """
  from .data import CTraderAuthError
- last: Exception|None=None
+ run=attempt_runner or _download_attempt_subprocess
+ end=end if end is not None else datetime.now(timezone.utc)
+ first: Exception|None=None
  for attempt in range(attempts):
-  try: return downloader.download(*args,**kwargs)
-  except CTraderAuthError: raise
+  try:
+   return run(start,end,page_size)
+  except CTraderAuthError:
+   # A credential problem is not transient; the downloader already refreshed once.
+   raise
   except Exception as exc:
-   last=exc
+   if first is None: first=exc
    if attempt<attempts-1: time.sleep(backoff[min(attempt,len(backoff)-1)])
- raise last
+ raise first if first is not None else RuntimeError("data download produced no result")
 
 def _serve_agent_view() -> None:
  import threading
@@ -272,6 +310,24 @@ def agent_controller(action: str) -> dict:
    paper.stop("missing_credentials")
    write_status({"state":"stopped","reason":"missing_credentials","error_type":type(exc).__name__},status_path)
    return {"state":"stopped","reason":"missing_credentials"}
+ backend=os.getenv("AGENT_PLANNER","openai")
+ runner_type=ContinuousAgentRunner
+ # The planner is built BEFORE maybe_resume, for both backends. A missing
+ # credential must never leave a running kill switch behind, and the refusal
+ # must exit 0 rather than raising SystemExit(2) into Restart=on-failure, which
+ # turned it into a 30-second crash-loop that re-attempted broker auth forever.
+ try:
+  if backend=="datadog":
+   from .bits import BitsClient
+   from .bits_runner import BitsAgentRunner
+   runner_type=BitsAgentRunner
+   planner=BitsClient.from_env()
+  elif backend=="openai": planner=OpenAICompatiblePlanner.from_env()
+  else: raise ValueError("AGENT_PLANNER must be datadog or openai")
+ except Exception as exc:
+  paper.stop("missing_credentials")
+  write_status({"state":"stopped","reason":"missing_credentials","error_type":type(exc).__name__},status_path)
+  return {"state":"stopped","reason":"missing_credentials"}
  resume=paper.maybe_resume("agent_continuous_paper_loop")
  if not resume["resumed"]:
   write_status({"state":"stopped","reason":"resume_refused","kill_switch_reason":resume["kill_switch_reason"]},status_path)
@@ -292,15 +348,6 @@ def agent_controller(action: str) -> dict:
   source,paper,coordinator,config,
   canary=ConfirmedBreakoutCanarySource(market_store,_positive_env_float("CTRADER_CANARY_PAPER_QUANTITY",1)),
   firecrawl_client=firecrawl_client)
- backend=os.getenv("AGENT_PLANNER","openai")
- runner_type=ContinuousAgentRunner
- if backend=="datadog":
-  from .bits import BitsClient
-  from .bits_runner import BitsAgentRunner
-  runner_type=BitsAgentRunner
-  planner=BitsClient.from_env()
- elif backend=="openai": planner=OpenAICompatiblePlanner.from_env()
- else: raise ValueError("AGENT_PLANNER must be datadog or openai")
  try:
   runner=runner_type(planner,registry,
                     transcript_store,source,paper,coordinator,config,
@@ -338,6 +385,72 @@ def agent_controller(action: str) -> dict:
   return runner.status()
  raise ValueError(f"unknown agent action: {action}")
 
+def _canary_source():
+ """The deterministic confirmed-breakout signal source used by the CLI bridge.
+
+ The bridge built a registry with no canary, so `agent-tool canary_signal` could
+ never resolve even once the argument was accepted. Rebuilt here rather than
+ duplicated in each call site.
+ """
+ from .canary_strategy import ConfirmedBreakoutCanarySource
+ return ConfirmedBreakoutCanarySource(HistoricalDataStore(),_positive_env_float("CTRADER_CANARY_PAPER_QUANTITY",1))
+
+def _build_engine(paper=None, now_provider=None):
+ """Construct the deterministic engine from the same stores the agent uses."""
+ from .canary_strategy import ConfirmedBreakoutCanarySource
+ from .engine_loop import EngineConfig, PaperTradingEngine
+ from .paper_trading import paper_from_env
+ from .agent_loop import agent_transcript_store_from_env
+ from .bits_jobs import BitsStore
+ paper=paper or paper_from_env()
+ config=EngineConfig.from_env()
+ store=HistoricalDataStore()
+ source=LocalHistoricalMarketDataSource(store)
+ transcript=agent_transcript_store_from_env(initialize=True)
+ coordinator=_paper_to_demo_coordinator(paper)
+ signals=ConfirmedBreakoutCanarySource(store,config.quantity)
+ return PaperTradingEngine(paper,coordinator,source,signals,BitsStore(transcript),transcript,
+                            config,now_provider=now_provider)
+
+def engine_controller(action: str, reason: str|None=None) -> dict:
+ """Operator and supervisor control for the deterministic trade engine."""
+ import json as _json
+ from pathlib import Path
+ if action=="status":
+  engine=_build_engine()
+  return engine.status()
+ if action in ("halt","resume"):
+  if not (reason or "").strip(): raise ValueError(f"engine {action} requires --reason")
+  engine=_build_engine()
+  outcome=engine.halt(reason) if action=="halt" else engine.resume(reason)
+  return {"state":"halted" if action=="halt" else "resumed", **outcome}
+ if action=="once":
+  engine=_build_engine()
+  return engine.evaluate_once()
+ if action=="run":
+  engine=_build_engine()
+  def handle_signal(signum, frame): engine.stop()
+  for sig in (signal.SIGTERM, signal.SIGINT):
+   try: signal.signal(sig,handle_signal)
+   except ValueError: pass
+  return engine.run_forever()
+ raise ValueError(f"unknown engine action: {action}")
+
+def data_feed_controller(action: str) -> dict:
+ """Live M1 bar feed. Separate process on purpose: Twisted's reactor is global and non-restartable."""
+ from .live_feed import LiveFeedConfig, LiveBarFeed, run_feed
+ config=LiveFeedConfig.from_env()
+ if action=="status":
+  from pathlib import Path
+  path=Path(config.status_path)
+  if not path.is_file():
+   return {"state":"none","message":f"no feed status at {config.status_path}"}
+  return json.loads(path.read_text())
+ if action=="once":
+  # One bounded pass, for a supervised smoke test. Exercises the real subscription.
+  return run_feed(config, iterations=1)
+ return run_feed(config)
+
 def agent_tool(name: str, raw: str) -> dict:
  """CLI bridge to the existing deterministic tools, for Bits shell requests."""
  from .agent_loop import AgentConfig, build_agent_registry
@@ -351,7 +464,8 @@ def agent_tool(name: str, raw: str) -> dict:
    return {"accepted":False,"reason":"AUTOMATION_DISABLED"}
   coordinator=_paper_to_demo_coordinator(paper)
  else: coordinator=PaperToCTraderDemoCoordinator(paper,paper_only=True)
- registry=build_agent_registry(source,paper,coordinator,AgentConfig.from_env())
+ registry=build_agent_registry(source,paper,coordinator,AgentConfig.from_env(),
+                              canary=_canary_source())
  tool=registry.get(name)
  value=json.loads(raw)
  _validate_json(value,tool.input_schema)
@@ -452,7 +566,15 @@ def bits_job_page(job_id: str, stream: str, offset: int, limit: int) -> tuple[in
             "retryable":False,"retry":"no"}}
  except Exception as exc:
   return 1,_command_failure(exc,"output retrieval failed")
- text=job[stream]; end=min(len(text),offset+limit)
+ text=job[stream]
+ if offset>len(text):
+  # Past the end returned an empty page with next_offset null, which is
+  # indistinguishable from the real end of output. That is exactly the "silently
+  # skip omitted output" case, so it is rejected with its own code.
+  return 2,{"status":"rejected","error":{"code":"offset_out_of_range","path":"offset",
+            "message":f"offset {offset} is past the {len(text)} stored characters of this stream",
+            "retryable":False,"retry":"no"}}
+ end=min(len(text),offset+limit)
  return 0,{"job_id":job_id,"status":job["status"],"exit_code":job["exit_code"],"stream":stream,
            "text":text[offset:end],"offset":offset,"next_offset":end if end<len(text) else None,
            "stored_characters":len(text),"capture_truncated":job["truncated"]}
@@ -500,8 +622,13 @@ def build_parser() -> argparse.ArgumentParser:
  agent=sub.add_parser("agent",help="single continuous AI paper-trading agent with a live thinking view")
  agent.add_argument("action",nargs="?",choices=["status","once","view","run"],default="status")
  tool=sub.add_parser("agent-tool",help="invoke deterministic tools from a Bits shell action")
- tool.add_argument("name",choices=["read_market","paper_state","propose_trade"])
+ tool.add_argument("name",choices=["read_market","paper_state","propose_trade","canary_signal"])
  tool.add_argument("--input",default="{}")
+ engine=sub.add_parser("engine",help="deterministic paper-trading engine (no LLM on the decision path)")
+ engine.add_argument("action",nargs="?",choices=["status","once","run","halt","resume"],default="status")
+ engine.add_argument("--reason",help="required for halt/resume: why the engine may be paused or resumed")
+ feed=sub.add_parser("data-feed",help="live M1 subscription that keeps the persisted store fresh")
+ feed.add_argument("action",nargs="?",choices=["run","once","status"],default="run")
  recover=sub.add_parser("bits-recover",help="acknowledge reconciled interrupted commands; leaves paper stopped")
  recover.add_argument("--reason",required=True)
  memory=sub.add_parser("bits-memory",help="read, validate, or replace compact research notes (schema xauusd.notes/1)")
@@ -536,6 +663,7 @@ def build_parser() -> argparse.ArgumentParser:
  sub.add_parser("adaptive-analytics")
  d=sub.add_parser("data"); ds=d.add_subparsers(dest="data_cmd"); i=ds.add_parser("import"); i.add_argument("csv"); v=ds.add_parser("validate")
  download=ds.add_parser("download"); download.add_argument("--start",required=True,help="UTC start date/time (for example 2026-08-01)"); download.add_argument("--end",help="UTC end date/time; defaults to now"); download.add_argument("--page-size",type=int,default=int(os.getenv("CTRADER_DATA_UPDATE_PAGE_SIZE","5000")))
+ download.add_argument("--result-file",help="internal: write the result here instead of the data-update status file")
  update=ds.add_parser("update"); update.add_argument("--overlap-minutes",type=int,default=int(os.getenv("CTRADER_DATA_UPDATE_OVERLAP_MINUTES","10"))); update.add_argument("--page-size",type=int,default=int(os.getenv("CTRADER_DATA_UPDATE_PAGE_SIZE","5000")))
  p.subcommands=sorted(sub.choices)
  return p
@@ -630,6 +758,16 @@ def main():
  if a.cmd=="agent-tool":
   try: result=agent_tool(a.name,a.input)
   except Exception as exc: result={"status":"failed","error_type":type(exc).__name__}
+  _print_structured(result)
+  if result.get("status")=="failed": raise SystemExit(1)
+ if a.cmd=="engine":
+  try: result=engine_controller(a.action,a.reason)
+  except Exception as exc: result={"status":"failed","error_type":type(exc).__name__}
+  _print_structured(result)
+  if result.get("status")=="failed": raise SystemExit(1)
+ if a.cmd=="data-feed":
+  try: result=data_feed_controller(a.action)
+  except Exception as exc: result={"status":"failed","error_type":type(exc).__name__}
   print(json.dumps(result,allow_nan=False))
  if a.cmd=="bits-recover":
   try: result=bits_recover(a.reason)
@@ -688,17 +826,27 @@ def main():
   try:
    if a.data_cmd=="import": result=CTraderHistoricalAdapter(s).import_csv(Path(a.csv))
    elif a.data_cmd=="validate": result=s.validate(s.read())
-   elif a.data_cmd=="download": result=CTraderOpenApiDownloader(CTraderOpenApiConfig.from_env(),s).download(a.start,a.end,a.page_size)
+   elif a.data_cmd=="download":
+    downloader=CTraderOpenApiDownloader(CTraderOpenApiConfig.from_env(),s)
+    result=downloader.download(a.start,a.end,a.page_size)
+    if a.result_file:
+     # Internal: a parent process retrying after a token refresh re-runs the whole
+     # download in a fresh interpreter and reads the outcome from here. The child
+     # does not write reports/data_update_status.json, so a child failure cannot
+     # overwrite the parent's verdict for a different invocation.
+     Path(a.result_file).write_text(json.dumps({"result":result},indent=2))
+     return
    elif a.data_cmd=="update":
     if not s.path.exists(): raise RuntimeError("no local data; run data download --start DATE first")
     start=s.read().index.max()-__import__('pandas').Timedelta(minutes=a.overlap_minutes)
-    result=_download_with_retry(CTraderOpenApiDownloader(CTraderOpenApiConfig.from_env(),s),
-                                start,page_size=a.page_size)
+    result=_download_with_retry(start,end=datetime.now(timezone.utc),page_size=a.page_size)
    else: p.error("choose a data command")
    if a.data_cmd in ("download","update"):
-    status_path.parent.mkdir(parents=True,exist_ok=True)
-    status_path.write_text(json.dumps({"state":"ok","recorded_at":datetime.now(timezone.utc).isoformat(),
-       "end":result.get("end"),"downloaded_rows":result.get("downloaded_rows"),"error_code":None}))
+    # Atomic: a torn read maps to "missing" for both readers, and the live view
+    # only alerts on state in {auth_error, failed}, so a partial file degraded
+    # silently rather than loudly.
+    atomic_write_json(status_path,{"state":"ok","recorded_at":datetime.now(timezone.utc).isoformat(),
+       "end":result.get("end"),"downloaded_rows":result.get("downloaded_rows"),"error_code":None})
    print(json.dumps(result,indent=2))
   except Exception as exc:
    from .data import CTraderAuthError
@@ -706,6 +854,6 @@ def main():
    description=getattr(exc,"description",None) if isinstance(exc,CTraderAuthError) else None
    status={"state":"auth_error" if code else "failed","recorded_at":datetime.now(timezone.utc).isoformat(),
            "error_code":code,"description":description,"error_type":type(exc).__name__}
-   status_path.parent.mkdir(parents=True,exist_ok=True); status_path.write_text(json.dumps(status))
+   atomic_write_json(status_path,status)
    print(json.dumps(status,indent=2)); raise SystemExit(1)
 if __name__=="__main__": main()

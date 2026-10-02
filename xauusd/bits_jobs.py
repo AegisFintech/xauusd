@@ -16,9 +16,27 @@ from threading import Event, Thread
 import time
 from uuid import uuid4
 
-from .bits import BitsError, validate_shell_action
+from .bits import BitsError, error_details, validate_shell_action
 from .bits_capabilities import SHELL, shell_environment
 from .experiment_registry import canonical_json
+
+# Server-enforced ceiling on a shell job. Declared here, next to the executor that
+# enforces it, so the guarantee cannot depend on every caller remembering to clamp.
+# The workflow validator still accepts up to an hour.
+MAX_SHELL_TIMEOUT_SECONDS = 1200
+# A job record older than this with status "running" is a stranded row, not a live
+# command: the worker thread is gone but the terminal status was never written.
+STALE_RUNNING_JOB_SECONDS = MAX_SHELL_TIMEOUT_SECONDS * 2 + 300
+
+
+def args_timeout(action: dict) -> int:
+    return int(action["args"]["timeout_sec"])
+
+
+# Partial-output publishing for a still-running job. Frequent enough to feel live,
+# rare enough that a chatty command does not turn into a write storm.
+PROGRESS_BYTES = 8192
+PROGRESS_SECONDS = 2.0
 
 
 class AgentAlreadyRunning(BitsError):
@@ -191,6 +209,37 @@ class BitsStore:
             self.finish(result)
         return len(rows)
 
+    def prune(self, keep: int = 500) -> int:
+        """Drop the oldest terminal job records. Nothing else ever deleted from this table.
+
+        One row is written per shell action and a capture may reach 1 MiB, so
+        ``bits_jobs`` grew without limit: 313 rows held 1.7 MB after two days. The
+        idempotency guarantee only needs the *recent* window: a replay is refused
+        by the request-mismatch check, and anything older than ``keep`` records is
+        far outside any realistic replay horizon.
+
+        Rows that are not terminal are never touched, so an in-flight job and any
+        pending-draft references survive.
+        """
+        with self.db() as db:
+            terminal = ("succeeded", "failed", "cancelled", "timed_out", "unknown")
+            marks = ",".join("?" for _ in terminal)
+            total = int(db.execute(f"SELECT COUNT(*) c FROM bits_jobs WHERE status IN ({marks})",
+                                   terminal).fetchone()["c"])
+            if total <= keep:
+                return 0
+            removed = int(db.execute(
+                f"DELETE FROM bits_jobs WHERE action_key IN (SELECT action_key FROM bits_jobs "
+                f"WHERE status IN ({marks}) ORDER BY rowid ASC LIMIT ?)", (*terminal, total - keep)).rowcount or 0)
+        return removed
+
+    def storage(self) -> dict[str, int]:
+        """Row counts and stored bytes, so unbounded growth is visible."""
+        with self.db() as db:
+            jobs = db.execute("SELECT COUNT(*) c, COALESCE(SUM(LENGTH(result_json)),0) b FROM bits_jobs").fetchone()
+            running = db.execute("SELECT COUNT(*) c FROM bits_jobs WHERE status='running'").fetchone()
+        return {"jobs": int(jobs["c"]), "result_bytes": int(jobs["b"]), "running": int(running["c"])}
+
 
 class ShellJobs:
     def __init__(self, store, secrets=None):
@@ -205,6 +254,12 @@ class ShellJobs:
         validate_shell_action(action)
         if self.secrets.unsafe(canonical_json(action)):
             raise BitsError("command contains sensitive content", "sensitive_command")
+        # Enforce the server-side ceiling here as well as in the runner. The
+        # validator still accepts up to an hour, so without this any other caller
+        # of the executor would get a 3600s job and break the documented
+        # 20-minute guarantee.
+        if args_timeout(action) > MAX_SHELL_TIMEOUT_SECONDS:
+            action = {**action, "args": {**action["args"], "timeout_sec": MAX_SHELL_TIMEOUT_SECONDS}}
         result, created = self.store.claim(cycle, action)
         if created:
             self.workers = {key: thread for key, thread in self.workers.items() if thread.is_alive()}
@@ -213,6 +268,29 @@ class ShellJobs:
             worker.start()
         return result
 
+    def _publish_progress(self, result, buffers, limit, total):
+        """Write a running job's partial output so a reader can watch it.
+
+        The record keeps ``status: "running"`` and a ``bytes_seen`` count; only
+        :meth:`finish` makes it terminal. Output is scrubbed through the same
+        secret filter as the final result, so a preview can never reveal more
+        than the stored record will.
+        """
+        try:
+            remaining = limit
+            for name, value in buffers.items():
+                text = value.decode("utf-8", errors="replace")
+                if self.secrets.unsafe(text):
+                    result[name] = "[output withheld: sensitive content]"
+                else:
+                    result[name] = bytes(value[:remaining]).decode("utf-8", errors="replace")
+                remaining = max(0, remaining - len(value))
+            result["bytes_seen"] = total
+            self.store.finish(result)
+        except Exception:
+            # Observability of a running job must never disturb the job.
+            pass
+
     def _run(self, args, result):
         proc = None
         buffers = {"stdout": bytearray(), "stderr": bytearray()}
@@ -220,6 +298,7 @@ class ShellJobs:
         limit = args["max_output_bytes"]
         deadline = time.monotonic() + args["timeout_sec"]
         state = "failed"
+        last_progress = 0.0
         try:
             # One definition of the job environment; the capability manifest uses it too.
             env = shell_environment(env_file=self.secrets.env_file)
@@ -232,6 +311,7 @@ class ShellJobs:
                     os.set_blocking(stream.fileno(), False)
                     sel.register(stream, selectors.EVENT_READ, name)
                 state = "running"
+                partial = 0.0
                 while sel.get_map():
                     if self.cancelled.is_set() or time.monotonic() >= deadline:
                         state = "cancelled" if self.cancelled.is_set() else "timed_out"
@@ -247,6 +327,15 @@ class ShellJobs:
                         remaining = limit + 4096 - sum(map(len, buffers.values()))
                         if remaining > 0:
                             buffers[key.data].extend(chunk[:remaining])
+                        # Publish output while the job is still running. A backtest can
+                        # run for 20 minutes (p99 343s, observed max 1211s); without
+                        # this the live view shows an empty result until it terminates,
+                        # which reads as a hung harness. Best effort: a failed preview
+                        # must never affect the job's own result.
+                        if total - partial >= PROGRESS_BYTES and time.monotonic() >= last_progress + PROGRESS_SECONDS:
+                            partial = total
+                            last_progress = time.monotonic()
+                            self._publish_progress(result, buffers, limit, total)
                 if state == "running":
                     while proc.poll() is None and not self.cancelled.is_set() and time.monotonic() < deadline:
                         self.cancelled.wait(.1)
@@ -254,8 +343,16 @@ class ShellJobs:
                     elif proc.poll() is None: state = "timed_out"
                     else: state = "succeeded" if proc.returncode == 0 else "failed"
         except Exception as exc:
+            # `state` may already be "running" at this point. Leaving it there
+            # strands the row as running forever: the runner then reports
+            # shell_running on every tick, the heartbeat stays fresh and nothing
+            # alerts, and the only escape is a process restart. A job that raised
+            # did not run to completion, so record it as failed with a code.
+            state = "failed"
+            result["error_code"] = error_details(exc)["error_code"]
             buffers["stderr"] = bytearray(type(exc).__name__.encode())
         finally:
+            dropped = False
             if proc:
                 # Kill the process group even if the shell exited with background children.
                 try: os.killpg(proc.pid, signal.SIGKILL)
@@ -264,18 +361,33 @@ class ShellJobs:
                 proc.stdout.close()
                 proc.stderr.close()
             remaining = limit
-            for name, value in buffers.items():
-                text = value.decode("utf-8", errors="replace")
-                if self.secrets.unsafe(text):
-                    result[name] = "[output withheld: sensitive content]"
-                else:
-                    result[name] = bytes(value[:remaining]).decode("utf-8", errors="replace")
-                remaining = max(0, remaining - len(value))
+            try:
+                for name, value in buffers.items():
+                    text = value.decode("utf-8", errors="replace")
+                    if self.secrets.unsafe(text):
+                        result[name] = "[output withheld: sensitive content]"
+                    else:
+                        result[name] = bytes(value[:remaining]).decode("utf-8", errors="replace")
+                    remaining = max(0, remaining - len(value))
+            except Exception as exc:
+                # A failure while scrubbing output must not skip the status write,
+                # because the row is the only record of what happened to the job.
+                dropped = True
+                result["error_code"] = error_details(exc)["error_code"]
             result.update(status=state, exit_code=proc.returncode if proc else None,
-                          truncated=total > limit, total_bytes=total)
+                          # `total` only counts bytes we read. Breaking on the deadline
+                          # or a cancel leaves unread pipe data behind, so truncation
+                          # has to be reported from the exit path too or a reader is
+                          # told nothing was lost when it was.
+                          truncated=total > limit or dropped or state in {"timed_out", "cancelled"},
+                          total_bytes=total)
             self.store.finish(result)
 
     def stop(self):
         self.cancelled.set()
-        for worker in self.workers.values():
-            worker.join(timeout=2)
+        # A thread that was registered but never started (thread exhaustion in
+        # Thread.start) raises on join, which would abort the runner's shutdown and
+        # skip both finish_run and the lock close.
+        for worker in list(self.workers.values()):
+            if worker.is_alive():
+                worker.join(timeout=2)

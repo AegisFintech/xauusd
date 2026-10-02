@@ -5,14 +5,15 @@ from xauusd.paper_trading import (ACCEPTED, BAR_INTERVAL_SECONDS, DAILY_LOSS_LIM
                                   DEFAULT_MAX_MARKET_DATA_AGE_SECONDS, KILL_SWITCH, MARKET_CLOSED,
                                   MAX_POSITION, STALE_MARKET_DATA, InMemoryPaperTradingStore,
                                   PaperDecision, PaperRiskConfig, PaperTrading, market_data_age_seconds,
-                                  market_is_open, restart_policy)
+                                  market_is_open, observation_is_future, restart_policy)
 
 
 NOW = datetime(2026, 9, 17, 12, tzinfo=timezone.utc)
 
 
-def decision(identifier="d1", side="BUY", quantity=1.0, price=4000.0, age=0):
-    return PaperDecision(identifier, "XAUUSD", side, quantity, price, NOW - timedelta(seconds=age))
+def decision(identifier="d1", side="BUY", quantity=1.0, price=4000.0, age=0, at=None):
+    return PaperDecision(identifier, "XAUUSD", side, quantity, price,
+                         (at or NOW) - timedelta(seconds=age))
 
 
 def test_missing_state_defaults_to_stopped_and_requires_explicit_start():
@@ -26,7 +27,11 @@ def test_duplicate_decision_returns_persisted_outcome_without_second_fill():
     trading = PaperTrading(InMemoryPaperTradingStore()); trading.start("test")
     first = trading.evaluate(decision(), NOW)
     duplicate = trading.evaluate(decision(), NOW + timedelta(seconds=10))
-    assert first == duplicate
+    # Same verdict, same recorded outcome, but explicitly flagged as a replay so a
+    # consumer cannot mistake it for a fresh fill.
+    assert {k: v for k, v in duplicate.items() if k != "replayed"} == first
+    assert duplicate["replayed"] is True
+    assert "replayed" not in first
     assert len(trading.state()["ledger"]) == 1
 
 
@@ -48,6 +53,40 @@ def test_market_data_age_counts_from_bar_close_not_bar_open():
 def test_market_data_age_clamps_a_still_forming_bar_to_zero():
     assert market_data_age_seconds(NOW, NOW) == 0
     assert market_data_age_seconds(NOW + timedelta(seconds=30), NOW) == 0
+
+
+def test_observation_is_future_only_tolerates_one_bar_of_forming():
+    # A bar up to one interval ahead is still forming and legitimately has a
+    # close time in the future.
+    assert observation_is_future(NOW, NOW) is False
+    assert observation_is_future(NOW - timedelta(seconds=30), NOW) is False
+    # Beyond that it is a bad observation, not a forming one. The zero clamp in
+    # market_data_age_seconds would report it as age zero forever.
+    assert observation_is_future(NOW + timedelta(seconds=61), NOW) is True
+    assert observation_is_future(NOW + timedelta(days=10), NOW) is True
+
+
+def test_gate_refuses_a_future_dated_bar_instead_of_trusting_the_clamp():
+    """A far-future bar used to pass every freshness gate and supply the fill.
+
+    market_data_age_seconds clamps to zero, so a bar dated ten days ahead
+    reported age 0, satisfied any max_market_data_age_seconds, and provided the
+    fill price. The clamp is only honest for a forming bar.
+    """
+    config = PaperRiskConfig(daily_loss_limit=10, max_position=1, max_market_data_age_seconds=5)
+    trading = PaperTrading(InMemoryPaperTradingStore(), config); trading.start("test")
+
+    future = PaperDecision("future-bar", "XAUUSD", "BUY", 0.5, 4000.0,
+                           NOW + timedelta(days=10))
+    assert trading.evaluate(future, NOW)["reason"] == STALE_MARKET_DATA
+    assert trading.state()["ledger"] == []
+    assert trading.monitor(4000.0, NOW + timedelta(days=10), NOW)["status"] == "invalid_observation"
+
+
+def test_monitor_still_marks_a_forming_bar_and_rejects_a_future_one():
+    trading = PaperTrading(InMemoryPaperTradingStore()); trading.start("test")
+    assert trading.monitor(4000.0, NOW, NOW)["status"] == "ok"
+    assert trading.monitor(4000.0, NOW + timedelta(hours=2), NOW)["status"] == "invalid_observation"
 
 
 def test_default_gate_accepts_the_newest_closed_m1_bar():
@@ -179,6 +218,94 @@ def test_summary_reports_market_open():
     summary = trading.summary()
     assert "market_open" in summary
     assert summary["market_open"] == market_is_open(datetime.now(timezone.utc))
+
+
+def test_daily_loss_limit_is_not_reset_by_the_first_move_after_midnight():
+    """The first observation of a new day must not set its own loss baseline.
+
+    ``_mark`` used to set ``day_start_equity`` to the equity it had *already*
+    re-marked. The first observation of a new day therefore anchored that day at
+    its own post-move equity, so whatever move that observation carried was
+    forgiven: an adverse gap at the boundary, or the whole Friday-to-Sunday
+    reopen, reset the counter instead of counting against the new day. The
+    baseline is now the previous mark, taken before this observation is applied.
+    The day still rolls at UTC midnight.
+    """
+    config = PaperRiskConfig(daily_loss_limit=100, max_position=2, max_drawdown=0.5,
+                             max_market_data_age_seconds=180)
+    trading = PaperTrading(InMemoryPaperTradingStore(), config); trading.start("test")
+
+    # Open a long on day 1 at 4000 and leave the last day-1 mark at the entry,
+    # so equity is unchanged. One unit of XAUUSD: $1 of price is $1 of equity.
+    assert trading.evaluate(decision("open", quantity=1.0, price=4000.0), NOW)["reason"] == ACCEPTED
+    assert trading.state()["day"] == NOW.date().isoformat()
+    assert trading.state()["day_start_equity"] == pytest.approx(100_000.0)
+
+    # The very first observation of day 2 carries a $150 adverse move.
+    after_midnight = NOW.replace(hour=0, minute=1, day=NOW.day + 1)
+    probe = decision("post-boundary", quantity=0.01, price=3850.0, at=after_midnight)
+    assert trading.evaluate(probe, after_midnight)["reason"] == DAILY_LOSS_LIMIT
+    state = trading.state()
+    assert state["day"] == after_midnight.date().isoformat()
+    # The day is dated after the move, but the baseline is the pre-move mark.
+    assert state["day_start_equity"] == pytest.approx(100_000.0)
+    assert trading.summary()["day_pl"] == pytest.approx(-150.0)
+    # trades_today still resets on the date change; only the P&L baseline survives it.
+    assert state["trades_today"] == 0
+
+
+def test_daily_loss_limit_counts_the_weekend_reopen_gap():
+    """The same mechanism, with a weekend-sized move: the reopen gap is counted.
+
+    Friday 21:00 UTC close and Sunday 22:00 UTC reopen, one unit long from 4000.
+    """
+    config = PaperRiskConfig(daily_loss_limit=100, max_position=2, max_drawdown=0.5,
+                             max_market_data_age_seconds=180)
+    trading = PaperTrading(InMemoryPaperTradingStore(), config); trading.start("test")
+    friday = datetime(2026, 9, 18, 20, tzinfo=timezone.utc)
+    assert trading.evaluate(decision("open", quantity=1.0, price=4000.0, at=friday), friday)["reason"] == ACCEPTED
+
+    sunday = datetime(2026, 9, 20, 22, 5, tzinfo=timezone.utc)  # first reopen tick
+    assert market_is_open(sunday) is True
+    assert market_is_open(friday) is True
+    probe = decision("reopen-gap", quantity=0.01, price=3700.0, at=sunday)
+    assert trading.evaluate(probe, sunday)["reason"] == DAILY_LOSS_LIMIT
+    state = trading.state()
+    assert state["day_start_equity"] == pytest.approx(100_000.0)
+    assert trading.summary()["day_pl"] == pytest.approx(-300.0)
+
+
+def test_daily_loss_baseline_is_not_the_high_water_mark():
+    """The daily baseline is the day's opening mark, never the high-water mark.
+
+    Marking up raises high_water_equity. Falling back from that peak must still
+    measure the day loss against the day's open, otherwise a single intraday
+    spike silently forgives every point after it. ``day_pl`` in the summary is
+    the direct observable: measured from the peak it would read -120 here.
+    """
+    config = PaperRiskConfig(daily_loss_limit=25, max_position=2, max_drawdown=0.5,
+                             max_market_data_age_seconds=180)
+    trading = PaperTrading(InMemoryPaperTradingStore(), config); trading.start("test")
+    trading.evaluate(decision("open", quantity=1.0, price=4000.0), NOW)
+
+    up = NOW + timedelta(minutes=1)
+    assert trading.monitor(4100.0, up, up)["status"] == "ok"
+    state = trading.state()
+    assert state["high_water_equity"] == pytest.approx(100_100.0)
+    assert state["day_start_equity"] == pytest.approx(100_000.0)
+
+    down = NOW + timedelta(minutes=2)
+    assert trading.monitor(3980.0, down, down)["status"] == "ok"
+    state = trading.state()
+    assert state["day_start_equity"] == pytest.approx(100_000.0)
+    assert state["high_water_equity"] == pytest.approx(100_100.0)
+    # 96,000 cash + 1 unit x 3,980 mark = 99,980, so the day is down 20, not 120.
+    assert trading.summary()["day_pl"] == pytest.approx(-20.0)
+
+    # Past the limit the monitor persists the risk stop, as it always has.
+    further = NOW + timedelta(minutes=3)
+    assert trading.monitor(3970.0, further, further)["status"] == "stopped"
+    assert trading.state()["kill_switch_reason"] == "risk_limit"
 
 
 def test_maybe_resume_fresh_missing_state_auto_starts():

@@ -5,6 +5,7 @@ import time
 from urllib import request
 
 import pytest
+from fastapi.testclient import TestClient
 
 from xauusd.agent_loop import InMemoryAgentTranscriptStore
 from xauusd.agent_status import write_status
@@ -252,3 +253,185 @@ def test_health_surfaces_missing_research_progress(server, tmp_path, monkeypatch
     with request.urlopen(server + '/api/health') as response:
         data = json.load(response)
     assert any('3 cycles without updated research notes' in alert for alert in data['alerts'])
+
+
+def test_steps_response_is_bounded_by_a_byte_budget(paper_trading, monkeypatch):
+    """`limit` alone does not bound a response.
+
+    A shell-job step carries a captured stdout of up to the job's max_output_bytes
+    (1 MiB), so `limit=100` could serialise tens of megabytes. The endpoint now
+    stops at a byte budget and says so instead of silently serving a huge body.
+    """
+    import xauusd.agent_view as view
+
+    store = InMemoryAgentTranscriptStore()
+    store.initialize()
+    store.start_run("agent_big")
+    for index in range(10):
+        store.append("agent_big", 1, "tool_result", {"stdout": "x" * 300_000})
+
+    monkeypatch.setattr(view, "STEPS_BYTE_BUDGET", 700_000)
+    app = view.create_app(store, paper=paper_trading)
+    client = TestClient(app)
+    payload = client.get("/api/steps?run_id=agent_big&limit=100").json()
+
+    assert payload["truncated"] is True
+    assert payload["byte_budget"] == 700_000
+    assert payload["bytes"] <= 700_000
+    # Fewer rows than were stored, and at least the first one.
+    assert 1 <= payload["count"] < 10
+    # The unserved remainder is reachable by paging, not lost.
+    assert payload["steps"][-1]["id"] < 10
+
+
+def test_health_reports_degraded_when_the_state_store_is_unavailable(paper_trading, monkeypatch):
+    """The health endpoint is the observability surface; it must not raise.
+
+    An unhandled state-store exception returned HTTP 500, which reads as "the view
+    is broken" rather than "the account cannot be seen at all".
+    """
+    import xauusd.agent_view as view
+
+    class BrokenStore(InMemoryPaperTradingStore):
+        def state(self):
+            raise RuntimeError("store unreachable")
+
+    app = view.create_app(InMemoryAgentTranscriptStore(), paper=PaperTrading(BrokenStore()))
+    client = TestClient(app)
+    response = client.get("/api/health")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "degraded"
+    assert any("state store unavailable" in alert for alert in body["alerts"])
+
+
+def test_health_alerts_on_a_stale_or_dead_position_monitor(tmp_path, monkeypatch):
+    """The monitor's status string alone was never enough.
+
+    A monitor that died after one healthy cycle kept reporting {status: ok} with a
+    frozen timestamp, so no risk_limit stop was ever persisted and nothing alerted.
+    """
+    import xauusd.agent_view as view
+
+    store = InMemoryAgentTranscriptStore()
+    store.initialize()
+    store.start_run("agent_mon")
+    status_path = tmp_path / "agent_status.json"
+    stale = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    write_status({"run_id": "agent_mon", "status": "ok", "market_open": True,
+                  "monitor": {"status": "ok", "recorded_at": stale},
+                  "monitor_thread_alive": False}, str(status_path))
+    monkeypatch.setenv("AGENT_STATUS_FILE", str(status_path))
+
+    app = view.create_app(store, paper=PaperTrading(InMemoryPaperTradingStore()))
+    body = TestClient(app).get("/api/health").json()
+
+    assert body["status"] == "degraded"
+    assert any("position monitor stale" in alert for alert in body["alerts"])
+    assert any("monitor thread is not running" in alert for alert in body["alerts"])
+    assert body["monitor"]["age_seconds"] > view.MONITOR_STALE_SECONDS
+
+
+def test_health_surfaces_a_monitor_error(tmp_path, monkeypatch):
+    import xauusd.agent_view as view
+
+    store = InMemoryAgentTranscriptStore()
+    store.initialize()
+    status_path = tmp_path / "agent_status.json"
+    write_status({"run_id": "agent_m", "status": "ok", "market_open": True,
+                  "monitor": {"status": "ok",
+                              "recorded_at": datetime.now(timezone.utc).isoformat()},
+                  "monitor_error": "state_monitor_failed",
+                  "monitor_thread_alive": True}, str(status_path))
+    monkeypatch.setenv("AGENT_STATUS_FILE", str(status_path))
+
+    body = TestClient(view.create_app(store, paper=PaperTrading(InMemoryPaperTradingStore()))).get("/api/health").json()
+
+    assert body["monitor"]["error"] == "state_monitor_failed"
+    assert any("position monitor error" in alert for alert in body["alerts"])
+
+
+def _harness_client():
+    from fastapi.testclient import TestClient
+    import xauusd.agent_view as view
+    store = InMemoryAgentTranscriptStore()
+    store.initialize()
+    store.start_run("agent_h")
+    return TestClient(view.create_app(store, paper=PaperTrading(InMemoryPaperTradingStore())))
+
+
+def test_harness_page_renders_and_is_read_only():
+    client = _harness_client()
+    body = client.get("/harness").text
+    assert client.get("/harness").status_code == 200
+    # The panels the operator needs to watch the harness work.
+    for panel in ("Live log", "Thinking", "Deterministic engine", "Self-review",
+                  "Account and market", "Research memory"):
+        assert panel in body
+    # Read-only: a browser-reachable page must not be able to issue operator commands.
+    for verb in ("engine halt", "engine resume", "paper start", "paper stop", "bits-recover"):
+        assert verb not in body
+
+
+def test_harness_page_subscribes_to_the_event_stream():
+    body = _harness_client().get("/harness").text
+    assert "/api/stream" in body
+    assert "EventSource" in body
+    # An idle page must still say something rather than look frozen.
+    assert "keepalive" in body or "idle" in body
+
+
+def test_harness_endpoint_degrades_without_a_sqlite_store():
+    """A non-SQLite transcript store must not take the panel down."""
+    payload = _harness_client().get("/api/harness").json()
+    assert set(payload) == {"engine", "data_feed", "cycle", "working_notes",
+                            "research_progress", "heartbeat"}
+
+
+def test_harness_endpoint_reports_engine_feed_and_cycle(tmp_path, monkeypatch):
+    import xauusd.agent_view as view
+    (tmp_path / "engine.json").write_text(json.dumps({
+        "state": "running", "strategy": "confirmed_breakout", "quantity": 0.1,
+        "tick": 42, "decisions": 7, "consecutive_errors": 0, "halted_reason": None,
+        "last_decision": {"signal": "TRADE", "side": "BUY", "quantity": 0.1,
+                          "gate_reason": "ACCEPTED", "bar_utc": "2026-10-01T22:08:00+00:00"}}))
+    (tmp_path / "feed.json").write_text(json.dumps({
+        "state": "ok", "session": "open", "age_seconds": 12.0,
+        "last_bar_utc": "2026-10-01T22:08:00+00:00"}))
+    monkeypatch.setenv("ENGINE_STATUS_PATH", str(tmp_path / "engine.json"))
+    monkeypatch.setenv("DATA_FEED_STATUS_PATH", str(tmp_path / "feed.json"))
+
+    client = TestClient(view.create_app(InMemoryAgentTranscriptStore(),
+                                        paper=PaperTrading(InMemoryPaperTradingStore())))
+    payload = client.get("/api/harness").json()
+
+    assert payload["engine"]["tick"] == 42
+    assert payload["engine"]["last_decision"]["gate_reason"] == "ACCEPTED"
+    assert payload["data_feed"]["age_seconds"] == 12.0
+
+
+def test_job_endpoint_pages_a_shell_capture(tmp_path):
+    from xauusd.bits_jobs import BitsStore
+    from xauusd.local_state import SQLiteAgentTranscriptStore
+    store = BitsStore(SQLiteAgentTranscriptStore(str(tmp_path / "s.db")))
+    result, _ = store.claim("c", dict(id="one", type="shell",
+                                      args=dict(command="printf x", cwd="/tmp",
+                                                timeout_sec=2, max_output_bytes=1024)))
+    store.finish({**result, "status": "succeeded", "exit_code": 0, "stdout": "abcdefghij",
+                  "truncated": True})
+    from fastapi.testclient import TestClient
+    import xauusd.agent_view as view
+    client = TestClient(view.create_app(SQLiteAgentTranscriptStore(str(tmp_path / "s.db")),
+                                        paper=PaperTrading(InMemoryPaperTradingStore())))
+
+    page = client.get(f"/api/job?job_id={result['job_id']}&offset=2&limit=4").json()
+    assert page["text"] == "cdef"
+    assert page["next_offset"] == 6
+    assert page["stored_characters"] == 10
+    assert page["truncated"] is True
+
+    # An offset past the end is rejected rather than looking like end-of-output.
+    beyond = client.get(f"/api/job?job_id={result['job_id']}&offset=99").json()
+    assert beyond["status"] == "rejected"
+    assert beyond["error"]["code"] == "offset_out_of_range"

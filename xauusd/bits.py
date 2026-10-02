@@ -7,6 +7,7 @@ import json
 import math
 import os
 import re
+from typing import Any
 from urllib import request, error
 
 PROTOCOL = "xauusd/1"
@@ -15,6 +16,79 @@ REGIONS = {"us1": "datadoghq.com", "us3": "us3.datadoghq.com",
            "ap1": "ap1.datadoghq.com", "ap2": "ap2.datadoghq.com",
            "uk1": "uk1.datadoghq.com"}
 MAX_RESPONSE = 2_000_000
+# Bound on a single persisted agent message. The transcript applies its own
+# per-string cap; this stops one pathological turn from being read or stored whole.
+MAX_MESSAGE_CHARS = 8_000
+MAX_MESSAGES_PER_INSTANCE = 200
+MESSAGE_ROLES = ("user", "assistant", "tool", "system")
+
+
+def _text_of(value: Any) -> str:
+    """Flatten a message content value to plain text, whatever shape it arrives in.
+
+    Workflow outputs vary: a string, a content-block list, or a blocks object. A
+    shape we do not recognise yields an empty string rather than an exception,
+    because an unfamiliar message format must never fail a trading cycle.
+    """
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts = [_text_of(item) for item in value]
+        return "\n".join(part for part in parts if part)
+    if isinstance(value, dict):
+        for key in ("text", "content", "value", "output"):
+            if key in value:
+                return _text_of(value[key])
+        blocks = value.get("blocks") or value.get("content")
+        if blocks is not None:
+            return _text_of(blocks)
+    return ""
+
+
+def _collect_messages(node: Any, out: list[dict[str, str]], depth: int = 0) -> None:
+    """Walk a response fragment and pull out ``{role, content}`` records in order."""
+    if depth > 6 or len(out) >= MAX_MESSAGES_PER_INSTANCE:
+        return
+    if isinstance(node, list):
+        for item in node:
+            _collect_messages(item, out, depth + 1)
+        return
+    if not isinstance(node, dict):
+        return
+    role = node.get("role") or node.get("author") or node.get("speaker")
+    if isinstance(role, str) and role.lower() in MESSAGE_ROLES:
+        content = _text_of(node.get("content", node.get("text", node)))
+        content = content.strip()
+        if content:
+            out.append({"role": role.lower(),
+                        "content": content[:MAX_MESSAGE_CHARS]})
+        return
+    for key in ("messages", "conversation", "turns", "steps", "outputs", "details",
+                "instanceStatus", "output", "results", "toolCalls", "tool_calls"):
+        if key in node:
+            _collect_messages(node[key], out, depth + 1)
+
+
+def agent_messages(attributes: Any) -> list[dict[str, str]]:
+    """Extract the intermediate agent message stream from a workflow response.
+
+    Empty when the workflow publishes only a terminal output, which is the current
+    deployed configuration. See ``docs/operator-runbook-engine.md``: publishing the
+    message stream is what makes the live thinking panel show real reasoning
+    instead of a ~200-character summary.
+    """
+    if not isinstance(attributes, dict):
+        return []
+    out: list[dict[str, str]] = []
+    _collect_messages(attributes, out)
+    return out
+
+
+def message_fingerprint(messages: list[dict[str, str]]) -> str:
+    """Stable digest of a message stream, used to persist each turn exactly once."""
+    import hashlib
+    payload = json.dumps(messages, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()[:16]
 
 
 SAFE_CODE = re.compile(r"[a-z][a-z0-9_]{0,63}")
@@ -79,6 +153,11 @@ def validate_envelope(raw, cycle_id, message_id):
     obj = strict_json(raw)
     fields = {"protocol", "cycle_id", "reply_to", "status", "summary", "actions",
               "next_review_at", "blocker"}
+    # `interrogation` is optional and additive: a workflow published against the
+    # previous contract still validates, and one that publishes self-questioning
+    # gets it validated rather than accepted unchecked.
+    if isinstance(obj, dict) and "interrogation" in obj:
+        fields = fields | {"interrogation"}
     if not isinstance(obj, dict) or set(obj) != fields:
         raise BitsError("invalid envelope fields", "invalid_envelope_fields")
     if obj["protocol"] != PROTOCOL or obj["cycle_id"] != cycle_id or obj["reply_to"] != message_id:
@@ -105,7 +184,57 @@ def validate_envelope(raw, cycle_id, message_id):
                 raise ValueError()
         except (TypeError, AttributeError, ValueError):
             raise BitsError("review time must be UTC ISO 8601", "invalid_review_time") from None
+    if "interrogation" in obj:
+        obj["interrogation"] = validate_interrogation(obj["interrogation"])
     return obj
+
+
+MAX_INTERROGATION = 12
+MAX_QUESTION_CHARS = 400
+MAX_ANSWER_CHARS = 1200
+MAX_EVIDENCE = 8
+MAX_EVIDENCE_CHARS = 300
+
+
+def validate_interrogation(raw: Any) -> list[dict[str, Any]]:
+    """Validate the agent's self-questioning about its own decision.
+
+    This is the bot asking itself questions and answering them, made durable and
+    visible. It is *not* an operator inbox and nothing waits on a human reply.
+
+    Every field is bounded: the stream is rendered on the live view and persisted
+    to the transcript, so an unbounded answer would be a storage and page-size
+    problem, not just a display one. Order is preserved because the sequence is
+    the reasoning.
+    """
+    if not isinstance(raw, list) or len(raw) > MAX_INTERROGATION:
+        raise BitsError("interrogation must be a list of at most "
+                        f"{MAX_INTERROGATION} questions", "invalid_interrogation")
+    pairs: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict) or set(item) - {"question", "answer", "evidence"} \
+                or not {"question", "answer"} <= set(item):
+            raise BitsError("interrogation entries need a question and an answer",
+                            "invalid_interrogation")
+        question, answer = item["question"], item["answer"]
+        for value, limit, label in ((question, MAX_QUESTION_CHARS, "question"),
+                                    (answer, MAX_ANSWER_CHARS, "answer")):
+            if not isinstance(value, str) or not value.strip() or len(value) > limit:
+                raise BitsError(f"interrogation {label} must be a non-empty string within "
+                                f"{limit} characters", "invalid_interrogation")
+        evidence = item.get("evidence", [])
+        if not isinstance(evidence, list) or len(evidence) > MAX_EVIDENCE:
+            raise BitsError("interrogation evidence must be a bounded list",
+                            "invalid_interrogation")
+        clean_evidence: list[str] = []
+        for reference in evidence:
+            if not isinstance(reference, str) or not reference.strip() or len(reference) > MAX_EVIDENCE_CHARS:
+                raise BitsError("interrogation evidence entries must be short non-empty strings",
+                                "invalid_interrogation")
+            clean_evidence.append(reference)
+        pairs.append({"question": question.strip(), "answer": answer.strip(),
+                      "evidence": clean_evidence})
+    return pairs
 
 
 def validate_shell_action(action):
@@ -207,10 +336,30 @@ class BitsClient:
             state = attrs["instanceStatus"]["detailsKind"]
         except (KeyError, TypeError):
             raise BitsError("invalid workflow result", "invalid_workflow_result") from None
+        messages = agent_messages(attrs)
         if state in ("IN_PROGRESS", "RUNNING", "PENDING", "QUEUED"):
-            return None
+            # Intermediate turns are returned to the caller while the instance is
+            # still running, so the live view can show the agent thinking instead of
+            # freezing for the length of a model round trip.
+            return None, messages
         if state != "SUCCEEDED":
             # The terminal state is a Datadog enum (for example FAILED or CANCELLED).
             kind = state.lower() if isinstance(state, str) and re.fullmatch(r"[A-Z_]{1,32}", state) else "unknown"
             raise BitsError("workflow did not succeed", "workflow_" + kind)
-        return validate_envelope(attrs.get("outputs", {}).get("output"), cycle_id, message_id)
+        return validate_envelope(attrs.get("outputs", {}).get("output"), cycle_id, message_id), messages
+
+    def instance_messages(self, instance):
+        """Intermediate agent turns for an instance, as ``{role, content}`` records.
+
+        Returns an empty list when the workflow does not publish a message stream,
+        which is a supported configuration: the reasoning panel degrades to the
+        terminal summary rather than failing the cycle.
+        """
+        if not re.fullmatch(r"[A-Za-z0-9-]{1,128}", instance or ""):
+            return []
+        try:
+            data = self._request("/instances/" + instance)
+        except BitsError:
+            return []
+        attrs = data.get("data", {}).get("attributes")
+        return agent_messages(attrs) if isinstance(attrs, dict) else []

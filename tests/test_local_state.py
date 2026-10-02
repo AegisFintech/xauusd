@@ -1,10 +1,12 @@
 from datetime import datetime, timedelta, timezone
+import json
 
 import pytest
 
 from xauusd.agent_loop import agent_transcript_store_from_env
 from xauusd.local_state import SQLiteAgentTranscriptStore, SQLitePaperTradingStore
-from xauusd.paper_trading import ACCEPTED, KILL_SWITCH, PaperDecision, PaperRiskConfig, PaperTrading, paper_from_env
+from xauusd.paper_trading import (ACCEPTED, KILL_SWITCH, PaperDecision, PaperRiskConfig, PaperTrading,
+                                  paper_from_env, restart_policy)
 
 NOW = datetime(2026, 9, 17, 12, tzinfo=timezone.utc)
 
@@ -23,7 +25,10 @@ def test_sqlite_paper_store_persists_state_and_decision_idempotency(tmp_path):
 
     reopened = PaperTrading(SQLitePaperTradingStore(db_path=path), PaperRiskConfig(max_market_data_age_seconds=120))
     duplicate = reopened.evaluate(decision("a1"), NOW + timedelta(seconds=10))
-    assert duplicate == first
+    # Idempotent across a restart, and still identifiable as a replay.
+    assert duplicate["accepted"] is first["accepted"]
+    assert duplicate["position"] == first["position"]
+    assert duplicate["replayed"] is True
     assert reopened.state()["position"] == pytest.approx(1.0)
     assert len(reopened.state()["ledger"]) == 1
     assert reopened.state()["stopped"] is False
@@ -55,6 +60,84 @@ def test_sqlite_paper_store_corrupt_state_fails_closed(tmp_path):
     trading = PaperTrading(SQLitePaperTradingStore(db_path=path))
     assert trading.state()["kill_switch_reason"] == "corrupt_state"
     assert trading.evaluate(decision(), NOW)["reason"] == KILL_SWITCH
+
+
+def test_sqlite_paper_store_rejects_valid_json_with_missing_keys(tmp_path):
+    """A row that parses but cannot be evaluated is corruption, not an account.
+
+    Before this was enforced, such a row was trusted: every gate raised KeyError
+    instead of returning a reason, the monitor raised instead of marking a stop,
+    and restart_policy read the absent evidence as a fresh account and cleared
+    the kill switch.
+    """
+    import sqlite3
+    path = str(tmp_path / "paper.db")
+    SQLitePaperTradingStore(db_path=path).state()
+    connection = sqlite3.connect(path)
+    connection.execute("UPDATE paper_trading_state SET state_json=? WHERE state_key='primary'",
+                       (json.dumps({"stopped": False, "kill_switch_reason": "missing_state"}),))
+    connection.commit()
+    connection.close()
+
+    trading = PaperTrading(SQLitePaperTradingStore(db_path=path))
+    state = trading.state()
+    assert state["kill_switch_reason"] == "corrupt_state"
+    assert state["stopped"] is True
+    assert trading.evaluate(decision(), NOW)["reason"] == KILL_SWITCH
+    # An unreadable state must never be classified as resumable.
+    assert restart_policy(state) == "refuse"
+    assert trading.maybe_resume("agent restart")["resumed"] is False
+
+
+@pytest.mark.parametrize("state_json", [
+    json.dumps({"stopped": "false", "cash": 1.0, "position": 0.0, "average_entry_price": 0.0,
+                "mark_price": 1.0, "high_water_equity": 1.0, "day": None, "day_start_equity": 1.0,
+                "trades_today": 0, "ledger": [], "kill_switch_reason": "missing_state"}),
+    json.dumps({"stopped": True, "cash": "lots", "position": 0.0, "average_entry_price": 0.0,
+                "mark_price": 1.0, "high_water_equity": 1.0, "day": None, "day_start_equity": 1.0,
+                "trades_today": 0, "ledger": [], "kill_switch_reason": "missing_state"}),
+    json.dumps({"stopped": True, "cash": 1.0, "position": 0.0, "average_entry_price": 0.0,
+                "mark_price": 1.0, "high_water_equity": 1.0, "day": None, "day_start_equity": 1.0,
+                "trades_today": 0, "ledger": {}, "kill_switch_reason": "missing_state"}),
+    json.dumps([1, 2, 3]),
+    json.dumps({"stopped": True, "cash": 1e999, "position": 0.0, "average_entry_price": 0.0,
+                "mark_price": 1.0, "high_water_equity": 1.0, "day": None, "day_start_equity": 1.0,
+                "trades_today": 0, "ledger": [], "kill_switch_reason": "missing_state"}),
+])
+def test_sqlite_paper_store_rejects_mistyped_fields(tmp_path, state_json):
+    import sqlite3
+    path = str(tmp_path / "paper.db")
+    SQLitePaperTradingStore(db_path=path).state()
+    connection = sqlite3.connect(path)
+    connection.execute("UPDATE paper_trading_state SET state_json=? WHERE state_key='primary'", (state_json,))
+    connection.commit()
+    connection.close()
+
+    trading = PaperTrading(SQLitePaperTradingStore(db_path=path))
+    assert trading.state()["kill_switch_reason"] == "corrupt_state"
+    assert trading.state()["stopped"] is True
+    # summary() must stay renderable: a corruption report is useless if the
+    # health endpoint raises instead of reporting it.
+    assert trading.summary()["kill_switch_reason"] == "corrupt_state"
+
+
+def test_sqlite_paper_store_keeps_a_valid_state_untouched(tmp_path):
+    """Validation must not reject a real account, including a running one."""
+    import sqlite3
+    path = str(tmp_path / "paper.db")
+    trading = PaperTrading(SQLitePaperTradingStore(db_path=path))
+    trading.start("operator")
+    trading.evaluate(decision("fill-1"), NOW)
+    before = trading.state()
+    assert before["stopped"] is False
+
+    reopened = PaperTrading(SQLitePaperTradingStore(db_path=path))
+    after = reopened.state()
+    assert after["stopped"] is False
+    assert after["kill_switch_reason"] == "operator"
+    assert after["position"] == pytest.approx(1.0)
+    assert len(after["ledger"]) == 1
+    assert after["kill_switch_reason"] != "corrupt_state"
 
 
 def test_sqlite_transcript_store_round_trips_steps_and_runs(tmp_path):
@@ -136,3 +219,89 @@ def test_sqlite_transcript_reconciles_running_orphans(tmp_path):
     assert store.run_status("run-current") == "running"
     store.finish_run("run-current", "stopped")
     assert store.reconcile_running_runs() == 0
+
+def test_transcript_prune_bounds_growth_but_keeps_recent_runs(tmp_path):
+    """The transcript had no DELETE anywhere and gained a row per heartbeat.
+
+    14,350 rows and 5.4 MB accumulated in two days, 1.9 MB of it pure per-tick
+    noise. Retention keeps recent runs whole and trims the oldest steps.
+    """
+    store = SQLiteAgentTranscriptStore(str(tmp_path / "state.db"))
+    for index in range(6):
+        run = f"agent_{index}"
+        store.start_run(run)
+        for tick in range(10):
+            store.append(run, tick, "tick_start", {"tick": tick})
+        store.finish_run(run, "stopped")
+
+    before = len(store.steps(limit=1000))
+    assert before == 60
+
+    removed = store.prune(keep_runs=2, keep_steps=1000)
+
+    assert removed["runs_removed"] == 40
+    assert len(store.steps(limit=1000)) == 20
+    # The run history itself is never deleted, so `runs()` still reports all six.
+    assert len(store.runs(limit=10)) == 6
+    kept = {row["run_id"] for row in store.steps(limit=1000)}
+    assert kept == {"agent_4", "agent_5"}
+
+
+def test_transcript_prune_trims_the_oldest_steps_within_kept_runs(tmp_path):
+    store = SQLiteAgentTranscriptStore(str(tmp_path / "state.db"))
+    store.start_run("agent_only")
+    for tick in range(50):
+        store.append("agent_only", tick, "tick_start", {"tick": tick})
+
+    removed = store.prune(keep_runs=5, keep_steps=10)
+
+    assert removed["steps_removed"] == 40
+    remaining = store.steps(limit=100)
+    assert len(remaining) == 10
+    # The newest steps are the ones kept.
+    assert [row["content"]["tick"] for row in remaining] == list(range(40, 50))
+
+
+def test_transcript_prune_is_a_no_op_below_the_threshold(tmp_path):
+    store = SQLiteAgentTranscriptStore(str(tmp_path / "state.db"))
+    store.start_run("agent_small")
+    store.append("agent_small", 1, "tick_start", {"tick": 1})
+
+    assert store.prune(keep_runs=5, keep_steps=100)["steps_removed"] == 0
+    assert len(store.steps(limit=10)) == 1
+
+
+def test_transcript_prune_protects_rows_a_view_is_still_paging(tmp_path):
+    """Pruning must not delete content a connected reader has not displayed yet.
+
+    The live view pages by an `after`/`before` cursor. If a process start prunes
+    the rows between the cursor and the newest, the view silently skips them.
+    """
+    store = SQLiteAgentTranscriptStore(str(tmp_path / "state.db"))
+    for index in range(6):
+        run = f"agent_{index}"
+        store.start_run(run)
+        for tick in range(10):
+            store.append(run, tick, "tick_start", {"tick": tick})
+        store.finish_run(run, "stopped")
+
+    # The view has served up to id 25 and is asking for older steps.
+    cursor = 25
+    unconstrained = store.prune(keep_runs=2, keep_steps=1000)
+    assert unconstrained["runs_removed"] == 40
+
+    store2 = SQLiteAgentTranscriptStore(str(tmp_path / "state2.db"))
+    for index in range(6):
+        run = f"agent_{index}"
+        store2.start_run(run)
+        for tick in range(10):
+            store2.append(run, tick, "tick_start", {"tick": tick})
+        store2.finish_run(run, "stopped")
+
+    protected = store2.prune(keep_runs=2, keep_steps=1000, preserve_below_id=cursor)
+    # Rows at or below the cursor survive; only the ones the view has already
+    # rendered are reclaimed. Old runs span ids 1-40, so ids 26-40 go.
+    assert protected["runs_removed"] == 15
+    assert store2.steps(after_id=0, limit=200)[0]["id"] == 1
+    surviving = [row["id"] for row in store2.steps(after_id=0, limit=200)]
+    assert all(row_id <= cursor or row_id > 40 for row_id in surviving)

@@ -11,9 +11,34 @@ def test_demo_host_is_the_only_allowed_host():
     assert DEMO_HOST == "demo.ctraderapi.com"
 
 
-def test_demo_accounts_filters_live_and_missing_flag():
+def test_demo_accounts_keeps_only_accounts_the_broker_classified_as_demo():
+    """An unclassified account is not a demo account.
+
+    ``isLive`` is a proto3 optional field, so an account whose live/demo status
+    the broker never sent reads back as ``False`` and the old ``True`` default
+    was never consulted. Unknown type used to be admitted, and account type is
+    the only thing separating this code from a live account.
+    """
     accounts = demo_accounts([account(1, True), account(2, False), account(3, None)])
-    assert [a.ctidTraderAccountId for a in accounts] == [2, 3]
+    assert [a.ctidTraderAccountId for a in accounts] == [2]
+
+
+def test_demo_accounts_excludes_a_dict_without_the_flag():
+    assert demo_accounts([{"ctidTraderAccountId": 5}]) == []
+    assert demo_accounts([{"ctidTraderAccountId": 5, "isLive": None}]) == []
+    assert demo_accounts([{"ctidTraderAccountId": 5, "isLive": False}]) == [{"ctidTraderAccountId": 5, "isLive": False}]
+
+
+def test_demo_accounts_reads_explicit_presence_on_a_real_protobuf_account():
+    """The discriminator has to work on the actual SDK message, not just dicts."""
+    from ctrader_open_api.messages.OpenApiModelMessages_pb2 import ProtoOACtidTraderAccount
+
+    unclassified = ProtoOACtidTraderAccount(ctidTraderAccountId=1)
+    demo = ProtoOACtidTraderAccount(ctidTraderAccountId=2, isLive=False)
+    live = ProtoOACtidTraderAccount(ctidTraderAccountId=3, isLive=True)
+
+    assert unclassified.HasField("isLive") is False
+    assert [a.ctidTraderAccountId for a in demo_accounts([unclassified, demo, live])] == [2]
 
 
 def test_demo_accounts_empty_when_all_live():
