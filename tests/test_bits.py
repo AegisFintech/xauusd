@@ -103,3 +103,53 @@ def test_http_and_workflow_failures_are_classified(monkeypatch):
     with pytest.raises(BitsError) as caught:
         client.poll("instance", "cycle", "message")
     assert caught.value.code == "workflow_cancelled"
+
+
+def interrogation(**changes):
+    item = {"question": "Does the rise justify an entry?",
+            "answer": "No. Descriptive only; the family failed cost-aware validation.",
+            "evidence": ["reports/research/momentum_result_20260928T2026Z.json"]}
+    item.update(changes)
+    return item
+
+
+def test_interrogation_is_durable_and_optional():
+    for raw in (None, [], [interrogation()]):
+        obj = envelope() if raw is None else envelope(interrogation=raw)
+        assert validate_envelope(json.dumps(obj), "cycle", "message") == obj
+    # Optional and additive: a workflow published against the previous contract validates.
+    assert validate_envelope(json.dumps(envelope()), "cycle", "message") == envelope()
+
+
+def test_bare_string_evidence_is_one_reference():
+    # The deployed workflow emits a bare string, which is a single reference.
+    raw = [interrogation(evidence="Current context shows five recent closes.")]
+    obj = validate_envelope(json.dumps(envelope(interrogation=raw)), "cycle", "message")
+    assert obj["interrogation"][0]["evidence"] == ["Current context shows five recent closes."]
+    # The storage bound is unchanged by the coercion.
+    assert validate_envelope(json.dumps(envelope(interrogation=[interrogation(evidence="a" * 300)])),
+                             "cycle", "message")["interrogation"][0]["evidence"] == ["a" * 300]
+    for evidence in ("a" * 301, "", " ", {"ref": 1}, ["a" * 301, "b", ""], ["x"] * 9, 1, None):
+        with pytest.raises(BitsError) as caught:
+            validate_envelope(json.dumps(envelope(interrogation=[interrogation(evidence=evidence)])),
+                              "cycle", "message")
+        assert caught.value.code == "invalid_interrogation"
+
+
+@pytest.mark.parametrize("item", [interrogation(question=""), interrogation(answer="a" * 1201), interrogation(extra=1),
+    interrogation(answer=None), "not a pair"])
+def test_refuses_invalid_interrogation(item):
+    with pytest.raises(BitsError) as caught:
+        validate_envelope(json.dumps(envelope(interrogation=[item])), "cycle", "message")
+    assert caught.value.code == "invalid_interrogation"
+
+
+def test_interrogation_stream_stays_bounded():
+    stream = [interrogation() for _ in range(12)]
+    assert len(validate_envelope(json.dumps(envelope(interrogation=stream)),
+                                 "cycle", "message")["interrogation"]) == 12
+    with pytest.raises(BitsError):
+        validate_envelope(json.dumps(envelope(interrogation=stream + [interrogation()])),
+                          "cycle", "message")
+    with pytest.raises(BitsError):
+        validate_envelope(json.dumps(envelope(interrogation=interrogation())), "cycle", "message")

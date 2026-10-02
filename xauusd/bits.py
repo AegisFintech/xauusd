@@ -205,7 +205,9 @@ def validate_interrogation(raw: Any) -> list[dict[str, Any]]:
     Every field is bounded: the stream is rendered on the live view and persisted
     to the transcript, so an unbounded answer would be a storage and page-size
     problem, not just a display one. Order is preserved because the sequence is
-    the reasoning.
+    the reasoning. A bare string in ``evidence`` is accepted as one reference: the
+    deployed workflow emits that shape, and rejecting it would discard an otherwise
+    valid decision over a self-review field rather than over anything about risk.
     """
     if not isinstance(raw, list) or len(raw) > MAX_INTERROGATION:
         raise BitsError("interrogation must be a list of at most "
@@ -223,6 +225,8 @@ def validate_interrogation(raw: Any) -> list[dict[str, Any]]:
                 raise BitsError(f"interrogation {label} must be a non-empty string within "
                                 f"{limit} characters", "invalid_interrogation")
         evidence = item.get("evidence", [])
+        if isinstance(evidence, str):
+            evidence = [evidence]
         if not isinstance(evidence, list) or len(evidence) > MAX_EVIDENCE:
             raise BitsError("interrogation evidence must be a bounded list",
                             "invalid_interrogation")
