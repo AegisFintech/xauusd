@@ -11,6 +11,7 @@ import sys
 import tempfile
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from .ctrader_auth import DEMO_HOST
@@ -112,6 +113,21 @@ class HistoricalDataStore:
     def read(self) -> pd.DataFrame:
         if not self.path.exists(): raise FileNotFoundError(self.path)
         return pd.read_parquet(self.path)
+    def positions(self, bars: pd.DataFrame, required) -> "np.ndarray":
+        """Resolve a whole batch of bar timestamps to row positions in one pass.
+
+        `DatetimeIndex.get_indexer` rebuilds a hash table over every row on each
+        call, so a per-anchor lookup loop over a multi-million row M1 frame costs
+        minutes and overruns the Bits shell job ceiling. This is `O((n + m) log n)`
+        and returns exactly what `get_indexer` returns, `-1` for a missing bar.
+        """
+        index=bars.index
+        if not index.is_monotonic_increasing: raise ValueError("bar index must be sorted ascending")
+        if index.has_duplicates: raise ValueError("bar index must be unique")
+        required=pd.DatetimeIndex(required)
+        left=index.searchsorted(required, side="left")
+        right=index.searchsorted(required, side="right")
+        return np.where(left<right, left, -1)
 
 class CTraderHistoricalAdapter:
     """Import cTrader CSV exports into the normalized historical store."""

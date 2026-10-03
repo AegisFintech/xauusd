@@ -171,6 +171,11 @@ def data_access(cwd: str) -> dict:
             "timeframe": store.config.timeframe, "index": "timestamp (UTC, bar open time)", "columns": list(REQUIRED),
             "read_example": python + " -c \"from xauusd.data import HistoricalDataStore as S; s=S(); "
                                      "bars=s.normalize(s.read()); print(bars.tail(3))\"",
+            "window_lookup": "xauusd.data.HistoricalDataStore.positions(bars, required): resolve a whole batch "
+                             "of bar timestamps to row positions in one pass, -1 for a missing bar. Use this "
+                             "for any per-anchor or per-event window sweep: Index.get_indexer rebuilds a hash "
+                             "table per call, so a lookup inside the loop over a multi-million row M1 frame "
+                             "runs for tens of minutes and overruns the 1200s shell ceiling",
             "backtester": "xauusd.engine.EventDrivenBacktester",
             "market_session": "xauusd.paper_trading.market_is_open (New York session; the UTC break "
                               "moves with US daylight time)",
@@ -356,7 +361,8 @@ def prompt_view(manifest: dict) -> dict:
         return view
     tools = {name: tool_view(tool) for name, tool in (manifest.get("tools") or {}).items()}
     ops = {key: value for key, value in (manifest.get("operations") or {}).items() if not key.startswith("notes_")}
-    data = {key: manifest["data"][key] for key in ("entry_point", "state", "path", "exists", "index", "read_example")
+    data = {key: manifest["data"][key] for key in ("entry_point", "state", "path", "exists", "index", "read_example",
+                                                   "window_lookup")
             if key in (manifest.get("data") or {})}
     entries = manifest["path"]["entries"]
     status = manifest.get("status") if manifest.get("status") in ("ok", "partial", "failed") else "unknown"

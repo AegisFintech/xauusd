@@ -175,3 +175,55 @@ def test_download_without_refresh_token_raises_instead_of_retrying(monkeypatch,t
  with pytest.raises(CTraderAuthError):
   downloader.download("2026-09-01","2026-09-02")
  assert calls["n"]==1
+
+
+def frame(periods=200):
+    idx = pd.date_range("2024-01-01", periods=periods, freq="min", tz="UTC")
+    return pd.DataFrame({"open": range(periods), "high": range(periods), "low": range(periods),
+                         "close": range(periods), "volume": range(periods)}, index=idx)
+
+
+def test_positions_matches_get_indexer():
+    store = HistoricalDataStore()
+    bars = frame()
+    required = pd.date_range("2024-01-01 00:00:20", "2024-01-01 00:04:00", freq="10s", tz="UTC")
+    assert list(store.positions(bars, required)) == list(bars.index.get_indexer(required))
+    # A gap and a bar outside the frame are missing, exactly as get_indexer reports.
+    missing = pd.DatetimeIndex(["2023-12-31 23:59:00", "2024-01-01 00:00:30",
+                                "2024-01-01 00:00:45", "2024-01-01 00:00:00", "2024-01-01 09:00:00"], tz="UTC")
+    assert list(store.positions(bars, missing)) == [-1, -1, -1, 0, -1]
+    assert list(store.positions(bars, bars.index)) == list(range(len(bars)))
+    assert list(store.positions(bars, pd.DatetimeIndex([], tz="UTC"))) == []
+
+
+def test_positions_requires_a_sorted_unique_index():
+    store = HistoricalDataStore()
+    bars = frame(5)
+    with pytest.raises(ValueError, match="sorted"):
+        store.positions(bars.iloc[::-1], pd.DatetimeIndex(["2024-01-01"], tz="UTC"))
+    with pytest.raises(ValueError, match="unique"):
+        store.positions(bars.iloc[[0, 1, 2, 2, 3, 4]], pd.DatetimeIndex(["2024-01-01"], tz="UTC"))
+
+
+def test_positions_resolves_an_anchor_sweep_in_one_pass(monkeypatch):
+    # A per-anchor get_indexer loop over an M1 frame builds a hash table per call and
+    # overran the 1200s shell ceiling twice, tripping a recovery stop each time. A
+    # whole anchor sweep must resolve in a fixed number of passes, so the cost cannot
+    # grow with the number of anchors the way the timed-out job's did.
+    store = HistoricalDataStore()
+    bars = frame(200_000)
+    calls = []
+    original = pd.DatetimeIndex.searchsorted
+
+    def counted(self, values, *args, **kwargs):
+        calls.append(len(values))
+        return original(self, values, *args, **kwargs)
+
+    monkeypatch.setattr(pd.DatetimeIndex, "searchsorted", counted)
+    for anchors in (2, 50, 500):
+        calls.clear()
+        batch = pd.date_range(bars.index[0], periods=anchors * 60, freq="min", tz="UTC")
+        positions = store.positions(bars, batch)
+        assert (positions >= 0).all() and len(positions) == anchors * 60
+        # Two passes over the batch regardless of how many anchors it covers.
+        assert len(calls) == 2 and sum(calls) == 2 * len(batch)

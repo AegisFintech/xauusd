@@ -280,3 +280,14 @@ def test_a_repaired_tool_clears_the_observed_missing_alert(tmp_path, monkeypatch
     assert after['tools']['rg']['state'] == 'available' and after['observed_missing'][0]['now_available']
     assert heartbeat_view(after)['observed_missing'] == [] and bits_alerts({'capabilities': heartbeat_view(after)}) == []
     assert prompt_view(after)['observed_missing'] == []
+
+
+def test_stored_manifest_publishes_the_batched_window_lookup(tmp_path):
+    # A per-anchor Index.get_indexer loop overran the 1200s shell ceiling twice and
+    # tripped a recovery stop each time. The agent only writes a fast script if the
+    # manifest it reads names the batched helper, so the key has to survive the
+    # prompt projection as well as the generated manifest.
+    manifest = build_manifest(cwd=str(tmp_path))
+    assert "HistoricalDataStore.positions" in manifest["data"]["window_lookup"]
+    assert "HistoricalDataStore.positions" in prompt_view(manifest)["data"]["window_lookup"]
+    assert "1200s" in prompt_view(manifest)["data"]["window_lookup"]
