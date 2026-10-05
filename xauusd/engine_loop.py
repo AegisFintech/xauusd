@@ -203,13 +203,25 @@ class PaperTradingEngine:
 
     @property
     def halted(self) -> bool:
-        if self.halted_reason:
-            return True
+        """Whether a durable halt is in force, re-read from the store every tick.
+
+        The store is the source of truth, not this instance's field. Caching the
+        reason meant a halt was latched in memory: `engine resume` cleared the
+        key, and the running service kept reporting halted until someone
+        restarted it, so the documented supervisor control path did nothing at
+        all. A local store read once per closed bar is not worth a control that
+        silently fails.
+        """
         stored = self.store.get(HALT_STATE_KEY)
+        reason = None
         if isinstance(stored, dict) and stored.get("reason"):
-            self.halted_reason = str(stored["reason"])
-            return True
-        return False
+            reason = str(stored["reason"])
+        if reason != self.halted_reason:
+            self.halted_reason = reason
+            if reason is None:
+                self.consecutive_errors = 0
+                self._write_status("resumed")
+        return self.halted_reason is not None
 
     def stop(self) -> None:
         self._stop.set()

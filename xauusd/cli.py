@@ -417,8 +417,18 @@ def engine_controller(action: str, reason: str|None=None) -> dict:
  import json as _json
  from pathlib import Path
  if action=="status":
-  engine=_build_engine()
-  return engine.status()
+  # Report the engine that is actually running. Building a fresh engine here and
+  # calling status() on it reported `running` with tick 0 for a service that was
+  # halted and ticking, because the new instance had no run history. The path is
+  # read from config, not from a constructed engine, so a read-only status check
+  # does not need broker credentials.
+  from pathlib import Path as _Path
+  from .engine_loop import EngineConfig as _EngineConfig
+  live=_Path(_EngineConfig.from_env().status_path)
+  if live.is_file():
+   try: return json.loads(live.read_text())
+   except ValueError: pass
+  return _build_engine().status()
  if action in ("halt","resume"):
   if not (reason or "").strip(): raise ValueError(f"engine {action} requires --reason")
   engine=_build_engine()

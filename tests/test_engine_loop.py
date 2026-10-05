@@ -317,3 +317,53 @@ def test_run_forever_is_bounded_by_iterations():
 
     assert result["tick"] == 3
     assert len([s for s in transcript.steps(engine.run_id) if s["phase"] == "engine_signal"]) == 3
+
+
+def test_resume_takes_effect_on_a_running_engine_without_a_restart():
+    # The halt reason was cached in memory, so `engine resume` from the CLI cleared
+    # the key while the service kept reporting halted and ticking to no purpose.
+    # The store is the source of truth and has to be re-read every tick.
+    store = Store()
+    engine, paper, _ = build(store=store)
+    engine.halt("operator: no validated edge")
+    assert engine.evaluate_once()["status"] == "halted"
+
+    # A separate process resumes it: the running engine sees only the store.
+    PaperTradingEngine(paper, PaperToCTraderDemoCoordinator(paper, paper_only=True),
+                       Source(), Signals(), store, InMemoryAgentTranscriptStore(),
+                       EngineConfig(), now_provider=lambda: NOW).resume("operator: run it in paper")
+
+    outcome = engine.evaluate_once()
+    assert outcome["status"] != "halted", "the running engine stayed halted after a resume"
+    # It reached the gates and acted, which is the point: previously it ticked
+    # 2,265 times returning "halted" and proposed nothing.
+    assert paper.state()["ledger"], "a resumed engine should have proposed through the gates"
+
+
+def test_a_halt_from_another_process_still_stops_a_running_engine():
+    store = Store()
+    engine, paper, _ = build(store=store)
+    engine.evaluate_once()
+    PaperTradingEngine(paper, PaperToCTraderDemoCoordinator(paper, paper_only=True),
+                       Source(), Signals(), store, InMemoryAgentTranscriptStore(),
+                       EngineConfig(), now_provider=lambda: NOW).halt("supervisor: halt now")
+    assert engine.evaluate_once()["status"] == "halted"
+
+
+def test_engine_status_reports_the_running_process_not_a_phantom(tmp_path, monkeypatch):
+    # `engine status` built a fresh engine and reported it: `running`, tick 0, for a
+    # service that was halted and had ticked thousands of times. It must read the
+    # status file the running process writes.
+    import json as _json
+    from xauusd.cli import engine_controller
+    status_path = tmp_path / "engine_status.json"
+    status_path.write_text(_json.dumps({
+        "run_id": "engine_real", "tick": 2265, "state": "halted", "phase": "halted",
+        "halted_reason": "no validated edge", "decisions": 0, "recorded_at": "2026-10-05T05:48:07+00:00"}))
+    monkeypatch.setenv("ENGINE_STATUS_PATH", str(status_path))
+    monkeypatch.setenv("CTRADER_DEMO_ONLY", "true")
+    monkeypatch.setenv("CTRADER_VOLUME_PER_PAPER_UNIT", "100")
+    result = engine_controller("status")
+    assert result["run_id"] == "engine_real"
+    assert result["tick"] == 2265
+    assert result["state"] == "halted"
