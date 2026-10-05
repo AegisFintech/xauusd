@@ -48,7 +48,8 @@ This repository develops an XAUUSD research, paper-trading, and cTrader demo-acc
 - One continuous agent process runs as the systemd unit `xauusd-agent.service` (`python -m xauusd.cli agent run`). Every `agent_<uuid12>` in the live view is one process start; a graceful SIGTERM marks it stopped, so a restart cadence produces many short runs. That is one process, not many agents. On boot the agent runs a SQLite `quick_check` and consults `maybe_resume`; a refuse or a failed integrity check writes `reports/agent_status.json` and exits 0.
 - The service writes no console/journald logs. Treat the transcript/state store and the live view (`AGENT_VIEW_PORT`, default `8100`) as the only observability. Each tick writes a heartbeat to `AGENT_STATUS_FILE` (default `reports/agent_status.json`); `/api/health` turns heartbeats, stall/error counts, paper-stop state, integrity, and data-update failures into a `healthy`/`degraded` status with alerts.
 - Execution is split because an LLM round trip cannot sit in a trade loop (measured 22.8s median, 39.3s p90, a ~158 cycle/hour ceiling). `xauusd-engine.service` decides and trades in code through the same `PaperTrading.evaluate` gates, with **no privilege the agent lacks**; `xauusd-agent.service` supervises, questions itself, and may only `engine halt\|resume`. An engine halt is not a trading stop and must never clear a paper or demo kill switch.
-- `xauusd-data-feed.service` is a standalone live-subscription process. It must never share a process with the trading loop: the SDK drives Twisted's process-global, non-restartable reactor, and a broker client must not share a fate with execution. It inherits the demo host pin and the `CTRADER_DEMO_ONLY` requirement.
+- `xauusd-data-feed.service` is **not implemented and must not be deployed.** `LiveBarFeed._subscribe` and `._discover` in `xauusd/live_feed.py` raise `LiveFeedUnavailable("live_feed_not_implemented")` and nothing subclasses `LiveBarFeed`, so no bar can be subscribed. It is deliberately absent from `/etc/systemd/system`. The design intent still holds and must be preserved when it is written: a standalone live-subscription process, never sharing a process with the trading loop, because the SDK drives Twisted's process-global, non-restartable reactor. It must inherit the demo host pin and the `CTRADER_DEMO_ONLY` requirement. `data-feed run` now exits 1 and writes `state: unavailable`, and `/api/health` carries an informational `data_feed` section, so a deployed feed that fails cannot be invisible. Do not spend a cycle re-deriving this; read `docs/operator-runbook-engine.md` section 3.
+- Market data is currently fresh enough for the 180-second gate without the feed: `xauusd-data-update.service` is being triggered roughly every minute independently of its four-times-daily timer. Do not assume the timer cadence is the whole story, and do not treat the feed as the freshness blocker while that holds.
 - The agent's `interrogation` field in `xauusd/1` is optional and additive, so a workflow published against the previous contract still validates. It records the agent's own question/answer pairs about its decision: a visible self-review stream, **not** an operator inbox. Nothing waits on a human reply.
 - The live harness page at `/harness` is read-only by construction. No browser-reachable surface may issue an operator command.
 - Supervisor cadence (`AGENT_SUPERVISION_FLOOR_SECONDS`, default 300s, 25s when the engine acted recently) bounds how often the LLM *reviews*. It does not bound trade frequency, which the engine owns and which the M1 feed and the paper trade-count gate bound. See `docs/operator-runbook-engine.md`.
@@ -115,7 +116,57 @@ resumption of the existing Datadog paper deployment. That authorizes the agent,
 live view, demo-host data refresh and backup timers; cTrader order execution remains
 disabled by paper-only mode. Historical pause notes describe the earlier audit.
 
-Operator-only. Never do these autonomously, and never implement them without explicit operator approval:
-- Future deployment recovery, reconciling a timed-out job (`bits-recover`), `paper start`, `demo-automation start`, `state reset`, `state restore`, and enabling or restarting units.
+## Current deployment state — verified 2026-10-05
+
+Recorded so a later agent does not re-derive it. Trust `engine status`,
+`paper status` and `/api/health` over this paragraph, and update it when they diverge.
+
+- Deployed and running: `xauusd-agent.service`, `xauusd-engine.service`,
+  `xauusd-agent-view.service`. The engine runs **alongside** the agent on purpose;
+  neither takes the container `AgentLock`, which only excludes a second agent
+  process. Do not stop one to start the other.
+- The engine is **halted** and must stay that way until a strategy validates:
+  `confirmed_breakout` is the only strategy deployed and it failed cost-aware
+  chronological validation. The halt is durable and is not a paper kill switch.
+- Paper is not stopped (`operator_reconciled`) and the market-hours gate is
+  satisfied during the session. These are not the reason nothing trades: a halt
+  with no validated signal is.
+- Every strategy family tested so far has failed validation, including the LBMA
+  auction reversal, which was completed on 2026-10-04 after `HistoricalDataStore.positions`
+  replaced a per-anchor `Index.get_indexer` loop that had twice overrun the
+  1200s shell ceiling. **Use `positions()` for any batched window lookup**; it is
+  published in the capabilities manifest.
+- The CFTC crowding hypothesis is preregistrable but untested. Point-in-time
+  availability is 15:30 America/New_York on the release date **plus** the CFTC
+  dated Special Announcements log, which is not optional: the 2025 appropriations
+  lapse and the 2023 ION incident both broke a plain Friday-15:30 rule for
+  months. See `reports/research/cftc_point_in_time_assessment_20261005T025200Z.json`.
+  Observations whose values were revised after first publication must be excluded
+  or the test is not point-in-time.
+
+Operator-only. These create trading exposure or destroy state, so never perform them
+autonomously and never implement them without explicit operator approval:
+- Reconciling a timed-out job (`bits-recover`), `paper start`, `demo-automation start`.
+- `state reset --confirm-reset` and `state restore`.
+- Enabling cTrader order execution, or any change to the demo host pin, the
+  `CTRADER_DEMO_ONLY` requirement, or the fail-closed kill-switch behaviour.
 - Changing the Bits shell permission model, such as running it as an unprivileged user or restoring systemd hardening.
 - Changing risk-gate semantics. Examples: letting position-reducing trades through the daily-loss, drawdown or trade-count gates, or moving the daily-loss day from UTC midnight to the New York session.
+
+Routine deployment is **not** gated. Once the operator has approved a class of action
+once, these may be done without asking again, as long as each one is reported and the
+result is verified:
+- Installing, enabling, starting, stopping or restarting any unit that ships in
+  `deploy/systemd/`, keeping `/etc/systemd/system` byte-identical to `deploy/`.
+- Restarting the live view after a code change, so new endpoints actually serve.
+- Read-only and idempotent CLI work: `state backup`, `data update`/`data download`,
+  `bits-job`, `bits-memory`, `bits-capabilities`, `engine status`, `paper status`,
+  and the test suite.
+
+Never clear an engine halt to make the system look busy. A halt means the strategy has
+no validated edge, and that is a research finding, not a fault to be cleared.
+
+Development speed is never a reason to relax a risk gate, skip a freshness or
+market-hours check, weaken the kill switch, weaken a test to make it pass, or trade an
+unvalidated strategy. If a rule blocks work, fix the rule's wording or ask the
+operator; do not route around it.
