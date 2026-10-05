@@ -767,8 +767,13 @@ def main():
   if result.get("status")=="failed": raise SystemExit(1)
  if a.cmd=="data-feed":
   try: result=data_feed_controller(a.action)
-  except Exception as exc: result={"status":"failed","error_type":type(exc).__name__,
-                                   "error_code":getattr(exc,"error_code",None)}
+  except Exception as exc:
+   result={"status":"failed","error_type":type(exc).__name__,
+           "error_code":getattr(exc,"error_code",None),
+           # Only the fixed messages our own exceptions carry; never an
+           # arbitrary exception text, which can contain a value this repository
+           # must not surface.
+           "detail":getattr(exc,"detail",None)}
   print(json.dumps(result,allow_nan=False))
   # A feed that cannot run must exit non-zero. Exiting 0 under Restart=always
   # restarted the unit forever with no status file and no journal entry.
