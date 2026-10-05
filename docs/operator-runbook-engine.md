@@ -57,10 +57,28 @@ cycle.
 
 ## 3. Enable the live data feed
 
+**The feed cannot run yet: the cTrader subscription is not implemented.**
+`LiveBarFeed._subscribe` and `LiveBarFeed._discover` in `xauusd/live_feed.py`
+raise `LiveFeedUnavailable("live_feed_not_implemented")`; nothing subclasses
+`LiveBarFeed`. Everything around them is in place — demo host pin, closed-bar
+rule, atomic merge into the shared store, status file, reactor driver — but no
+bar can be subscribed, so `data-feed run` exits 1 and writes
+`reports/data_feed_status.json` with `state: unavailable`.
+
+Do not `enable --now` this unit until `_subscribe` is implemented. An earlier
+revision of this runbook and the unit itself had `Restart=always` against a CLI
+that exited 0 on the unimplemented path, so enabling it produced an invisible
+infinite restart loop: no status file, no exit code, and `StandardError=null`
+so nothing in the journal either. The exit code and status file now make that
+failure loud, and the unit is left undeployed in `/etc/systemd/system` until
+the subscription exists.
+
 The freshness gate is 180 seconds and the scheduled downloader runs four times a
 day, so the newest bar is normally hours old and **every** proposal is refused as
 `STALE_MARKET_DATA`. The feed is what makes either the engine or a 3-minute gate
-viable.
+viable, so this is the blocking prerequisite for live engine execution.
+
+Once implemented, deploy with:
 
 ```bash
 cp deploy/systemd/xauusd-data-feed.service /etc/systemd/system/
@@ -73,12 +91,25 @@ Verify before anything else:
 ```bash
 systemctl is-active xauusd-data-feed.service
 .venv/bin/python -m xauusd.cli data-feed status
+.venv/bin/python -m xauusd.cli data-feed once   # bounded supervised smoke test
 ```
 
 Expect `state: ok` and a `last_bar_utc` that advances once a minute while the
 market is open. Check the session field: `open`, `daily_break` at 17:00–18:00 New
 York, `weekend_closed` otherwise. A feed reporting `weekend_closed` with a stale
 bar is **correct**, not broken.
+
+Note that `xauusd/live_feed.py` has no broker-free unit tests for the
+subscription, the closed-bar rule or the persistence path, unlike the rest of
+the module. Those guards are what stop a late or replayed bar overwriting a
+complete one, so they need tests before the feed is trusted with real data.
+
+`/api/health` carries a `data_feed` section, so a deployed feed is visible
+without opening the file. It is informational and deliberately does not raise an
+alert or change the `ok`/`degraded` verdict, because the feed is not deployed yet
+and an absent feed is not a degraded deployment. `data_feed.state` is
+`not_deployed` when the status file does not exist, which is how an absent feed
+is told apart from one that failed to start.
 
 Requirements: `CTRADER_DEMO_ONLY=true` and the demo host pin are enforced at
 startup, exactly as for the execution adapter. The feed refuses any other host.
@@ -87,9 +118,13 @@ startup, exactly as for the execution adapter. The feed refuses any other host.
 
 ## 4. Enable the deterministic engine
 
-**Do not start the engine and the agent together without checking the lock.**
-Both take the container `AgentLock`; the second to start refuses with
-`agent_already_running`. That refusal is intended, not a fault.
+**The engine and the agent are meant to run together.** The engine trades; the
+agent supervises. Neither takes the container `AgentLock` — that lock belongs to
+the Bits agent runner, `bits-recover` and `state reset`, so a second *agent*
+process refuses with `agent_already_running` while the engine is unaffected.
+An earlier revision of this runbook claimed the engine also took the lock; it
+does not, and following that claim only meant stopping a healthy agent for no
+reason.
 
 ```bash
 cp deploy/systemd/xauusd-engine.service /etc/systemd/system/

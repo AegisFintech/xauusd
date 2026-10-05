@@ -435,3 +435,29 @@ def test_job_endpoint_pages_a_shell_capture(tmp_path):
     beyond = client.get(f"/api/job?job_id={result['job_id']}&offset=99").json()
     assert beyond["status"] == "rejected"
     assert beyond["error"]["code"] == "offset_out_of_range"
+
+
+def test_health_surfaces_the_live_feed_state_without_alerting(server, paper_trading, tmp_path,
+                                                               monkeypatch):
+    # A Restart=always feed that cannot run exited 0 forever, wrote no status and
+    # logged nothing, so nothing reported it. Health must show the feed's state.
+    # It is informational: an undeployed feed is not a degraded deployment.
+    paper_trading.start("test")
+    status = tmp_path / "feed_status.json"
+    monkeypatch.setenv("DATA_FEED_STATUS_PATH", str(status))
+
+    with request.urlopen(server + "/api/health") as response:
+        absent = json.loads(response.read())
+    assert absent["data_feed"]["state"] == "not_deployed"
+    assert absent["status"] in {"ok", "degraded"}
+
+    status.write_text(json.dumps({"state": "unavailable", "error_code": "live_feed_not_implemented",
+                                  "last_bar_utc": None, "recorded_at": "2026-10-05T02:41:20+00:00"}))
+    with request.urlopen(server + "/api/health") as response:
+        failed = json.loads(response.read())
+    assert failed["data_feed"]["state"] == "unavailable"
+    assert failed["data_feed"]["error_code"] == "live_feed_not_implemented"
+    assert isinstance(failed["data_feed"]["age_seconds"], float)
+    # Reporting a dead feed must not invent an alert and flip the verdict.
+    assert not [a for a in failed["alerts"] if "feed" in a.lower()]
+    assert failed["status"] == absent["status"]

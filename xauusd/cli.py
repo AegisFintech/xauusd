@@ -767,8 +767,13 @@ def main():
   if result.get("status")=="failed": raise SystemExit(1)
  if a.cmd=="data-feed":
   try: result=data_feed_controller(a.action)
-  except Exception as exc: result={"status":"failed","error_type":type(exc).__name__}
+  except Exception as exc: result={"status":"failed","error_type":type(exc).__name__,
+                                   "error_code":getattr(exc,"error_code",None)}
   print(json.dumps(result,allow_nan=False))
+  # A feed that cannot run must exit non-zero. Exiting 0 under Restart=always
+  # restarted the unit forever with no status file and no journal entry.
+  if result.get("status") in ("failed","unavailable") or result.get("state")=="unavailable":
+   raise SystemExit(1)
  if a.cmd=="bits-recover":
   try: result=bits_recover(a.reason)
   except Exception as exc: p.error(type(exc).__name__)

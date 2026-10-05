@@ -6,7 +6,9 @@ Wants=network-online.target
 # to be keeping the store current.
 After=xauusd-data-feed.service
 Wants=xauusd-data-feed.service
-# One AgentLock per container: the engine and the agent must not both run.
+# The engine and the agent run together on purpose: the engine decides and
+# trades, the agent supervises. Neither takes the container AgentLock, which
+# only excludes a second agent process.
 Before=xauusd-agent.service
 
 [Service]

@@ -58,6 +58,22 @@ MAX_BAR_AGE_SECONDS = 15 * 60
 HEARTBEAT_PATH_DEFAULT = "reports/data_feed_status.json"
 
 
+class LiveFeedUnavailable(RuntimeError):
+    """The feed cannot run, with a stable code for status files and health.
+
+    A bare ``NotImplementedError`` was caught by the CLI, reported as a failed
+    status and still exited 0. The unit is ``Restart=always``, so an
+    unimplemented feed restarted forever: no status file, no exit code, and
+    ``StandardError=null`` so nothing in the journal either. A feed that cannot
+    run has to say so and stay down.
+    """
+
+    def __init__(self, error_code: str, message: str):
+        super().__init__(message)
+        self.error_code = error_code
+
+
+
 @dataclass(frozen=True)
 class LiveFeedConfig:
     host: str = DEMO_HOST
@@ -233,10 +249,16 @@ class LiveBarFeed:
         self.subscribed_at = time.monotonic()
 
     def _subscribe(self) -> None:
-        raise NotImplementedError
+        raise LiveFeedUnavailable(
+            "live_feed_not_implemented",
+            "LiveBarFeed._subscribe is not implemented, so no bar can be subscribed. The feed "
+            "cannot run; implement the cTrader subscription before deploying xauusd-data-feed.service.")
 
     def _discover(self) -> dict[str, Any]:
-        raise NotImplementedError
+        raise LiveFeedUnavailable(
+            "live_feed_not_implemented",
+            "LiveBarFeed._discover is not implemented, so the demo account and XAUUSD symbol "
+            "cannot be resolved. The feed cannot run.")
 
     def run(self, iterations: int | None = None) -> dict[str, Any]:
         """Drive the subscription until stopped.
@@ -332,4 +354,11 @@ def run_feed(config: LiveFeedConfig | None = None, iterations: int | None = None
             signal.signal(sig, handle_signal)
         except ValueError:
             pass
-    return feed.run(iterations=iterations)
+    try:
+        return feed.run(iterations=iterations)
+    except LiveFeedUnavailable as exc:
+        # Write the status before propagating: a feed that cannot subscribe is
+        # exactly the condition /api/health has to show, and a restart loop
+        # would otherwise leave no evidence at all.
+        feed._write_status("unavailable", error_code=exc.error_code)
+        raise

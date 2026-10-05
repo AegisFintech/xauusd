@@ -606,6 +606,11 @@ def create_app(store: AgentTranscriptStore | None = None,
             storage = BitsStore(transcript).storage()
         except Exception as exc:
             storage = {"error_type": type(exc).__name__}
+        # Feed state, informational only: it is deliberately not an alert, because
+        # the feed is not deployed yet. It is surfaced so a feed that is deployed
+        # and failing cannot be invisible, which is how a Restart=always loop
+        # against an unimplemented feed went unnoticed.
+        data_feed = _feed_health()
         return {"status": "ok" if not alerts else "degraded", "alerts": alerts,
                 "agent": {"heartbeat": heartbeat, "heartbeat_age_seconds": heartbeat_age,
                           "latest_run_id": latest["run_id"] if latest else None,
@@ -617,10 +622,32 @@ def create_app(store: AgentTranscriptStore | None = None,
                             "error": (heartbeat or {}).get("monitor_error"),
                             "thread_alive": (heartbeat or {}).get("monitor_thread_alive")},
                 "data_update": {**data, "age_seconds": _age_seconds(data.get("recorded_at"))},
+                "data_feed": data_feed,
                 "storage": storage,
                 "database": {"backend": state_backend(), "integrity": integrity}}
 
     return app
+
+
+def _feed_health() -> dict[str, Any]:
+    """Whatever the live feed last recorded, or that it has never run.
+
+    Never raises: health is the one endpoint that must answer when something else
+    is broken. A missing file is reported as ``not_deployed`` rather than guessed
+    at, so an absent feed is distinguishable from a feed that failed to start.
+    """
+    try:
+        from .live_feed import LiveFeedConfig
+        path = Path(LiveFeedConfig.from_env().status_path)
+    except Exception as exc:  # noqa: BLE001 - health must not depend on config loading
+        return {"state": "unknown", "error_type": type(exc).__name__}
+    if not path.is_file():
+        return {"state": "not_deployed"}
+    try:
+        status = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        return {"state": "unreadable", "error_type": type(exc).__name__}
+    return {**status, "age_seconds": _age_seconds(status.get("recorded_at"))}
 
 
 def _age_seconds(iso: str | None) -> float | None:
