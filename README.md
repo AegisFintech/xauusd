@@ -332,7 +332,12 @@ function:
 The manifest (`xauusd.capabilities/1`) lists the working directory, the absolute
 interpreter and CLI prefix, the resulting `PATH`, availability, path and version
 of `graphify`, `rg`, `git` and `grep` with documented fallbacks, supported CLI
-operations as complete commands, and the M1 data entry point. It includes no
+operations as complete commands, and the M1 data entry point. It also publishes the
+two measured bounds that keep a shell job inside the 1200-second ceiling:
+`data.window_lookup` (resolve a batch of bar timestamps in one pass) and
+`data.repository_search` (scope every recursive search to the directory that can
+hold the target; never walk `data/`, `graphify-out/cache`, `backups/`, `build/`,
+`.venv/` or `.git/` from the repository root). It includes no
 environment variable values other than `PATH`. The agent refreshes it at start-up,
 every 15 minutes, and when a job reports `command not found`. Observed missing
 executables persist across cycles and restarts, appear in `context.capabilities`,

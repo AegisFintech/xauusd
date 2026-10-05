@@ -16,8 +16,8 @@ from .bits_jobs import (BitsStore, ShellJobs, SecretFilter, AgentLock, MAX_SHELL
 from .engine_loop import EngineConfig
 from .paper_trading import market_is_open
 from .bits_memory import BitsMemory, result_for_prompt, excerpt
-from .bits_research import (RESEARCH_POLICY, fills_since, finish_research_cycle,
-                           guidance_revision, market_research)
+from .bits_research import (REPEATED_PATH_INSTRUCTION, RESEARCH_POLICY, fills_since, finish_research_cycle,
+                           guidance_revision, market_research, record_cycle_paths, repeated_paths)
 
 
 # The ceiling lives with the executor that enforces it; re-exported here because
@@ -235,6 +235,15 @@ class BitsAgentRunner(ContinuousAgentRunner):
         repair = self.memory.repair_task()
         if repair:
             context["repair_task"] = repair
+        repeats = repeated_paths(self.bits_store)
+        if repeats:
+            # The loop this breaks: 19 consecutive cycles re-fetching one 7,271-byte
+            # preregistration, each convinced the content was "still omitted". The
+            # counter said "unproductive" but not what was being re-read.
+            context["repeated_paths"] = {
+                "instruction": REPEATED_PATH_INSTRUCTION.format(seen=repeats[0]["cycles"],
+                                                                window=repeats[0]["window"]),
+                "paths": repeats}
         return context
 
     def _submit(self, cycle, market, results=None):
@@ -391,6 +400,10 @@ class BitsAgentRunner(ContinuousAgentRunner):
                 return self._outcome("step_limit")
             proposed = cycle["reply"]["actions"][0]
             action = {**proposed, "args": {**proposed["args"], "timeout_sec": SHELL_TIMEOUT_SECONDS}}
+            # Observation only, before the job runs: record what this cycle touches
+            # so a retrieval loop can be named in a later prompt. It never filters,
+            # rewrites or gates the command.
+            record_cycle_paths(self.bits_store, cycle["cycle_id"], action["args"].get("command"))
             self._record("tool_call", {"tool": "shell", "input": action["args"],
                                        "description": cycle["reply"]["summary"]})
             result = self.jobs.start(cycle["cycle_id"], action)
