@@ -209,16 +209,68 @@ def test_sqlite_integrity_check_detects_corruption(tmp_path):
 def test_sqlite_transcript_reconciles_running_orphans(tmp_path):
     path = str(tmp_path / "transcript.db")
     store = SQLiteAgentTranscriptStore(db_path=path)
-    store.start_run("run-old")
-    store.start_run("run-current")
+    store.start_run("agent_old")
+    store.start_run("agent_current")
 
-    closed = store.reconcile_running_runs(excluding="run-current")
+    closed = store.reconcile_running_runs(excluding="agent_current")
 
     assert closed == 1
-    assert store.run_status("run-old") == "stopped"
-    assert store.run_status("run-current") == "running"
-    store.finish_run("run-current", "stopped")
+    assert store.run_status("agent_old") == "stopped"
+    assert store.run_status("agent_current") == "running"
+    store.finish_run("agent_current", "stopped")
+    assert store.reconcile_running_runs(excluding="agent_current") == 0
+
+
+def test_reconcile_never_closes_the_other_process_family(tmp_path):
+    """The agent and the engine share one `agent_runs` table.
+
+    An engine start ran an unscoped reconcile and closed the *live* agent's row
+    4ms later, so the authoritative store said a ticking agent had stopped and the
+    live view served that. A killed process can only orphan runs of its own family,
+    so the caller's run_id prefix scopes the update.
+    """
+    store = SQLiteAgentTranscriptStore(db_path=str(tmp_path / "transcript.db"))
+    store.start_run("agent_live")
+    store.start_run("engine_orphan")
+
+    closed = store.reconcile_running_runs(excluding="engine_new")
+
+    assert closed == 1
+    assert store.run_status("engine_orphan") == "stopped"
+    assert store.run_status("agent_live") == "running"
+
+
+def test_agent_start_leaves_a_running_engine_run_alone(tmp_path):
+    store = SQLiteAgentTranscriptStore(db_path=str(tmp_path / "transcript.db"))
+    store.start_run("engine_live")
+
+    assert store.reconcile_running_runs(excluding="agent_new") == 0
+    assert store.run_status("engine_live") == "running"
+
+
+def test_reconcile_without_a_caller_identity_closes_nothing(tmp_path):
+    """Nothing is provably an orphan when the caller does not say who it is."""
+    store = SQLiteAgentTranscriptStore(db_path=str(tmp_path / "transcript.db"))
+    store.start_run("agent_live")
+    store.start_run("engine_live")
+
     assert store.reconcile_running_runs() == 0
+    assert store.run_status("agent_live") == "running"
+    assert store.run_status("engine_live") == "running"
+
+
+def test_resume_run_corrects_a_row_closed_by_another_process(tmp_path):
+    """The owner of a run is the only authority on whether it is live."""
+    store = SQLiteAgentTranscriptStore(db_path=str(tmp_path / "transcript.db"))
+    store.start_run("agent_live")
+    store.finish_run("agent_live", "stopped")
+
+    assert store.resume_run("agent_live") is True
+    assert store.run_status("agent_live") == "running"
+    assert store.runs(limit=1)[0]["finished_at"] is None
+    # Already running, and unknown: nothing to correct, nothing else touched.
+    assert store.resume_run("agent_live") is False
+    assert store.resume_run("agent_absent") is False
 
 def test_transcript_prune_bounds_growth_but_keeps_recent_runs(tmp_path):
     """The transcript had no DELETE anywhere and gained a row per heartbeat.

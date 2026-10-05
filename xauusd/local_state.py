@@ -28,6 +28,18 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _run_family(run_id: str) -> str:
+    """The run family a run_id belongs to: ``agent_`` or ``engine_``.
+
+    The agent and the engine write to one ``agent_runs`` table, so a run row is
+    only identifiable as someone's orphan by the process family that created it.
+    A run_id with no underscore has no family wider than itself and can therefore
+    never match another run.
+    """
+    head, separator, _ = run_id.partition("_")
+    return head + separator if separator else run_id
+
+
 def _connect(db_path: str) -> sqlite3.Connection:
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(db_path, timeout=30.0, isolation_level=None)
@@ -261,16 +273,38 @@ class SQLiteAgentTranscriptStore:
         return row["status"] if row else None
 
     def reconcile_running_runs(self, excluding: str | None = None) -> int:
-        """Close interrupted runs left 'running' by a killed process."""
-        parameters: list[Any] = ["stopped", _now().isoformat()]
-        where = ["status='running'"]
-        if excluding:
-            where.append("run_id != ?")
-            parameters.append(excluding)
+        """Close the caller's own interrupted runs left 'running' by a killed process.
+
+        Scoped to the caller's run family, because the agent and the engine share
+        this table and an unscoped reconcile let either process close the other's
+        *live* run: an engine start closed the agent's row 4ms later while the
+        agent process kept ticking, and every reader then reported a running agent
+        as stopped. A dead process can only orphan runs of its own family. With no
+        caller identity nothing is provably an orphan, so nothing is closed.
+        """
+        if not excluding:
+            return 0
+        family = _run_family(excluding)
         with self.connect() as db:
-            cursor = db.execute(f"UPDATE agent_runs SET status=?,finished_at=? WHERE {' AND '.join(where)}",
-                                tuple(parameters))
+            cursor = db.execute(
+                "UPDATE agent_runs SET status=?,finished_at=? "
+                "WHERE status='running' AND run_id != ? AND substr(run_id,1,?) = ?",
+                ("stopped", _now().isoformat(), excluding, len(family), family))
         return int(cursor.rowcount or 0)
+
+    def resume_run(self, run_id: str) -> bool:
+        """Re-assert a live process's own run row, and only that row.
+
+        A run's owner is the only authority on whether it is running, so when the
+        stored row disagrees with a process that is still ticking, the row is what
+        is wrong. The store is authoritative for every reader (`agent status`,
+        `/api/runs`, the live view header), so the owner corrects it rather than
+        leaving a false 'stopped' to be served.
+        """
+        with self.connect() as db:
+            cursor = db.execute("UPDATE agent_runs SET status='running',finished_at=NULL "
+                                "WHERE run_id=? AND status != 'running'", (run_id,))
+        return bool(cursor.rowcount)
 
     def integrity_check(self) -> str:
         with self.connect() as db:

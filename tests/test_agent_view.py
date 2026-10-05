@@ -142,6 +142,36 @@ def test_status_endpoint_returns_latest_run(server):
     assert payload["latest_run_status"] == "running"
 
 
+def test_status_and_health_select_the_agent_run_not_a_newer_engine_run(tmp_path, paper_trading,
+                                                                      monkeypatch):
+    """The deterministic engine writes to the same `agent_runs` table.
+
+    Taking the newest run overall returned an `engine_...` row whenever the engine
+    had been started more recently than the agent, and the page scopes its whole
+    transcript feed to that id — so the only observability this deployment has
+    showed the engine's handful of events instead of the agent's reasoning, and
+    labelled a ticking agent with the engine's status.
+    """
+    import xauusd.agent_view as view
+    from xauusd.local_state import SQLiteAgentTranscriptStore
+
+    monkeypatch.setenv("AGENT_STATUS_FILE", str(tmp_path / "absent.json"))
+    store = SQLiteAgentTranscriptStore(str(tmp_path / "view.db"))
+    store.start_run("agent_live")
+    store.append("agent_live", 1, "assistant", {"summary": "the agent's reasoning"})
+    store.start_run("engine_newer")  # an engine restart after the agent, as deployed
+    store.append("engine_newer", 1, "engine_signal", {"signal": "NONE"})
+    client = TestClient(view.create_app(store, paper=paper_trading))
+
+    status = client.get("/api/status").json()
+    assert status["latest_run_id"] == "agent_live"
+    assert status["latest_run_status"] == "running"
+    assert client.get("/api/health").json()["agent"]["latest_run_id"] == "agent_live"
+    # The history endpoint still lists both runs; only the selection changed.
+    listed = client.get("/api/runs?limit=10").json()["runs"]
+    assert [row["run_id"] for row in listed] == ["engine_newer", "agent_live"]
+
+
 def test_runs_endpoint_reports_tick_counts(server):
     with request.urlopen(server + "/api/runs?limit=6") as response:
         payload = json.loads(response.read())

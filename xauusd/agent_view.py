@@ -370,13 +370,13 @@ def create_app(store: AgentTranscriptStore | None = None,
 
     @app.get("/api/status")
     def status() -> dict[str, Any]:
-        runs = transcript.runs(limit=1)
+        latest = _latest_agent_run(transcript)
         reset = None
         if hasattr(transcript, "connect"):
             from .bits_jobs import BitsStore
             reset = BitsStore(transcript).get("session_reset")
-        return {"latest_run_id": runs[0]["run_id"] if runs else None,
-                "latest_run_status": runs[0]["status"] if runs else None, "session_reset": reset}
+        return {"latest_run_id": latest["run_id"] if latest else None,
+                "latest_run_status": latest["status"] if latest else None, "session_reset": reset}
 
     @app.get("/api/runs")
     def runs(limit: int = Query(default=20, ge=1, le=100)) -> dict[str, Any]:
@@ -551,8 +551,7 @@ def create_app(store: AgentTranscriptStore | None = None,
                     "agent": {}, "paper": {}, "data_update": {}, "database": {}}
         heartbeat = read_status()
         heartbeat_age = _age_seconds((heartbeat or {}).get("recorded_at"))
-        runs = transcript.runs(limit=1)
-        latest = runs[0] if runs else None
+        latest = _latest_agent_run(transcript)
         if heartbeat is None:
             alerts.append("agent heartbeat missing")
         elif heartbeat.get("stalled"):
@@ -627,6 +626,29 @@ def create_app(store: AgentTranscriptStore | None = None,
                 "database": {"backend": state_backend(), "integrity": integrity}}
 
     return app
+
+
+# How many runs to scan for the newest agent one. The engine writes to the same
+# table, so the newest row overall is not necessarily an agent run.
+RUN_SCAN_LIMIT = 50
+
+
+def _latest_agent_run(transcript: AgentTranscriptStore,
+                      limit: int = RUN_SCAN_LIMIT) -> dict[str, Any] | None:
+    """The newest *agent* run, skipping engine runs that share the table.
+
+    ``runs()`` orders every run by ``created_at`` and the deterministic engine
+    writes to the same ``agent_runs`` table, so taking the newest row returned an
+    ``engine_...`` run whenever the engine had been started more recently than the
+    agent. The page scopes its whole transcript feed to this id, so the live view
+    — the only observability this deployment has, since the services write no
+    journald logs — showed the engine's handful of events instead of the agent's
+    reasoning and labelled a ticking agent with the engine's status.
+    """
+    for run in transcript.runs(limit=limit):
+        if str(run.get("run_id") or "").startswith("agent_"):
+            return run
+    return None
 
 
 def _feed_health() -> dict[str, Any]:
