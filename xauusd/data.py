@@ -2,6 +2,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
+import io
 import json
 import logging
 import os
@@ -14,11 +15,16 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from .atomic import atomic_write_bytes, file_lock
 from .ctrader_auth import DEMO_HOST
 from .paper_trading import market_is_open
 
 log = logging.getLogger(__name__)
 REQUIRED = ("open", "high", "low", "close", "volume")
+# The store has three independent writers (the feed's per-minute append, the
+# data-update timer, the agent's in-loop refresh). They wait for each other
+# rather than racing, but a wedged writer must not hang a trading loop forever.
+STORE_LOCK_TIMEOUT_SECONDS = 60.0
 # Bounded wall clock for a retried download in a fresh interpreter. The Twisted
 # reactor in the child has its own request timeouts; this bounds the parent.
 DOWNLOAD_TIMEOUT_SECONDS = 900.0
@@ -95,20 +101,28 @@ class HistoricalDataStore:
                 "gap_events":len(gap_events),"gaps":gap_events[:100],
                 "duplicates":int(bars.index.duplicated().sum())}
     def write(self, bars: pd.DataFrame, merge=True) -> pd.DataFrame:
-        # Written to a temporary file and swapped into place. `to_parquet` writes
-        # the target in place, and three writers touch this file concurrently: the
-        # agent's in-loop refresh, the data-update timer, and every reader in the
-        # tick and the monitor. A torn read raised, or returned a shorter frame
-        # whose last bar was older than the caller expected.
-        self.config.processed_dir.mkdir(parents=True,exist_ok=True); x=self.normalize(bars)
-        if merge and self.path.exists(): x=pd.concat([pd.read_parquet(self.path),x]).sort_index(); x=x[~x.index.duplicated(keep="last")]
-        temporary=self.path.with_name(self.path.name+".tmp")
-        try:
-            x.to_parquet(temporary, engine="pyarrow")
-            os.replace(temporary, self.path)
-        except BaseException:
-            temporary.unlink(missing_ok=True)
-            raise
+        """Replace the store with `bars`, merged into whatever is already there.
+
+        One durable write path under one exclusive lock. The previous version
+        hand-rolled temp-plus-replace with a *fixed* temporary name, and three
+        writers touch this file concurrently: the feed's per-minute append, the
+        data-update timer and the agent's in-loop refresh. On 2026-10-08 the
+        timer's 18:05 Asia/Shanghai run and the feed's 10:09Z append met on
+        `XAUUSD_M1.parquet.tmp`, and the file that landed had an undecodable
+        thrift footer: 2,391,574 bars became unreadable, every later feed write
+        failed with a bare OSError, and 15 hours of an open session were lost
+        with nothing alerting. `atomic` gives each writer a unique temporary plus
+        fsync; the lock makes the read-merge-swap exclusive, so a writer can
+        never merge a frame that another writer has already replaced.
+        """
+        self.config.processed_dir.mkdir(parents=True,exist_ok=True)
+        with file_lock(self.path, STORE_LOCK_TIMEOUT_SECONDS):
+            x=self.normalize(bars)
+            if merge and self.path.exists():
+                x=pd.concat([pd.read_parquet(self.path),x]).sort_index(); x=x[~x.index.duplicated(keep="last")]
+            buffer=io.BytesIO()
+            x.to_parquet(buffer, engine="pyarrow")
+            atomic_write_bytes(self.path, buffer.getvalue())
         return x
     def read(self) -> pd.DataFrame:
         if not self.path.exists(): raise FileNotFoundError(self.path)

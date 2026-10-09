@@ -1,9 +1,87 @@
 from types import SimpleNamespace
 
+import threading
+
 import pandas as pd
 import pytest
 
+from xauusd.atomic import file_lock
 from xauusd.data import CTraderAuthError, CTraderOpenApiConfig, CTraderOpenApiDownloader, DataConfig, HistoricalDataStore, trendbars_to_frame
+
+
+def _bars(offset):
+    """Three valid, non-overlapping minutes, shifted so writers never collide."""
+    index = pd.date_range("2024-01-01", periods=3, freq="min", tz="UTC") + pd.Timedelta(minutes=10 * offset)
+    return pd.DataFrame({"open": [1.0, 2.0, 3.0], "high": [2.0, 3.0, 4.0], "low": [0.0, 1.0, 2.0],
+                         "close": [1.5, 2.5, 3.5], "volume": [1.0, 2.0, 3.0]}, index=index)
+
+
+def _store(tmp_path):
+    return HistoricalDataStore(DataConfig(processed_dir=tmp_path, raw_dir=tmp_path / "raw"))
+
+
+def test_write_never_reuses_one_temporary_name(tmp_path, monkeypatch):
+    """A shared temporary name lets two writers interleave into one inode.
+
+    That is how the store was destroyed on 2026-10-08: the data-update timer and
+    the feed both wrote `XAUUSD_M1.parquet.tmp`, and the file that landed had an
+    undecodable thrift footer, so 2,391,574 bars became unreadable.
+    """
+    store = _store(tmp_path)
+    seen = []
+    real = pd.DataFrame.to_parquet
+
+    def spy(frame, destination, *args, **kwargs):
+        seen.append(destination)
+        return real(frame, destination, *args, **kwargs)
+
+    monkeypatch.setattr(pd.DataFrame, "to_parquet", spy)
+    store.write(_bars(0), merge=False)
+    store.write(_bars(1), merge=False)
+
+    assert len(seen) == 2
+    assert not any(str(item).endswith("XAUUSD_M1.parquet.tmp") for item in seen), seen
+    assert seen[0] is not seen[1]
+
+
+def test_write_waits_for_the_store_lock_and_fails_loudly(tmp_path, monkeypatch):
+    """Read-merge-swap has to be exclusive, and a wedged writer must not be skipped.
+
+    An atomic swap alone still lets two writers merge the same stale frame and
+    lose one of their updates, which for the feed means silently dropped bars.
+    """
+    monkeypatch.setattr("xauusd.data.STORE_LOCK_TIMEOUT_SECONDS", 0.2)
+    store = _store(tmp_path)
+
+    with file_lock(store.path, timeout=5):
+        with pytest.raises(TimeoutError, match="write lock"):
+            store.write(_bars(0), merge=False)
+
+
+def test_concurrent_writers_leave_a_readable_complete_store(tmp_path):
+    """The invariant the corruption broke: every writer's bars survive, and it reads."""
+    store = _store(tmp_path)
+    store.write(_bars(0), merge=False)
+    errors = []
+
+    def append(offset):
+        try:
+            store.write(_bars(offset), merge=True)
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=append, args=(offset,)) for offset in range(1, 6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    result = store.validate(store.read())
+    assert result["rows"] == 18
+    assert result["duplicates"] == 0
+
+
 def test_store_roundtrip(tmp_path):
  idx=pd.date_range("2024-01-01",periods=3,freq="min",tz="UTC"); b=pd.DataFrame({"open":[1,2,3],"high":[2,3,4],"low":[0,1,2],"close":[1.5,2.5,3.5],"volume":[1,2,3]},index=idx)
  s=HistoricalDataStore(); object.__setattr__(s.config,"processed_dir",tmp_path)
