@@ -368,3 +368,63 @@ def test_monitor_error_and_liveness_are_reported_in_the_heartbeat(tmp_path):
     heartbeat = read_status(agent.status_path)
     assert heartbeat["monitor_error"] == "state_monitor_failed"
     assert "monitor" in heartbeat
+
+
+def _looping_agent(tmp_path, monkeypatch):
+    """An agent whose store already shows one file re-read for a whole window."""
+    from xauusd.bits_research import PATH_REPEAT_THRESHOLD, record_cycle_paths
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "reports").mkdir()
+    (tmp_path / "reports" / "prereg.json").write_text("{}")
+    agent = runner(tmp_path)
+    for cycle in range(PATH_REPEAT_THRESHOLD):
+        record_cycle_paths(agent.bits_store, f"c{cycle}", "cat reports/prereg.json")
+    return agent
+
+
+def test_heartbeat_publishes_compact_retrieval_loop_evidence(tmp_path, monkeypatch):
+    """The evidence reached the model's prompt and never reached the operator.
+
+    On 2026-10-05 that left 19 cycles of re-fetching one 7,271-byte file visible
+    only as a progress counter, until one of those retrievals hit the shell
+    ceiling and stopped the agent.
+    """
+    from xauusd.bits_research import PATH_REPEAT_THRESHOLD
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    idle = runner(fresh)
+    try:
+        idle._outcome("ok")
+        assert read_status(idle.status_path)["repeated_paths"] == {"count": 0, "window": 0,
+                                                                   "paths": []}
+    finally:
+        idle.stop()
+
+    agent = _looping_agent(tmp_path, monkeypatch)
+    try:
+        agent._outcome("ok")
+        published = read_status(agent.status_path)["repeated_paths"]
+        assert published == {"count": 1, "window": PATH_REPEAT_THRESHOLD,
+                             "paths": [{"path": "reports/prereg.json",
+                                        "cycles": PATH_REPEAT_THRESHOLD}]}
+        # This payload is written every tick, so it carries the count and the
+        # paths, not the full rows the prompt context gets.
+        assert "bytes" not in published["paths"][0]
+    finally:
+        agent.stop()
+
+
+def test_retrieval_loop_evidence_never_gates_a_cycle(tmp_path, monkeypatch):
+    """A research-progress signal is an alert; it must not stop or block anything.
+
+    The tick that publishes the loop evidence still submits its cycle normally.
+    """
+    agent = _looping_agent(tmp_path, monkeypatch)
+    try:
+        assert agent.run_tick()["status"] == "bits_waiting"
+        assert not agent.paper_trading.state()["stopped"]
+        assert read_status(agent.status_path)["repeated_paths"]["count"] == 1
+        context = agent.planner.invocations[-1]["context"]
+        assert context["repeated_paths"]["paths"][0]["path"] == "reports/prereg.json"
+    finally:
+        agent.stop()

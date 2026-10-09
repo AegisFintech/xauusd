@@ -564,6 +564,13 @@ def create_app(store: AgentTranscriptStore | None = None,
         progress = (heartbeat or {}).get("research_progress") or {}
         if progress.get("needs_attention"):
             alerts.append(f"Research progress needs review: {progress.get('cycles_without_new_notes')} cycles without updated research notes")
+        # The counter above names the symptom; this names the file being re-read.
+        # An alert only: no research-progress signal may ever gate a cycle or a trade.
+        repeats = (heartbeat or {}).get("repeated_paths") or {}
+        if repeats.get("paths"):
+            named = ", ".join(f"{row.get('path')} ({row.get('cycles')} of the last {repeats.get('window', 0)} cycles)"
+                              for row in repeats["paths"])
+            alerts.append(f"Research retrieval loop: re-reading {named}")
         alerts.extend(bits_alerts(heartbeat))
         monitor = (heartbeat or {}).get("monitor") or {}
         if monitor.get("status") in {"unavailable", "stale_data"}:

@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import os
 from threading import Thread
+from typing import Any
 from uuid import uuid4
 
 from .agent_loop import ContinuousAgentRunner, paper_state_tool, _redact_for_transcript
@@ -91,10 +92,22 @@ class BitsAgentRunner(ContinuousAgentRunner):
                            monitor_error=self.monitor_error,
                            monitor_thread_alive=bool(self.monitor_thread and self.monitor_thread.is_alive()),
                            research_progress=self.bits_store.get("research_progress", {}),
+                           repeated_paths=self._repeated_paths_view(),
                            memory=self.memory.status(),
                            capabilities=heartbeat_view(self._capabilities()),
                            next_review_at=self.bits_store.get("cycle", {}).get("next_at"), **extra)
         return {"tick": self._tick, "status": status, **extra}
+
+    def _repeated_paths_view(self) -> dict[str, Any]:
+        """Retrieval-loop evidence for the heartbeat, which this file writes every tick.
+
+        A count plus the paths and their cycle counts: the prompt context gets the
+        full rows, the operator only needs to know which file is being re-read.
+        """
+        repeats = repeated_paths(self.bits_store)
+        return {"count": len(repeats),
+                "window": repeats[0]["window"] if repeats else 0,
+                "paths": [{"path": row["path"], "cycles": row["cycles"]} for row in repeats]}
 
     def _capabilities(self, force=False):
         """Manifest of the shell-job environment, persisted so its facts survive cycles and restarts."""

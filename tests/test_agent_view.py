@@ -285,6 +285,63 @@ def test_health_surfaces_missing_research_progress(server, tmp_path, monkeypatch
     assert any('3 cycles without updated research notes' in alert for alert in data['alerts'])
 
 
+def test_health_names_the_paths_a_retrieval_loop_keeps_reading(tmp_path, monkeypatch):
+    """The 2026-10-05 loop reported only its symptom.
+
+    19 cycles re-fetched one 7,271-byte preregistration and health said "19 cycles
+    without updated research notes", so 4.3 hours of stuck retrieval read as slow
+    research. The alert has to name the file and how often it was touched.
+    """
+    import xauusd.agent_view as view
+
+    store = InMemoryAgentTranscriptStore()
+    store.initialize()
+    store.start_run("agent_loop")
+    status_path = tmp_path / "agent_status.json"
+    write_status({"run_id": "agent_loop", "status": "completed", "market_open": True,
+                  "monitor": {"status": "ok",
+                              "recorded_at": datetime.now(timezone.utc).isoformat()},
+                  "monitor_thread_alive": True,
+                  "research_progress": {"needs_attention": True, "cycles_without_new_notes": 19},
+                  "repeated_paths": {"count": 1, "window": 5,
+                                     "paths": [{"path": "reports/research/prereg.json",
+                                                "cycles": 4}]}}, str(status_path))
+    monkeypatch.setenv("AGENT_STATUS_FILE", str(status_path))
+
+    body = TestClient(view.create_app(store, paper=PaperTrading(InMemoryPaperTradingStore()))
+                      ).get("/api/health").json()
+
+    assert body["status"] == "degraded"
+    assert any("Research retrieval loop" in alert
+               and "reports/research/prereg.json" in alert
+               and "4 of the last 5 cycles" in alert for alert in body["alerts"])
+    # The symptom alert stays: the loop evidence supplements it, never replaces it.
+    assert any("19 cycles without updated research notes" in alert for alert in body["alerts"])
+
+
+def test_health_stays_quiet_when_no_path_repeats(tmp_path, monkeypatch):
+    """No loop, and a heartbeat written by the previous release, are both silent."""
+    import xauusd.agent_view as view
+
+    store = InMemoryAgentTranscriptStore()
+    store.initialize()
+    status_path = tmp_path / "agent_status.json"
+    client = TestClient(view.create_app(store, paper=PaperTrading(InMemoryPaperTradingStore())))
+    for repeated in (None, {"count": 0, "window": 0, "paths": []}):
+        heartbeat = {"run_id": "agent_loop", "status": "completed", "market_open": True,
+                     "monitor": {"status": "ok",
+                                 "recorded_at": datetime.now(timezone.utc).isoformat()},
+                     "monitor_thread_alive": True}
+        if repeated is not None:
+            heartbeat["repeated_paths"] = repeated
+        write_status(heartbeat, str(status_path))
+        monkeypatch.setenv("AGENT_STATUS_FILE", str(status_path))
+
+        alerts = client.get("/api/health").json()["alerts"]
+
+        assert not [alert for alert in alerts if "retrieval loop" in alert]
+
+
 def test_steps_response_is_bounded_by_a_byte_budget(paper_trading, monkeypatch):
     """`limit` alone does not bound a response.
 
