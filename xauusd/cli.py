@@ -699,6 +699,9 @@ def build_parser() -> argparse.ArgumentParser:
  download=ds.add_parser("download"); download.add_argument("--start",required=True,help="UTC start date/time (for example 2026-08-01)"); download.add_argument("--end",help="UTC end date/time; defaults to now"); download.add_argument("--page-size",type=int,default=int(os.getenv("CTRADER_DATA_UPDATE_PAGE_SIZE","5000")))
  download.add_argument("--result-file",help="internal: write the result here instead of the data-update status file")
  update=ds.add_parser("update"); update.add_argument("--overlap-minutes",type=int,default=int(os.getenv("CTRADER_DATA_UPDATE_OVERLAP_MINUTES","10"))); update.add_argument("--page-size",type=int,default=int(os.getenv("CTRADER_DATA_UPDATE_PAGE_SIZE","5000")))
+ rebuild=ds.add_parser("rebuild",help="rebuild the store offline from the raw page archive; no broker call")
+ rebuild.add_argument("--cutoff",help="UTC start of the range to reproduce; defaults to the current store's first bar, and is required when the store is unreadable")
+ rebuild.add_argument("--chunk-pages",type=int,default=200)
  p.subcommands=sorted(sub.choices)
  return p
 
@@ -885,6 +888,20 @@ def main():
     if not s.path.exists(): raise RuntimeError("no local data; run data download --start DATE first")
     start=s.last_timestamp()-__import__('pandas').Timedelta(minutes=a.overlap_minutes)
     result=_download_with_retry(start,end=datetime.now(timezone.utc),page_size=a.page_size)
+   elif a.data_cmd=="rebuild":
+    from .data import StoreCorruptError
+    quarantined=None
+    if s.path.exists():
+     try: s.last_timestamp()
+     except StoreCorruptError:
+      # Quarantine rather than overwrite. The unreadable file is the evidence of how
+      # the store broke, and a rebuild is exactly when that evidence is easiest to
+      # destroy by accident.
+      quarantined=str(s.path.with_name(s.path.name+".corrupt-"+datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")))
+      shutil.move(str(s.path),quarantined)
+    steps=[]
+    result=s.rebuild_from_raw(a.cutoff,chunk_pages=a.chunk_pages,progress=steps.append)
+    result["quarantined"]=quarantined; result["progress_tail"]=steps[-3:]
    else: p.error("choose a data command")
    if a.data_cmd in ("download","update"):
     # Atomic: a torn read maps to "missing" for both readers, and the live view
@@ -894,10 +911,17 @@ def main():
        "end":result.get("end"),"downloaded_rows":result.get("downloaded_rows"),"error_code":None})
    print(json.dumps(result,indent=2))
   except Exception as exc:
-   from .data import CTraderAuthError
-   code=getattr(exc,"code",None) if isinstance(exc,CTraderAuthError) else None
-   description=getattr(exc,"description",None) if isinstance(exc,CTraderAuthError) else None
-   status={"state":"auth_error" if code else "failed","recorded_at":datetime.now(timezone.utc).isoformat(),
+   from .data import CTraderAuthError, classify_store_error
+   auth=isinstance(exc,CTraderAuthError)
+   # A code makes a failure diagnosable without putting exception text into a report,
+   # because text can carry a URL with a token in it. Only the auth error, which is
+   # built from broker fields rather than from a traceback, carries a description.
+   # Before this a corrupt store and a network failure both reported
+   # `error_type: OSError` with `error_code: null`, and telling them apart meant
+   # reproducing the failure by hand.
+   code=getattr(exc,"code",None) if auth else classify_store_error(exc)
+   description=getattr(exc,"description",None) if auth else None
+   status={"state":"auth_error" if auth else "failed","recorded_at":datetime.now(timezone.utc).isoformat(),
            "error_code":code,"description":description,"error_type":type(exc).__name__}
    atomic_write_json(status_path,status)
    print(json.dumps(status,indent=2)); raise SystemExit(1)

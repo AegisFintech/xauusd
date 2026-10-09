@@ -2,6 +2,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
+import errno
 import io
 import json
 import logging
@@ -10,7 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
@@ -40,6 +41,39 @@ class CTraderAuthError(RuntimeError):
         super().__init__(f"cTrader authorization error {code}: {description}")
         self.code = str(code)
         self.description = str(description)
+
+
+class StoreCorruptError(OSError):
+    """The store file exists but cannot be parsed.
+
+    Raised instead of letting pyarrow's OSError through, because "OSError" in a status
+    file is indistinguishable from a network or permission failure. That is exactly
+    what happened on 2026-10-08: two writers shared one temporary name, the parquet
+    footer became undecodable, and `data update` reported `error_type: "OSError"` with
+    `error_code: null` for the rest of the day -- the operator had to reproduce the
+    failure by hand to learn the store was corrupt and recoverable only from the raw
+    archive. Carries a code so the failure is diagnosable without persisting exception
+    text, which can contain a URL with a token in it.
+    """
+
+    code = "store_corrupt"
+
+    def __init__(self, path: Any):
+        super().__init__(f"{Path(path).name} cannot be parsed; rebuild it with `data rebuild`")
+        self.path = Path(path)
+
+
+def classify_store_error(exc: BaseException) -> str | None:
+    """A durable code for a store failure, or None when there is nothing safe to say.
+
+    Only codes are returned, never message text: the status file is a report, and a
+    traceback or a broker URL does not belong in one.
+    """
+    if isinstance(exc, StoreCorruptError):
+        return exc.code
+    if isinstance(exc, OSError) and getattr(exc, "errno", None) == errno.ENOSPC:
+        return "disk_full"
+    return None
 
 
 def _error_code(message: Any, detail: bool = False) -> str | None:
@@ -126,7 +160,15 @@ class HistoricalDataStore:
         return x
     def read(self) -> pd.DataFrame:
         if not self.path.exists(): raise FileNotFoundError(self.path)
-        return pd.read_parquet(self.path)
+        try:
+            return pd.read_parquet(self.path)
+        except (OSError, ValueError) as exc:
+            # Both, because pyarrow picks the type by how the file is broken:
+            # undecodable thrift metadata surfaces as OSError, and missing magic
+            # bytes as ArrowInvalid, which is a ValueError. The 2026-10-08
+            # corruption was the OSError form; a truncated or empty file is the
+            # other. Either way the store exists and cannot be read.
+            raise StoreCorruptError(self.path) from exc
     def last_timestamp(self) -> "pd.Timestamp | None":
         """The newest bar in the store, reading the index column only.
 
@@ -141,8 +183,87 @@ class HistoricalDataStore:
         ordered; `write()` sorts, yet nothing here needs to depend on it.
         """
         if not self.path.exists(): raise FileNotFoundError(self.path)
-        index=pd.read_parquet(self.path, columns=[]).index
+        try:
+            index=pd.read_parquet(self.path, columns=[]).index
+        except (OSError, ValueError) as exc:
+            raise StoreCorruptError(self.path) from exc
         return index.max() if len(index) else None
+    def rebuild_from_raw(self, cutoff: "pd.Timestamp | str | None" = None, chunk_pages: int = 200,
+                         progress: "Callable[[str], None] | None" = None) -> dict[str, Any]:
+        """Rebuild the store offline from the archived raw page cache.
+
+        The archive under ``raw_dir/ctrader/<symbol>/<timeframe>`` holds every page the
+        downloader ever fetched, so a store that can no longer be parsed is recoverable
+        with no broker access. That mattered on 2026-10-09: a shared temporary name left
+        2.4M bars unreadable and there was no supported way back, so recovery meant
+        improvising a script under time pressure while the market was open.
+
+        Pages are streamed and merged into one deduplicated frame a chunk at a time. The
+        cache is roughly 14x redundant -- 6,806 pages and 34M bar records for 2.4M unique
+        minutes -- so accumulating whole chunks and concatenating at the end needs more
+        memory than this host has.
+
+        ``cutoff`` bounds the rebuild to the range the store actually held. The archive
+        reaches back years earlier, and growing the store backwards changes the dataset
+        version, which is how a protected holdout gets consumed twice. When omitted the
+        current store's first bar is used; a corrupt store has no first bar, so the
+        cutoff then has to be given explicitly.
+        """
+        from types import SimpleNamespace
+        directory = self.config.raw_dir / "ctrader" / self.config.symbol / self.config.timeframe
+        pages = []
+        for path in sorted(directory.glob("*.json")) if directory.is_dir() else []:
+            parts = path.name.split("_")
+            if len(parts) < 2:
+                continue
+            try:
+                pages.append((int(parts[0]), int(parts[1]), path))
+            except ValueError:
+                continue
+        if not pages:
+            raise FileNotFoundError(f"no raw page archive under {directory}")
+        pages.sort()
+
+        if cutoff is None:
+            try:
+                cutoff = self.read().index.min()
+            except StoreCorruptError:
+                raise ValueError("the store is unreadable, so a cutoff is required to "
+                                 "reproduce the range it held") from None
+        cutoff = pd.Timestamp(cutoff)
+        if cutoff.tzinfo is None:
+            cutoff = cutoff.tz_localize("UTC")
+        cutoff_minute = int(cutoff.timestamp() // 60)
+        pages = [entry for entry in pages if entry[1] >= cutoff_minute]
+        if progress:
+            progress(f"replaying {len(pages)} archived pages from {cutoff.isoformat()}")
+
+        total = None
+        for start in range(0, len(pages), chunk_pages):
+            frames = []
+            for _, _, path in pages[start:start + chunk_pages]:
+                payload = json.loads(path.read_text())
+                frame = trendbars_to_frame([SimpleNamespace(**bar) for bar in payload["bars"]],
+                                           digits=int(payload.get("digits", 2)))
+                frame = frame[frame.index >= cutoff]
+                if len(frame):
+                    frames.append(frame)
+            if not frames:
+                continue
+            merged = pd.concat(frames).sort_index()
+            merged = merged[~merged.index.duplicated(keep="last")]
+            total = merged if total is None else pd.concat([total, merged]).sort_index()
+            del frames, merged
+            total = total[~total.index.duplicated(keep="last")]
+            if progress:
+                progress(f"  {min(start + chunk_pages, len(pages))}/{len(pages)} pages, "
+                         f"{len(total)} rows")
+        if total is None or total.empty:
+            raise ValueError(f"no archived bars at or after {cutoff.isoformat()}")
+        written = self.write(total, merge=False)
+        summary = self.validate(written)
+        summary.update({"pages_replayed": len(pages), "cutoff": cutoff.isoformat()})
+        return summary
     def positions(self, bars: pd.DataFrame, required) -> "np.ndarray":
         """Resolve a whole batch of bar timestamps to row positions in one pass.
 

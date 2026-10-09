@@ -1,12 +1,16 @@
 from types import SimpleNamespace
 
+import errno
+import json
 import threading
 
 import pandas as pd
 import pytest
 
 from xauusd.atomic import file_lock
-from xauusd.data import CTraderAuthError, CTraderOpenApiConfig, CTraderOpenApiDownloader, DataConfig, HistoricalDataStore, trendbars_to_frame
+from xauusd.data import (CTraderAuthError, CTraderOpenApiConfig, CTraderOpenApiDownloader,
+                         DataConfig, HistoricalDataStore, StoreCorruptError,
+                         classify_store_error, trendbars_to_frame)
 
 
 def _bars(offset):
@@ -17,7 +21,119 @@ def _bars(offset):
 
 
 def _store(tmp_path):
-    return HistoricalDataStore(DataConfig(processed_dir=tmp_path, raw_dir=tmp_path / "raw"))
+    return HistoricalDataStore(DataConfig(processed_dir=tmp_path / "data" / "processed",
+                                          raw_dir=tmp_path / "data" / "raw"))
+
+
+def _raw_page(tmp_path, first_minute, count, low=120_000_000):
+    """One archived page in the downloader's own format: low plus deltas, 1/100000."""
+    directory = tmp_path / "data" / "raw" / "ctrader" / "XAUUSD" / "M1"
+    directory.mkdir(parents=True, exist_ok=True)
+    payload = {"source": "ctrader-open-api", "digits": 2, "symbol": "XAUUSD",
+               "timeframe": "M1",
+               "bars": [{"utcTimestampInMinutes": first_minute + step, "low": low + step,
+                         "deltaOpen": 1000, "deltaHigh": 2000, "deltaClose": 1500,
+                         "volume": 10} for step in range(count)]}
+    path = directory / f"{first_minute}_{first_minute + count - 1}_page0001.json"
+    path.write_text(json.dumps(payload))
+    return path
+
+
+def test_a_corrupt_store_is_reported_as_corrupt_not_as_a_bare_oserror(tmp_path):
+    """`error_type: OSError` with `error_code: null` was undiagnosable.
+
+    That is all the status file said for the rest of 2026-10-08, after two writers
+    shared one temporary name and the parquet footer became undecodable. Telling a
+    corrupt store from a network failure meant reproducing the failure by hand.
+    """
+    store = _store(tmp_path)
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    store.path.write_bytes(b"not a parquet file")
+
+    for call in (store.read, store.last_timestamp):
+        with pytest.raises(StoreCorruptError) as info:
+            call()
+        assert info.value.code == "store_corrupt"
+        assert classify_store_error(info.value) == "store_corrupt"
+    # Still an OSError, so every handler that catches OSError keeps working.
+    assert isinstance(StoreCorruptError(store.path), OSError)
+
+
+def test_classify_store_error_names_a_full_disk_and_refuses_to_guess():
+    assert classify_store_error(OSError(errno.ENOSPC, "No space left on device")) == "disk_full"
+    # An unrecognised failure gets no code. An invented one is worse than none, and
+    # message text is never persisted because it can carry a token inside a URL.
+    assert classify_store_error(OSError("socket reset by peer")) is None
+    assert classify_store_error(ValueError("nope")) is None
+
+
+def test_rebuild_from_raw_reproduces_the_store_without_the_broker(tmp_path):
+    """Recovery has to work with the store unreadable and the market open.
+
+    That was the 2026-10-09 situation: 2.4M bars unreadable, 15 hours of an open
+    session already lost, and no supported way back.
+    """
+    first = 2_800_000
+    _raw_page(tmp_path, first, 5)
+    _raw_page(tmp_path, first + 3, 5)   # overlapping, exactly as real re-downloads are
+    store = _store(tmp_path)
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    store.path.write_bytes(b"corrupt footer")
+
+    summary = store.rebuild_from_raw(cutoff=pd.Timestamp(first, unit="m", tz="UTC"))
+
+    assert summary["rows"] == 8          # 5 + 5, with the 2 overlapping minutes deduped
+    assert summary["duplicates"] == 0
+    rebuilt = store.read()
+    assert rebuilt.index.min() == pd.Timestamp(first, unit="m", tz="UTC")
+    assert rebuilt.index.max() == pd.Timestamp(first + 7, unit="m", tz="UTC")
+    # Decoded through the same path as a live download, so low-plus-delta is right.
+    assert float(rebuilt["low"].iloc[0]) == pytest.approx(1200.0)
+    assert float(rebuilt["open"].iloc[0]) == pytest.approx(1200.01)
+
+
+def test_rebuild_refuses_to_guess_the_range_of_an_unreadable_store(tmp_path):
+    """The archive reaches back years before the store did.
+
+    Rebuilding from all of it would grow the store backwards, change the dataset
+    version, and risk consuming a protected holdout twice -- so an unreadable store
+    has to be told what range it held.
+    """
+    _raw_page(tmp_path, 2_800_000, 5)
+    store = _store(tmp_path)
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    store.path.write_bytes(b"corrupt footer")
+
+    with pytest.raises(ValueError, match="cutoff"):
+        store.rebuild_from_raw()
+
+
+def test_rebuild_bounds_the_store_to_the_cutoff(tmp_path):
+    early = 2_000_000
+    _raw_page(tmp_path, early, 5)
+    _raw_page(tmp_path, early + 1000, 5)
+    store = _store(tmp_path)
+
+    summary = store.rebuild_from_raw(cutoff=pd.Timestamp(early + 1000, unit="m", tz="UTC"))
+
+    assert summary["rows"] == 5
+    assert store.read().index.min() == pd.Timestamp(early + 1000, unit="m", tz="UTC")
+
+
+def test_rebuild_from_raw_needs_an_archive(tmp_path):
+    store = _store(tmp_path)
+
+    with pytest.raises(FileNotFoundError, match="no raw page archive"):
+        store.rebuild_from_raw(cutoff="2020-01-01")
+
+
+def test_the_rebuild_command_is_in_the_cli_grammar():
+    from xauusd.cli import build_parser
+
+    parsed = build_parser().parse_args(["data", "rebuild", "--cutoff", "2019-12-01",
+                                        "--chunk-pages", "50"])
+
+    assert (parsed.data_cmd, parsed.cutoff, parsed.chunk_pages) == ("rebuild", "2019-12-01", 50)
 
 
 def test_write_never_reuses_one_temporary_name(tmp_path, monkeypatch):

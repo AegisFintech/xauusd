@@ -97,11 +97,14 @@ Historical and live M1 data is fetched through the cTrader Open API demo host (`
 .venv/bin/python -m xauusd.cli data download --start 2026-09-17   # backfill a window
 .venv/bin/python -m xauusd.cli data update                        # catch up to now
 .venv/bin/python -m xauusd.cli data validate                      # report rows/gaps
+.venv/bin/python -m xauusd.cli data rebuild --cutoff 2019-12-01   # recover from the raw archive
 ```
 
 Credentials are an **OAuth2 token pair** (`CTRADER_ACCESS_TOKEN`, `CTRADER_REFRESH_TOKEN`) minted once through the cTrader ID granting-access flow (`xauusd.oauth.authorize_url` → `/apps/token`). With `CTRADER_CTID_TRADER_ACCOUNT_ID` left empty, both the data downloader and the demo execution adapter auto-discover the demo account and its XAUUSD symbol from the token (`ProtoOAGetAccountListByAccessTokenReq`); set the explicit id to pin a specific account (legacy leaf-token mode). On a `CH_ACCESS_TOKEN_INVALID`, `data update/download` refresh via `grant_type=refresh_token` once and atomically rewrite only the two token keys in `.env` (`0o600`) — nothing is ever logged. Both paths require `CTRADER_DEMO_ONLY=true`.
 
-Every `data update/download` run records `reports/data_update_status.json` (`state: ok | auth_error | failed`, `error_code`, `recorded_at`, `end`), surfaced by the live view at `/api/data-update`, so timer failures are loud instead of silent `exit-code` entries. The `xauusd-data-update.timer` re-enables scheduled 6-hourly refreshes.
+Every `data update/download` run records `reports/data_update_status.json` (`state: ok | auth_error | failed`, `error_code`, `recorded_at`, `end`), surfaced by the live view at `/api/data-update`, so timer failures are loud instead of silent `exit-code` entries. `error_code` is `store_corrupt` when the parquet exists but cannot be parsed and `disk_full` on `ENOSPC`; anything else stays `null` rather than guessing, and exception text is never persisted because it can carry a token inside a URL. The `xauusd-data-update.timer` re-enables scheduled 6-hourly refreshes.
+
+`data/raw/ctrader/XAUUSD/M1/` archives every page the downloader fetches, so `data rebuild` reconstructs the store offline with no broker access — the recovery path when the store is unreadable. It quarantines an unparseable file to `<name>.corrupt-<UTC stamp>` rather than overwriting the evidence of how it broke, streams pages in chunks because the archive is roughly 14× redundant, and requires `--cutoff` when the store cannot be read: the archive reaches back years before the store did, and growing the store backwards changes the dataset version. Rebuilding 2.4M bars from 6,806 pages measured 45 minutes. **Never purge `data/raw/`** — it is the only rebuild path.
 
 ## Autonomous Agent
 
