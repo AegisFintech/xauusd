@@ -423,7 +423,7 @@ def _build_engine(paper=None, now_provider=None):
  return PaperTradingEngine(paper,coordinator,source,signals,BitsStore(transcript),transcript,
                             config,now_provider=now_provider)
 
-def engine_controller(action: str, reason: str|None=None) -> dict:
+def engine_controller(action: str, reason: str|None=None, result: str|None=None) -> dict:
  """Operator and supervisor control for the deterministic trade engine."""
  import json as _json
  from pathlib import Path
@@ -445,6 +445,17 @@ def engine_controller(action: str, reason: str|None=None) -> dict:
   engine=_build_engine()
   outcome=engine.halt(reason) if action=="halt" else engine.resume(reason)
   return {"state":"halted" if action=="halt" else "resumed", **outcome}
+ if action=="validate-strategy":
+  # Operator-only. This is what permits the engine to trade a strategy at all, so it
+  # is granted from a verified artifact and never asserted: the file itself must
+  # record passes_validation=true, and its sha256 is pinned into the ledger.
+  if not (reason or "").strip(): raise ValueError("engine validate-strategy requires --reason")
+  if not (result or "").strip():
+   raise ValueError("engine validate-strategy requires --result pointing at a research "
+                    "result artifact that records passes_validation=true")
+  return {"state":"validated","record":_build_engine().record_validation(result,reason)}
+ if action=="validated":
+  return {"state":"validations","validations":_build_engine().validations()}
  if action=="once":
   engine=_build_engine()
   return engine.evaluate_once()
@@ -647,8 +658,9 @@ def build_parser() -> argparse.ArgumentParser:
  tool.add_argument("name",choices=["read_market","paper_state","propose_trade","canary_signal"])
  tool.add_argument("--input",default="{}")
  engine=sub.add_parser("engine",help="deterministic paper-trading engine (no LLM on the decision path)")
- engine.add_argument("action",nargs="?",choices=["status","once","run","halt","resume"],default="status")
- engine.add_argument("--reason",help="required for halt/resume: why the engine may be paused or resumed")
+ engine.add_argument("action",nargs="?",choices=["status","once","run","halt","resume","validate-strategy","validated"],default="status")
+ engine.add_argument("--reason",help="required for halt/resume/validate-strategy: why the engine may be paused, resumed, or a strategy may be traded")
+ engine.add_argument("--result",help="required for validate-strategy: path to a research result artifact recording passes_validation=true")
  feed=sub.add_parser("data-feed",help="live M1 subscription that keeps the persisted store fresh")
  feed.add_argument("action",nargs="?",choices=["run","once","status"],default="run")
  recover=sub.add_parser("bits-recover",help="acknowledge reconciled interrupted commands; leaves paper stopped")
@@ -784,7 +796,7 @@ def main():
   _print_structured(result)
   if result.get("status")=="failed": raise SystemExit(1)
  if a.cmd=="engine":
-  try: result=engine_controller(a.action,a.reason)
+  try: result=engine_controller(a.action,a.reason,a.result)
   except Exception as exc: result={"status":"failed","error_type":type(exc).__name__}
   _print_structured(result)
   if result.get("status")=="failed": raise SystemExit(1)
