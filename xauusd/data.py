@@ -188,6 +188,84 @@ class HistoricalDataStore:
         except (OSError, ValueError) as exc:
             raise StoreCorruptError(self.path) from exc
         return index.max() if len(index) else None
+    @property
+    def raw_archive_dir(self) -> Path:
+        return self.config.raw_dir / "ctrader" / self.config.symbol / self.config.timeframe
+    def raw_archive_pages(self) -> list[tuple[int, int, Path]]:
+        """Every archived raw page as ``(first_minute, last_minute, path)``, sorted.
+
+        The downloader names a page for the bar range it holds, so the archive can be
+        reasoned about without opening 4 GB of JSON.
+        """
+        pages = []
+        directory = self.raw_archive_dir
+        for path in directory.glob("*.json") if directory.is_dir() else []:
+            parts = path.name.split("_")
+            if len(parts) < 2:
+                continue
+            try:
+                pages.append((int(parts[0]), int(parts[1]), path))
+            except ValueError:
+                continue
+        pages.sort()
+        return pages
+    def raw_retention_plan(self) -> dict[str, Any]:
+        """Which archived pages a minimal cover makes redundant. Deletes nothing.
+
+        The archive grows without bound because `_archive` skips a page only when that
+        exact filename already exists, so overlapping re-downloads accumulate: 6,806
+        pages and 34M bar records for 2.4M unique minutes, about 14x redundant. It is
+        also the only rebuild path for the store, so this reports a plan and stops.
+
+        Two costs are stated rather than hidden. A minimal cover keeps no overlap, so a
+        single corrupt surviving page has no second copy to fall back on. And the cover
+        is computed from the bar ranges in the filenames, not from the bars themselves;
+        verifying that would mean reading the whole archive.
+        """
+        pages = self.raw_archive_pages()
+        if not pages:
+            return {"archive": str(self.raw_archive_dir), "pages": 0, "bytes": 0,
+                    "redundant_pages": 0, "redundant_bytes": 0, "deletes": "nothing"}
+        ordered = sorted(pages, key=lambda entry: (entry[0], -entry[1]))
+        keep: list[tuple[int, int, Path]] = []
+        index, reach, gaps = 0, None, 0
+        while index < len(ordered):
+            best = None
+            if reach is not None:
+                while index < len(ordered) and ordered[index][0] <= reach + 1:
+                    if best is None or ordered[index][1] > best[1]:
+                        best = ordered[index]
+                    index += 1
+            if best is None:
+                # Either the first page or a gap in the archive: nothing chosen so far
+                # reaches this page, so it has to be kept to cover what follows.
+                if reach is not None:
+                    gaps += 1
+                best = ordered[index]
+                index += 1
+            keep.append(best)
+            reach = best[1]
+
+        kept = {entry[2] for entry in keep}
+        sizes = {entry[2]: entry[2].stat().st_size for entry in ordered}
+        total = sum(sizes.values())
+        cover = sum(sizes[path] for path in kept)
+        full_range = [ordered[0][0], max(entry[1] for entry in ordered)]
+        cover_range = [min(entry[0] for entry in keep), max(entry[1] for entry in keep)]
+        return {
+            "archive": str(self.raw_archive_dir),
+            "pages": len(ordered), "bytes": total,
+            "cover_pages": len(keep), "cover_bytes": cover,
+            "redundant_pages": len(ordered) - len(keep), "redundant_bytes": total - cover,
+            "redundancy_ratio": round(len(ordered) / len(keep), 2),
+            "archive_range_minutes": full_range,
+            "cover_range_minutes": cover_range,
+            "cover_preserves_the_full_range": cover_range == full_range,
+            "gaps_in_archive": gaps,
+            "deletes": "nothing -- this is a plan; applying it is an operator decision",
+            "cost_of_applying": ("a minimal cover keeps no overlap, so a corrupt "
+                                 "surviving page has no second copy to fall back on"),
+        }
     def rebuild_from_raw(self, cutoff: "pd.Timestamp | str | None" = None, chunk_pages: int = 200,
                          progress: "Callable[[str], None] | None" = None) -> dict[str, Any]:
         """Rebuild the store offline from the archived raw page cache.
@@ -210,19 +288,9 @@ class HistoricalDataStore:
         cutoff then has to be given explicitly.
         """
         from types import SimpleNamespace
-        directory = self.config.raw_dir / "ctrader" / self.config.symbol / self.config.timeframe
-        pages = []
-        for path in sorted(directory.glob("*.json")) if directory.is_dir() else []:
-            parts = path.name.split("_")
-            if len(parts) < 2:
-                continue
-            try:
-                pages.append((int(parts[0]), int(parts[1]), path))
-            except ValueError:
-                continue
+        pages = self.raw_archive_pages()
         if not pages:
-            raise FileNotFoundError(f"no raw page archive under {directory}")
-        pages.sort()
+            raise FileNotFoundError(f"no raw page archive under {self.raw_archive_dir}")
 
         if cutoff is None:
             try:

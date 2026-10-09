@@ -136,6 +136,54 @@ def test_the_rebuild_command_is_in_the_cli_grammar():
     assert (parsed.data_cmd, parsed.cutoff, parsed.chunk_pages) == ("rebuild", "2019-12-01", 50)
 
 
+def test_raw_retention_plan_names_the_redundancy_and_preserves_the_range(tmp_path):
+    """The archive is the only rebuild path, so a plan must prove it loses no range.
+
+    `_archive` skips a page only when that exact filename exists, so overlapping
+    re-downloads accumulate: the live archive holds 6,806 pages for 2.4M unique
+    minutes. Reporting the redundancy is useful; silently deleting it is not.
+    """
+    _raw_page(tmp_path, 0, 10)     # 0-9
+    _raw_page(tmp_path, 3, 10)     # 3-12, fully covered by 0-9 plus 5-20
+    _raw_page(tmp_path, 5, 16)     # 5-20, extends the run furthest
+    _raw_page(tmp_path, 30, 10)    # 30-39, after a gap
+    store = _store(tmp_path)
+
+    plan = store.raw_retention_plan()
+
+    assert (plan["pages"], plan["cover_pages"], plan["redundant_pages"]) == (4, 3, 1)
+    assert plan["cover_preserves_the_full_range"] is True
+    assert plan["archive_range_minutes"] == plan["cover_range_minutes"] == [0, 39]
+    assert plan["gaps_in_archive"] == 1
+    assert plan["redundant_bytes"] > 0
+    assert plan["deletes"].startswith("nothing")
+
+
+def test_raw_retention_plan_deletes_nothing(tmp_path):
+    for minute in (0, 3, 5, 30):
+        _raw_page(tmp_path, minute, 10)
+    store = _store(tmp_path)
+    before = sorted(path.name for path in store.raw_archive_dir.glob("*.json"))
+
+    store.raw_retention_plan()
+
+    assert sorted(path.name for path in store.raw_archive_dir.glob("*.json")) == before
+    assert len(before) == 4
+
+
+def test_raw_retention_plan_on_an_empty_archive(tmp_path):
+    plan = _store(tmp_path).raw_retention_plan()
+
+    assert plan["pages"] == 0
+    assert plan["redundant_pages"] == 0
+
+
+def test_the_raw_retention_command_is_in_the_cli_grammar():
+    from xauusd.cli import build_parser
+
+    assert build_parser().parse_args(["data", "raw-retention"]).data_cmd == "raw-retention"
+
+
 def test_write_never_reuses_one_temporary_name(tmp_path, monkeypatch):
     """A shared temporary name lets two writers interleave into one inode.
 

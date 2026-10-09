@@ -702,6 +702,7 @@ def build_parser() -> argparse.ArgumentParser:
  rebuild=ds.add_parser("rebuild",help="rebuild the store offline from the raw page archive; no broker call")
  rebuild.add_argument("--cutoff",help="UTC start of the range to reproduce; defaults to the current store's first bar, and is required when the store is unreadable")
  rebuild.add_argument("--chunk-pages",type=int,default=200)
+ ds.add_parser("raw-retention",help="report which archived raw pages a minimal cover makes redundant; deletes nothing")
  p.subcommands=sorted(sub.choices)
  return p
 
@@ -902,6 +903,7 @@ def main():
     steps=[]
     result=s.rebuild_from_raw(a.cutoff,chunk_pages=a.chunk_pages,progress=steps.append)
     result["quarantined"]=quarantined; result["progress_tail"]=steps[-3:]
+   elif a.data_cmd=="raw-retention": result=s.raw_retention_plan()
    else: p.error("choose a data command")
    if a.data_cmd in ("download","update"):
     # Atomic: a torn read maps to "missing" for both readers, and the live view
