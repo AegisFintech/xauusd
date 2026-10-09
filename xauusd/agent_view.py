@@ -605,11 +605,10 @@ def create_app(store: AgentTranscriptStore | None = None,
             storage = BitsStore(transcript).storage()
         except Exception as exc:
             storage = {"error_type": type(exc).__name__}
-        # Feed state, informational only: it is deliberately not an alert, because
-        # the feed is not deployed yet. It is surfaced so a feed that is deployed
-        # and failing cannot be invisible, which is how a Restart=always loop
-        # against an unimplemented feed went unnoticed.
+        # Feed state is an alert source now that the feed is deployed; see
+        # `_feed_alerts` for the outage that the old informational-only exemption hid.
         data_feed = _feed_health()
+        alerts.extend(_feed_alerts(data_feed))
         return {"status": "ok" if not alerts else "degraded", "alerts": alerts,
                 "agent": {"heartbeat": heartbeat, "heartbeat_age_seconds": heartbeat_age,
                           "latest_run_id": latest["run_id"] if latest else None,
@@ -669,7 +668,54 @@ def _feed_health() -> dict[str, Any]:
         status = json.loads(path.read_text())
     except (OSError, ValueError) as exc:
         return {"state": "unreadable", "error_type": type(exc).__name__}
-    return {**status, "age_seconds": _age_seconds(status.get("recorded_at"))}
+    if not isinstance(status, dict):
+        return {"state": "unreadable", "error_type": "not_an_object"}
+    # The feed's own `age_seconds` is the age of the last *bar*. This function has
+    # always reported the age of the *status file* under that same key, silently
+    # discarding the bar age -- the one number that shows a feed which is alive but
+    # no longer persisting bars. Keep both, under distinct names.
+    return {**status, "bar_age_seconds": status.get("age_seconds"),
+            "age_seconds": _age_seconds(status.get("recorded_at"))}
+
+
+# A feed writes its status every cycle and a bar every closed minute, so five
+# minutes of silence means something is wrong rather than idle.
+FEED_STATUS_STALE_SECONDS = 300.0
+FEED_BAR_STALE_SECONDS = 300.0
+# States that are healthy or transient. `not_deployed` stays quiet on purpose: an
+# absent feed is a deployment choice, and alerting on it was what made the whole
+# signal ignorable in the first place.
+FEED_QUIET_STATES = ("ok", "connecting")
+
+
+def _feed_alerts(feed: dict[str, Any]) -> list[str]:
+    """Turn feed state into alerts.
+
+    This used to be deliberately informational, on the reasoning that the feed was
+    not deployed yet. It is deployed, and that exemption cost 14.85 hours of an open
+    session: the store was corrupted, every write failed, and the feed recorded
+    `bar_write_failed` with `session: open` the entire time while health reported
+    only the agent and paper alerts. A feed that cannot persist bars means the
+    engine and the agent are both trading off stale data, which is a freshness
+    failure the gates can only catch one observation at a time.
+    """
+    state = str(feed.get("state") or "")
+    if not state or state == "not_deployed":
+        return []
+    if state in ("unknown", "unreadable"):
+        return [f"data feed state {state} ({feed.get('error_type')})"]
+    age = feed.get("age_seconds")
+    if age is not None and age > FEED_STATUS_STALE_SECONDS:
+        # A frozen status file means the process stopped updating it. Without this,
+        # a dead feed keeps reporting its last known state as healthy forever.
+        return [f"data feed status stale ({int(age)}s, last state {state})"]
+    if state not in FEED_QUIET_STATES:
+        code = feed.get("error_code")
+        return [f"data feed {state}" + (f": {code}" if code else "")]
+    bar_age = feed.get("bar_age_seconds")
+    if feed.get("session") == "open" and bar_age is not None and bar_age > FEED_BAR_STALE_SECONDS:
+        return [f"live M1 bar stale ({int(bar_age)}s) while the session is open"]
+    return []
 
 
 def _age_seconds(iso: str | None) -> float | None:

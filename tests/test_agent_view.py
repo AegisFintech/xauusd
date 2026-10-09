@@ -467,11 +467,11 @@ def test_job_endpoint_pages_a_shell_capture(tmp_path):
     assert beyond["error"]["code"] == "offset_out_of_range"
 
 
-def test_health_surfaces_the_live_feed_state_without_alerting(server, paper_trading, tmp_path,
-                                                               monkeypatch):
+def test_health_surfaces_the_live_feed_state_and_alerts_when_it_fails(server, paper_trading, tmp_path,
+                                                                     monkeypatch):
     # A Restart=always feed that cannot run exited 0 forever, wrote no status and
     # logged nothing, so nothing reported it. Health must show the feed's state.
-    # It is informational: an undeployed feed is not a degraded deployment.
+    # An *undeployed* feed is still not a degraded deployment; a failing one is.
     paper_trading.start("test")
     status = tmp_path / "feed_status.json"
     monkeypatch.setenv("DATA_FEED_STATUS_PATH", str(status))
@@ -480,14 +480,80 @@ def test_health_surfaces_the_live_feed_state_without_alerting(server, paper_trad
         absent = json.loads(response.read())
     assert absent["data_feed"]["state"] == "not_deployed"
     assert absent["status"] in {"ok", "degraded"}
+    assert not [a for a in absent["alerts"] if "feed" in a.lower()]
 
     status.write_text(json.dumps({"state": "unavailable", "error_code": "live_feed_not_implemented",
-                                  "last_bar_utc": None, "recorded_at": "2026-10-05T02:41:20+00:00"}))
+                                  "last_bar_utc": None,
+                                  "recorded_at": datetime.now(timezone.utc).isoformat()}))
     with request.urlopen(server + "/api/health") as response:
         failed = json.loads(response.read())
     assert failed["data_feed"]["state"] == "unavailable"
     assert failed["data_feed"]["error_code"] == "live_feed_not_implemented"
     assert isinstance(failed["data_feed"]["age_seconds"], float)
-    # Reporting a dead feed must not invent an alert and flip the verdict.
-    assert not [a for a in failed["alerts"] if "feed" in a.lower()]
-    assert failed["status"] == absent["status"]
+    assert any("data feed unavailable: live_feed_not_implemented" in a for a in failed["alerts"])
+    assert failed["status"] == "degraded"
+
+
+def _feed(server, paper_trading, tmp_path, monkeypatch, payload):
+    paper_trading.start("test")
+    path = tmp_path / "feed_status.json"
+    path.write_text(json.dumps(payload))
+    monkeypatch.setenv("DATA_FEED_STATUS_PATH", str(path))
+    with request.urlopen(server + "/api/health") as response:
+        return json.loads(response.read())
+
+
+def test_health_alerts_when_the_feed_cannot_write_bars(server, paper_trading, tmp_path, monkeypatch):
+    """The exact 2026-10-08 outage: bar_write_failed, session open, no alert.
+
+    The store was corrupted, every append failed for 14.85 hours of an open
+    session, and health reported only the agent and paper alerts -- because feed
+    state was "deliberately not an alert, because the feed is not deployed yet".
+    """
+    body = _feed(server, paper_trading, tmp_path, monkeypatch, {
+        "state": "bar_write_failed", "error_code": "OSError", "session": "open",
+        "age_seconds": 53460.7, "last_bar_utc": "2026-10-08T10:09:00+00:00",
+        "recorded_at": datetime.now(timezone.utc).isoformat()})
+
+    assert any("data feed bar_write_failed: OSError" in a for a in body["alerts"])
+    assert body["status"] == "degraded"
+    # The feed's own bar age must survive; health overwrote it with the status age.
+    assert body["data_feed"]["bar_age_seconds"] == 53460.7
+
+
+def test_health_alerts_when_bars_go_stale_during_an_open_session(server, paper_trading, tmp_path,
+                                                                monkeypatch):
+    """A feed that is alive and healthy but no longer persisting bars."""
+    body = _feed(server, paper_trading, tmp_path, monkeypatch, {
+        "state": "ok", "error_code": None, "session": "open", "age_seconds": 900.0,
+        "recorded_at": datetime.now(timezone.utc).isoformat()})
+
+    assert any("live M1 bar stale (900s) while the session is open" in a for a in body["alerts"])
+
+
+def test_health_does_not_alert_on_an_old_bar_while_the_market_is_closed(server, paper_trading,
+                                                                       tmp_path, monkeypatch):
+    """No bars over a weekend is idle, not broken; alerting on it trains operators
+    to ignore the alert that matters."""
+    body = _feed(server, paper_trading, tmp_path, monkeypatch, {
+        "state": "ok", "session": "closed", "age_seconds": 172800.0,
+        "recorded_at": datetime.now(timezone.utc).isoformat()})
+
+    assert not [a for a in body["alerts"] if "feed" in a.lower() or "M1 bar" in a]
+
+
+def test_health_alerts_when_the_feed_status_freezes(server, paper_trading, tmp_path, monkeypatch):
+    """A dead feed keeps reporting its last known state as healthy forever."""
+    frozen = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    body = _feed(server, paper_trading, tmp_path, monkeypatch, {
+        "state": "ok", "session": "open", "age_seconds": 5.0, "recorded_at": frozen})
+
+    assert any("data feed status stale" in a and "last state ok" in a for a in body["alerts"])
+
+
+def test_health_stays_quiet_for_a_healthy_feed(server, paper_trading, tmp_path, monkeypatch):
+    body = _feed(server, paper_trading, tmp_path, monkeypatch, {
+        "state": "ok", "session": "open", "age_seconds": 42.0, "bars_written": 12,
+        "recorded_at": datetime.now(timezone.utc).isoformat()})
+
+    assert not [a for a in body["alerts"] if "feed" in a.lower() or "M1 bar" in a]
