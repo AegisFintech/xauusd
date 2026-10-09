@@ -61,6 +61,17 @@ def research_campaign(start: str|None, end: str|None):
  leaderboard=ResearchCampaign().run(bars)
  print(json.dumps(leaderboard,indent=2,allow_nan=False))
 
+def cftc_point_in_time(no_write: bool):
+ """Re-run the preregistered CFTC positioning-flow study end to end.
+
+A preregistered result that cannot be re-run is not evidence, so the chain that
+produced it is a supported command. It refuses to persist an artifact when any of
+its own integrity checks fails.
+"""
+ from .cftc_research import run
+ result=run(write=not no_write)
+ print(json.dumps(result,indent=2,allow_nan=False,default=str))
+
 def validate_strategy(strategy: str, start: str|None, end: str|None, bootstrap_samples: int):
  bars=HistoricalDataStore().read()
  if start: bars=bars.loc[start:]
@@ -615,6 +626,7 @@ def build_parser() -> argparse.ArgumentParser:
  vld=sub.add_parser("validate-strategy"); vld.add_argument("--strategy",choices=["mean_reversion","momentum"],default="mean_reversion"); vld.add_argument("--start"); vld.add_argument("--end"); vld.add_argument("--bootstrap-samples",type=int,default=500)
  ml=sub.add_parser("ml-research"); ml.add_argument("--start"); ml.add_argument("--end"); ml.add_argument("--threshold",type=float,default=.58)
  mlwf=sub.add_parser("ml-walk-forward"); mlwf.add_argument("--start"); mlwf.add_argument("--end"); mlwf.add_argument("--threshold",type=float,default=.58)
+ cftc=sub.add_parser("cftc-point-in-time"); cftc.add_argument("--no-write",action="store_true")
  sub.add_parser("daily-run"); sub.add_parser("weekly-report")
  sub.add_parser("automated-run")
  td=sub.add_parser("tournament-data"); td.add_argument("action",choices=["create","status","verify"]); td.add_argument("--partition",choices=["train","validation","test"])
@@ -688,6 +700,7 @@ def main():
  if a.cmd=="validate-strategy": validate_strategy(a.strategy,a.start,a.end,a.bootstrap_samples)
  if a.cmd=="ml-research": ml_research(a.start,a.end,a.threshold)
  if a.cmd=="ml-walk-forward": ml_walk_forward(a.start,a.end,a.threshold)
+ if a.cmd=="cftc-point-in-time": cftc_point_in_time(a.no_write)
  if a.cmd=="daily-run": daily_run()
  if a.cmd=="weekly-report": print(json.dumps(weekly_comparison(),indent=2,allow_nan=False))
  if a.cmd=="automated-run":
