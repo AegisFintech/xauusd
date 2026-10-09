@@ -871,7 +871,7 @@ def main():
      return
    elif a.data_cmd=="update":
     if not s.path.exists(): raise RuntimeError("no local data; run data download --start DATE first")
-    start=s.read().index.max()-__import__('pandas').Timedelta(minutes=a.overlap_minutes)
+    start=s.last_timestamp()-__import__('pandas').Timedelta(minutes=a.overlap_minutes)
     result=_download_with_retry(start,end=datetime.now(timezone.utc),page_size=a.page_size)
    else: p.error("choose a data command")
    if a.data_cmd in ("download","update"):

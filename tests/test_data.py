@@ -82,6 +82,44 @@ def test_concurrent_writers_leave_a_readable_complete_store(tmp_path):
     assert result["duplicates"] == 0
 
 
+def test_last_timestamp_agrees_with_a_full_read(tmp_path):
+    store = _store(tmp_path)
+    store.write(_bars(0), merge=False)
+    store.write(_bars(3), merge=True)
+
+    assert store.last_timestamp() == store.read().index.max()
+
+
+def test_last_timestamp_reads_the_index_column_only(tmp_path, monkeypatch):
+    """One value must not cost the whole frame.
+
+    `data update` runs four times a day on a timer and needs only the newest bar to
+    decide where to resume downloading. Reading all six columns of 2.4M rows for that
+    costs ~134 MB on a host with ~1.4 GB available; the index column alone is ~20 MB.
+    """
+    store = _store(tmp_path)
+    store.write(_bars(0), merge=False)
+    calls = []
+    real = pd.read_parquet
+
+    def spy(path, *args, **kwargs):
+        calls.append(kwargs.get("columns", "unset"))
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(pd, "read_parquet", spy)
+
+    assert store.last_timestamp() == _bars(0).index.max()
+    assert calls == [[]], calls
+
+
+def test_last_timestamp_raises_for_a_missing_store(tmp_path):
+    """Silently returning None would make `data update` download from the epoch."""
+    store = _store(tmp_path)
+
+    with pytest.raises(FileNotFoundError):
+        store.last_timestamp()
+
+
 def test_store_roundtrip(tmp_path):
  idx=pd.date_range("2024-01-01",periods=3,freq="min",tz="UTC"); b=pd.DataFrame({"open":[1,2,3],"high":[2,3,4],"low":[0,1,2],"close":[1.5,2.5,3.5],"volume":[1,2,3]},index=idx)
  s=HistoricalDataStore(); object.__setattr__(s.config,"processed_dir",tmp_path)

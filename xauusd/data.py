@@ -127,6 +127,22 @@ class HistoricalDataStore:
     def read(self) -> pd.DataFrame:
         if not self.path.exists(): raise FileNotFoundError(self.path)
         return pd.read_parquet(self.path)
+    def last_timestamp(self) -> "pd.Timestamp | None":
+        """The newest bar in the store, reading the index column only.
+
+        `data update` needs just this to decide where to resume downloading, but it
+        called `read()`, which decompresses all six columns of a 2.4M row frame to
+        answer a one-value question: measured 0.31s and ~134 MB against 0.05s and
+        ~20 MB. It runs four times a day on a timer, on a host with ~1.4 GB available
+        while the agent, engine, feed and view are all resident, and it is the same
+        code path that was mid-write when two writers destroyed the store on
+        2026-10-08. Reading only the final row group would be cheaper still, but this
+        store has three row groups, so that saves little and would assume the rows are
+        ordered; `write()` sorts, yet nothing here needs to depend on it.
+        """
+        if not self.path.exists(): raise FileNotFoundError(self.path)
+        index=pd.read_parquet(self.path, columns=[]).index
+        return index.max() if len(index) else None
     def positions(self, bars: pd.DataFrame, required) -> "np.ndarray":
         """Resolve a whole batch of bar timestamps to row positions in one pass.
 
