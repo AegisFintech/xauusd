@@ -3,11 +3,12 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from pathlib import Path
 import hashlib
+import io
 import json
-import os
 
 import pandas as pd
 
+from .atomic import atomic_write_bytes, atomic_write_text
 from .data import HistoricalDataStore
 
 
@@ -108,9 +109,13 @@ class TournamentDataset:
             self._activate(manifest)
             return manifest
         directory.mkdir(parents=True)
-        temporary = directory / "bars.parquet.tmp"
-        snapshot.to_parquet(temporary, engine="pyarrow")
-        temporary.replace(data_path)
+        # `atomic` gives this write a unique temporary, an fsync and a directory
+        # fsync. The fixed `bars.parquet.tmp` was the same shared-inode hazard
+        # that made the M1 store undecodable on 2026-10-08, and without the
+        # fsyncs a crash could still land a renamed Parquet with a torn footer.
+        buffer = io.BytesIO()
+        snapshot.to_parquet(buffer, engine="pyarrow")
+        atomic_write_bytes(data_path, buffer.getvalue(), mode=0o444)
         n = len(snapshot); train_end = int(n*self.config.train_fraction)
         validation_end = train_end + int(n*self.config.validation_fraction)
         partitions = {
@@ -127,8 +132,7 @@ class TournamentDataset:
                     "columns": list(snapshot.columns), "dtypes": {c:str(t) for c,t in snapshot.dtypes.items()},
                     "partitions": partitions, "config": {**asdict(self.config), "root": str(self.config.root),
                                                           "active_path": str(self.config.active_path)}}
-        manifest_path.write_text(json.dumps(manifest, indent=2))
-        os.chmod(data_path, 0o444); os.chmod(manifest_path, 0o444)
+        atomic_write_text(manifest_path, json.dumps(manifest, indent=2), mode=0o444)
         self._activate(manifest)
         return manifest
 
@@ -137,10 +141,13 @@ class TournamentDataset:
         return {"rows": len(frame), "start": frame.index.min().isoformat(), "end": frame.index.max().isoformat()}
 
     def _activate(self, manifest: dict) -> None:
-        self.config.active_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.config.active_path.with_suffix(".json.tmp")
-        temporary.write_text(json.dumps({"version":manifest["version"], "manifest":str(self.config.root/manifest["version"]/"manifest.json")},indent=2))
-        temporary.replace(self.config.active_path)
+        # One shared `active.json.tmp` served every version and every process, so
+        # two concurrent freezes interleaved into a single inode and the rename
+        # that landed second decided which dataset every later run read. This is a
+        # whole-value pointer swap, not a read-modify-write -- there is no previous
+        # value to merge -- so it needs a unique temporary and fsyncs, not a lock.
+        pointer = {"version":manifest["version"], "manifest":str(self.config.root/manifest["version"]/"manifest.json")}
+        atomic_write_text(self.config.active_path, json.dumps(pointer,indent=2))
 
     def active(self) -> dict:
         pointer = json.loads(self.config.active_path.read_text())
