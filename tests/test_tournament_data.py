@@ -31,6 +31,46 @@ def test_content_change_creates_new_version(tmp_path):
     assert first["version"]!=second["version"]
 
 
+def test_concurrent_freezes_of_one_version_all_succeed(tmp_path):
+    """Two freezes of one version write identical bytes; neither may fail.
+
+    The version name is a digest of the snapshot, so the second writer used to die
+    with FileNotFoundError in the window between the first one's `mkdir` and its
+    manifest write -- or with FileExistsError from `mkdir(parents=True)` when both
+    saw the directory absent.
+    """
+    bars=synthetic_bars(60*24*40,seed=54)
+    results=[]; errors=[]; barrier=threading.Barrier(6)
+
+    def freeze():
+        try:
+            barrier.wait()
+            results.append(dataset(tmp_path).create(bars))
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads=[threading.Thread(target=freeze) for _ in range(6)]
+    for thread in threads: thread.start()
+    for thread in threads: thread.join()
+
+    assert errors == []
+    assert len(results) == 6
+    assert {row["version"] for row in results} == {results[0]["version"]}
+    assert all(row["rows"] == results[0]["rows"] for row in results)
+    assert json.loads((tmp_path/"active.json").read_text())["version"] == results[0]["version"]
+
+
+def test_a_version_directory_with_no_manifest_fails_loudly(tmp_path,monkeypatch):
+    """A freeze killed mid-write must not hang the next one, nor quietly pass."""
+    monkeypatch.setattr("xauusd.tournament_data.MANIFEST_WAIT_SECONDS",0.2)
+    bars=synthetic_bars(60*24*40,seed=55)
+    frozen=dataset(tmp_path).create(bars)
+    (Path(frozen["data_path"]).parent/"manifest.json").unlink()
+
+    with pytest.raises(FileNotFoundError,match="published no manifest"):
+        dataset(tmp_path).create(bars)
+
+
 def test_partitions_read_exact_manifest_counts(tmp_path):
     bars=synthetic_bars(60*24*40,seed=53); store=dataset(tmp_path); manifest=store.create(bars)
     for name,metadata in manifest["partitions"].items():

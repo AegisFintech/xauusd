@@ -5,11 +5,17 @@ from pathlib import Path
 import hashlib
 import io
 import json
+import time
 
 import pandas as pd
 
 from .atomic import atomic_write_bytes, atomic_write_text
 from .data import HistoricalDataStore
+
+# How long a second freeze of the same version waits for the first to publish its
+# manifest. Bounded because a directory left behind by a killed writer has to fail
+# loudly, not hang a pipeline.
+MANIFEST_WAIT_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -104,11 +110,15 @@ class TournamentDataset:
         data_path = directory / "bars.parquet"
         manifest_path = directory / "manifest.json"
         if directory.exists():
-            manifest = json.loads(manifest_path.read_text())
+            manifest = self._await_manifest(manifest_path)
             self.verify(manifest)
             self._activate(manifest)
             return manifest
-        directory.mkdir(parents=True)
+        # exist_ok, because two freezes of one version can both find the directory
+        # absent and both reach here. The version name is a digest of the snapshot,
+        # so they write identical bytes and last-writer-wins is harmless -- unlike the
+        # FileExistsError this used to raise.
+        directory.mkdir(parents=True, exist_ok=True)
         # `atomic` gives this write a unique temporary, an fsync and a directory
         # fsync. The fixed `bars.parquet.tmp` was the same shared-inode hazard
         # that made the M1 store undecodable on 2026-10-08, and without the
@@ -135,6 +145,30 @@ class TournamentDataset:
         atomic_write_text(manifest_path, json.dumps(manifest, indent=2), mode=0o444)
         self._activate(manifest)
         return manifest
+
+    @staticmethod
+    def _await_manifest(manifest_path: Path, timeout: float | None = None) -> dict:
+        """Wait for a concurrent freeze of the same version to publish its manifest.
+
+        `create()` used to read the manifest the moment the directory existed, so a
+        second freeze arriving between `mkdir` and the manifest write died with
+        FileNotFoundError -- for a version whose name is a digest of its own content,
+        meaning both writers were producing identical bytes. Waiting is the correct
+        resolution, and the timeout keeps a directory left behind by a killed writer
+        from hanging a pipeline forever.
+        """
+        # Resolved at call time, not as a default argument, so the bound is a setting
+        # a caller or a test can change rather than a value frozen at import.
+        timeout = MANIFEST_WAIT_SECONDS if timeout is None else timeout
+        deadline = time.monotonic() + timeout
+        while not manifest_path.exists():
+            if time.monotonic() >= deadline:
+                raise FileNotFoundError(
+                    f"{manifest_path.parent.name} exists but published no manifest within "
+                    f"{timeout:g}s; a previous freeze was probably killed mid-write. "
+                    "Remove the directory and freeze again.")
+            time.sleep(0.05)
+        return json.loads(manifest_path.read_text())
 
     @staticmethod
     def _partition(frame: pd.DataFrame) -> dict:
