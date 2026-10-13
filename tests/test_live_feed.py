@@ -17,9 +17,20 @@ def unavailable_type():
 def config(tmp_path, **overrides):
     values = {"processed_dir": str(tmp_path / "processed"),
               "status_path": str(tmp_path / "status.json"),
-              "state_path": str(tmp_path / "feed.json")}
+              "state_path": str(tmp_path / "feed.json"),
+              # Every path a feed writes has to be redirected here. `events_path`
+              # defaults to reports/data_feed_events.json, and omitting it let a
+              # full test run append 24 test transitions to the production log.
+              "events_path": str(tmp_path / "events.json")}
     values.update(overrides)
     return LiveFeedConfig(**values)
+
+
+def test_the_test_config_redirects_every_path_a_feed_writes(tmp_path):
+    """A default that points into reports/ is a production file waiting to be test data."""
+    paths = config(tmp_path)
+    for value in (paths.processed_dir, paths.status_path, paths.state_path, paths.events_path):
+        assert str(tmp_path) in value, value
 
 
 def test_state_transitions_are_logged_beyond_the_latest_status(tmp_path):
