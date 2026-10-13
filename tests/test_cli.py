@@ -563,3 +563,50 @@ def test_the_heal_command_is_in_the_cli_grammar():
     parsed = cli.build_parser().parse_args(["data", "heal", "--days", "3", "--dry-run"])
 
     assert (parsed.data_cmd, parsed.days, parsed.dry_run) == ("heal", 3, True)
+
+
+def test_update_can_heal_and_the_timer_does():
+    """Without this the command exists but nothing runs it, so a hole still sits for days."""
+    parsed = cli.build_parser().parse_args(["data", "update", "--heal"])
+
+    assert (parsed.data_cmd, parsed.heal, parsed.heal_days, parsed.heal_max_minutes) == \
+        ("update", True, 3, 120)
+    assert cli.build_parser().parse_args(["data", "update"]).heal is False
+
+
+def test_update_reports_a_failed_heal_without_failing_the_update(tmp_path, monkeypatch, capsys):
+    """An interior hole is a smaller problem than a refresh reported as failed.
+
+    The status file drives the live view's data-update alert, so letting heal
+    trouble mask a successful tail download would cry wolf four times a day -- and
+    the store would still be current, which is the part that matters.
+    """
+    import pandas as pd
+    from xauusd.data import DataConfig, HistoricalDataStore
+    monkeypatch.chdir(tmp_path)
+    store = HistoricalDataStore(DataConfig(processed_dir=tmp_path / "data" / "processed",
+                                           raw_dir=tmp_path / "data" / "raw"))
+    index = pd.date_range("2026-10-13 01:00", periods=5, freq="min", tz="UTC")
+    store.write(pd.DataFrame({"open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5,
+                              "volume": 1.0}, index=index), merge=False)
+    monkeypatch.setattr(cli, "HistoricalDataStore", lambda: store)
+    monkeypatch.setattr(cli, "_download_with_retry",
+                        lambda start, end=None, page_size=5000, **kwargs: {
+                            "ok": True, "downloaded_rows": 3, "end": "2026-10-13T03:32:00+00:00"})
+
+    def exploding_heal(*args, **kwargs):
+        raise RuntimeError("heal exploded")
+
+    monkeypatch.setattr(cli, "data_heal", exploding_heal)
+
+    code, result, _ = _run_cli(monkeypatch, capsys, "data", "update", "--heal")
+
+    assert code == 0
+    assert result["downloaded_rows"] == 3
+    assert result["heal"]["state"] == "failed"
+    assert result["heal"]["error_type"] == "RuntimeError"
+    # The status file still says the refresh itself succeeded.
+    import json as _json
+    status = _json.loads((tmp_path / "reports" / "data_update_status.json").read_text())
+    assert status["state"] == "ok"
+    assert status["error_code"] is None

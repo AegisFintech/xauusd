@@ -1,5 +1,5 @@
 [Unit]
-Description=Update XAUUSD historical data
+Description=Update XAUUSD historical data and heal interior gaps
 After=network-online.target
 Wants=network-online.target
 
@@ -7,6 +7,10 @@ Wants=network-online.target
 Type=oneshot
 WorkingDirectory=/root/xauusd
 EnvironmentFile=/root/xauusd/.env
-ExecStart=/root/xauusd/.venv/bin/python -m xauusd.cli data update
+# --heal is bounded (3 days back, 120 missing minutes per run) so a oneshot timer
+# job cannot turn into a multi-hour backfill. Without it the tail-only download
+# leaves any interior hole permanent: a feed restart on 2026-10-12 lost 16 minutes
+# that four daily updates could not reach.
+ExecStart=/root/xauusd/.venv/bin/python -m xauusd.cli data update --heal
 StandardOutput=journal
 StandardError=journal

@@ -740,6 +740,9 @@ def build_parser() -> argparse.ArgumentParser:
  download=ds.add_parser("download"); download.add_argument("--start",required=True,help="UTC start date/time (for example 2026-08-01)"); download.add_argument("--end",help="UTC end date/time; defaults to now"); download.add_argument("--page-size",type=int,default=int(os.getenv("CTRADER_DATA_UPDATE_PAGE_SIZE","5000")))
  download.add_argument("--result-file",help="internal: write the result here instead of the data-update status file")
  update=ds.add_parser("update"); update.add_argument("--overlap-minutes",type=int,default=int(os.getenv("CTRADER_DATA_UPDATE_OVERLAP_MINUTES","10"))); update.add_argument("--page-size",type=int,default=int(os.getenv("CTRADER_DATA_UPDATE_PAGE_SIZE","5000")))
+ update.add_argument("--heal",action="store_true",help="also fill interior gaps; the tail-only download can never reach them")
+ update.add_argument("--heal-days",type=int,default=3,help="with --heal: how far back to look for gaps")
+ update.add_argument("--heal-max-minutes",type=int,default=120,help="with --heal: bound on missing minutes per run, so a timer job cannot run away")
  rebuild=ds.add_parser("rebuild",help="rebuild the store offline from the raw page archive; no broker call")
  rebuild.add_argument("--cutoff",help="UTC start of the range to reproduce; defaults to the current store's first bar, and is required when the store is unreadable")
  rebuild.add_argument("--chunk-pages",type=int,default=200)
@@ -936,6 +939,17 @@ def main():
     if not s.path.exists(): raise RuntimeError("no local data; run data download --start DATE first")
     start=s.last_timestamp()-__import__('pandas').Timedelta(minutes=a.overlap_minutes)
     result=_download_with_retry(start,end=datetime.now(timezone.utc),page_size=a.page_size)
+    if a.heal:
+     try:
+      result["heal"]=data_heal(s,argparse.Namespace(days=a.heal_days,max_minutes=a.heal_max_minutes,
+                                                    min_minutes=2,page_size=a.page_size,dry_run=False))
+     except Exception as exc:
+      # A failed heal must not mask a successful tail update. The store is current,
+      # and an interior hole is a smaller problem than reporting the whole refresh
+      # as failed when it was not -- which is what the status file drives.
+      from .data import classify_store_error
+      result["heal"]={"state":"failed","error_type":type(exc).__name__,
+                      "error_code":classify_store_error(exc)}
    elif a.data_cmd=="rebuild":
     from .data import StoreCorruptError
     quarantined=None
