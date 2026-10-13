@@ -124,6 +124,30 @@ def test_summary_includes_equity_pnl_drawdown_and_recent_fills():
     assert summary["recent_fills"][0]["decision_id"] == "buy"
 
 
+def test_summary_does_not_report_an_old_day_as_today(monkeypatch):
+    """`trades_today` read as today's count while the account sat stopped.
+
+    On 2026-10-13 it reported 2 for two fills from 2026-10-05, because the counter
+    only rolls when a mark price is applied and no mark had been applied in eight
+    days. The gate rolls before it counts, so this is reporting only -- but an
+    operator reading the summary would believe two trades happened today.
+    """
+    trading = PaperTrading(InMemoryPaperTradingStore(), PaperRiskConfig(max_market_data_age_seconds=120))
+    monkeypatch.setattr("xauusd.paper_trading._now", lambda: NOW)
+    trading.start("test")
+    trading.evaluate(decision("buy", price=4000), NOW)
+    assert trading.summary()["trades_today"] == 1
+
+    # Eight days later with no mark applied in between: the counter still says 1,
+    # but nothing happened today.
+    monkeypatch.setattr("xauusd.paper_trading._now", lambda: NOW + timedelta(days=8))
+    summary = trading.summary()
+
+    assert summary["trades_today"] == 0
+    assert summary["trades_on_last_marked_day"] == 1
+    assert summary["day"] == NOW.date().isoformat()
+
+
 def test_corrupt_memory_state_fails_closed():
     store = InMemoryPaperTradingStore(); trading = PaperTrading(store); trading.start("test")
     store.corrupt_state_for_test()

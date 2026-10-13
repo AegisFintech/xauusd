@@ -184,6 +184,59 @@ def test_the_raw_retention_command_is_in_the_cli_grammar():
     assert build_parser().parse_args(["data", "raw-retention"]).data_cmd == "raw-retention"
 
 
+def _minute_bars(start, count):
+    index = pd.date_range(start, periods=count, freq="min", tz="UTC")
+    return pd.DataFrame({"open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5,
+                         "volume": 1.0}, index=index)
+
+
+def test_missing_windows_finds_the_interior_hole_a_tail_only_update_cannot(tmp_path):
+    """`data update` starts from the newest bar, so a hole in the middle is permanent.
+
+    A feed restart on 2026-10-12 lost 17 minutes that four daily updates could not
+    recover, and they are still missing from the store.
+    """
+    bars = _minute_bars("2026-10-07 12:00", 60)     # a Wednesday afternoon in New York
+    holed = pd.concat([bars.iloc[:20], bars.iloc[37:]])
+
+    windows = _store(tmp_path).missing_windows(bars=holed)
+
+    assert len(windows) == 1
+    assert windows[0]["minutes"] == 17
+    assert windows[0]["start"] == "2026-10-07T12:20:00+00:00"
+    assert windows[0]["end"] == "2026-10-07T12:36:00+00:00"
+
+
+def test_missing_windows_ignores_a_closed_market(tmp_path):
+    """A weekend is not data loss; counting it as such hides the gaps that matter."""
+    bars = pd.concat([_minute_bars("2026-10-09 20:00", 60),    # Friday 16:00-16:59 EDT
+                      _minute_bars("2026-10-11 22:00", 30)])   # Sunday 18:00 EDT reopen
+
+    assert _store(tmp_path).missing_windows(bars=bars) == []
+
+
+def test_missing_windows_respects_since_and_the_minimum(tmp_path):
+    bars = pd.concat([_minute_bars("2026-10-07 12:00", 60), _minute_bars("2026-10-08 12:00", 60)])
+    store = _store(tmp_path)
+    one_minute = pd.concat([_minute_bars("2026-10-07 12:00", 10).iloc[:4],
+                            _minute_bars("2026-10-07 12:00", 10).iloc[5:]])
+
+    assert store.missing_windows(bars=bars, min_minutes=2)
+    # Bounding the scan is what keeps this usable on a timer over seven years of gaps.
+    assert store.missing_windows(bars=bars, since="2026-10-08 13:00") == []
+    assert store.missing_windows(bars=one_minute, min_minutes=2) == []
+    assert store.missing_windows(bars=one_minute, min_minutes=1)[0]["minutes"] == 1
+
+
+def test_missing_windows_reads_the_store_when_no_frame_is_given(tmp_path):
+    """The path the CLI takes: no frame passed in."""
+    bars = _minute_bars("2026-10-07 12:00", 60)
+    store = _store(tmp_path)
+    store.write(pd.concat([bars.iloc[:20], bars.iloc[37:]]), merge=False)
+
+    assert store.missing_windows()[0]["minutes"] == 17
+
+
 def test_write_never_reuses_one_temporary_name(tmp_path, monkeypatch):
     """A shared temporary name lets two writers interleave into one inode.
 

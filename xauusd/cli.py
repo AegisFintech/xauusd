@@ -1,6 +1,6 @@
 from __future__ import annotations
 import argparse,json,logging,os,shutil,signal,time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 from dotenv import load_dotenv
@@ -423,6 +423,47 @@ def _build_engine(paper=None, now_provider=None):
  return PaperTradingEngine(paper,coordinator,source,signals,BitsStore(transcript),transcript,
                             config,now_provider=now_provider)
 
+def data_heal(store,args) -> dict:
+ """Fill interior gaps that the tail-only update can never reach.
+
+`data update` computes its start from the newest bar, so a hole in the middle of
+the store is permanent: on 2026-10-12 a feed restart lost 17 minutes that four
+daily updates could not recover, and they are still missing. Bounded twice -- only
+the last `days`, and at most `max_minutes` of missing data per run -- so this is
+safe on a timer and cannot turn into a multi-hour backfill of seven years of
+history. Windows that do not fit the budget are reported as deferred, not dropped.
+"""
+ from pandas import Timestamp, Timedelta
+ since=datetime.now(timezone.utc)-timedelta(days=args.days)
+ windows=store.missing_windows(since=since,min_minutes=args.min_minutes)
+ budget=args.max_minutes; healed=[]; deferred=[]
+ for window in windows:
+  if budget<window["minutes"]:
+   deferred.append(window); continue
+  rows=None
+  if not args.dry_run:
+   # One minute past the last missing bar, because the downloader's end is exclusive
+   # of the forming minute and the window's `end` is a bar that should exist.
+   outcome=_download_with_retry(Timestamp(window["start"]),
+                                Timestamp(window["end"])+Timedelta(minutes=1),
+                                page_size=args.page_size)
+   rows=(outcome or {}).get("downloaded_rows")
+  entry={**window,"downloaded_rows":rows}
+  if rows is not None:
+   # The broker has no bar for a minute in which nothing quoted, so a window can be
+   # genuinely market-open and still not be fillable. Measured on 2026-10-13: every
+   # window that survived the heal sat on the 21:00-22:00 UTC daily break boundary
+   # and returned one or two rows for three to five open minutes. Saying so keeps a
+   # boundary gap from reading as data loss on every run.
+   entry["unfilled_minutes"]=max(0,int(window["minutes"])-int(rows))
+  healed.append(entry)
+  budget-=window["minutes"]
+ return {"state":"ok","dry_run":bool(args.dry_run),"days":args.days,
+         "windows_found":len(windows),"windows_healed":len(healed),
+         "windows_unfilled":sum(1 for entry in healed if entry.get("unfilled_minutes")),
+         "windows_deferred":len(deferred),"minutes_budget":args.max_minutes,
+         "minutes_budget_remaining":budget,"healed":healed,"deferred":deferred[:20]}
+
 def engine_controller(action: str, reason: str|None=None, result: str|None=None) -> dict:
  """Operator and supervisor control for the deterministic trade engine."""
  import json as _json
@@ -703,6 +744,12 @@ def build_parser() -> argparse.ArgumentParser:
  rebuild.add_argument("--cutoff",help="UTC start of the range to reproduce; defaults to the current store's first bar, and is required when the store is unreadable")
  rebuild.add_argument("--chunk-pages",type=int,default=200)
  ds.add_parser("raw-retention",help="report which archived raw pages a minimal cover makes redundant; deletes nothing")
+ heal=ds.add_parser("heal",help="download interior gaps that the tail-only update can never reach")
+ heal.add_argument("--days",type=int,default=7,help="only look for gaps in the last N days; the store holds years of older ones")
+ heal.add_argument("--max-minutes",type=int,default=240,help="bound on missing minutes downloaded per run, so a timer job cannot run away")
+ heal.add_argument("--min-minutes",type=int,default=2,help="ignore gaps shorter than this")
+ heal.add_argument("--page-size",type=int,default=5000)
+ heal.add_argument("--dry-run",action="store_true",help="report the windows without contacting the broker")
  p.subcommands=sorted(sub.choices)
  return p
 
@@ -904,6 +951,7 @@ def main():
     result=s.rebuild_from_raw(a.cutoff,chunk_pages=a.chunk_pages,progress=steps.append)
     result["quarantined"]=quarantined; result["progress_tail"]=steps[-3:]
    elif a.data_cmd=="raw-retention": result=s.raw_retention_plan()
+   elif a.data_cmd=="heal": result=data_heal(s,a)
    else: p.error("choose a data command")
    if a.data_cmd in ("download","update"):
     # Atomic: a torn read maps to "missing" for both readers, and the live view

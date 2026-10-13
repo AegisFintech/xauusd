@@ -134,6 +134,45 @@ class HistoricalDataStore:
                 "closed_minutes":int(closed),
                 "gap_events":len(gap_events),"gaps":gap_events[:100],
                 "duplicates":int(bars.index.duplicated().sum())}
+    def missing_windows(self, bars: pd.DataFrame | None = None, since: Any = None,
+                        min_minutes: int = 2) -> list[dict[str, Any]]:
+        """Contiguous runs of market-open minutes the store does not have.
+
+        `validate` reports gap events but keeps only the first hundred and does not
+        separate a closed market from a hole, and `data update` extends the tail
+        only -- so an interior gap was permanent. On 2026-10-12 the feed restarted
+        and 17 minutes went missing that no later run could ever recover, because
+        every run computed its start from the newest bar. This is the input to
+        healing, and it counts only minutes the market was actually open, using the
+        same New York session logic as every other freshness decision here.
+
+        ``since`` bounds the scan; without it this walks seven years of gaps.
+        """
+        frame = self.read() if bars is None else bars
+        index = frame.index
+        if since is not None:
+            since = pd.Timestamp(since)
+            if since.tzinfo is None:
+                since = since.tz_localize("UTC")
+            index = index[index >= since]
+        if len(index) < 2:
+            return []
+        deltas = index.to_series().diff()
+        # Positional, not label-based: a duplicated timestamp would make `.loc`
+        # return several rows and silently corrupt the window arithmetic.
+        positions = np.flatnonzero((deltas > pd.Timedelta(minutes=1)).to_numpy())
+        windows = []
+        for position in positions:
+            stamp, previous = index[position], index[position - 1]
+            absent = pd.date_range(previous + pd.Timedelta(minutes=1),
+                                   stamp - pd.Timedelta(minutes=1), freq="min", tz="UTC")
+            open_minutes = [minute for minute in absent if market_is_open(minute.to_pydatetime())]
+            if len(open_minutes) < min_minutes:
+                continue
+            windows.append({"start": open_minutes[0].isoformat(), "end": open_minutes[-1].isoformat(),
+                            "minutes": len(open_minutes), "after": previous.isoformat(),
+                            "before": stamp.isoformat()})
+        return windows
     def write(self, bars: pd.DataFrame, merge=True) -> pd.DataFrame:
         """Replace the store with `bars`, merged into whatever is already there.
 

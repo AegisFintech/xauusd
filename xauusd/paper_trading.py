@@ -414,7 +414,14 @@ class PaperTrading:
             "realized_pl": realized,
             "drawdown_pct": round((high_water - equity) / high_water * 100, 3) if high_water > 0 else 0.0,
             "high_water_equity": high_water,
-            "trades_today": int(state.get("trades_today", 0)),
+            # `trades_today` has to mean today. The counter only rolls when a mark
+            # price is applied, so a stopped account kept reporting its last active
+            # day's count as today's: on 2026-10-13 it read `trades_today: 2` for two
+            # fills from 2026-10-05, eight days earlier. The gate reads the raw state
+            # and rolls before it counts, so this is a reporting fix only.
+            "trades_today": (int(state.get("trades_today", 0))
+                             if state.get("day") == _now().date().isoformat() else 0),
+            "trades_on_last_marked_day": int(state.get("trades_today", 0)),
             "market_open": market_is_open(_now()),
             "recent_fills": fills,
         }

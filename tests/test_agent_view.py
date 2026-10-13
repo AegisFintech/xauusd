@@ -205,7 +205,12 @@ def test_paper_endpoint_reflects_accepted_fill(server, paper_trading):
     summary = payload["paper"]["summary"]
     assert summary["position"] == pytest.approx(0.5)
     assert summary["side"] == "long"
-    assert summary["trades_today"] == 1
+    # This fill is dated 26 days before the wall clock, so "today" is genuinely zero
+    # and the count belongs to the day it was marked. That split is the fix: a stopped
+    # account used to present its last active day's count as today's.
+    assert summary["trades_today"] == 0
+    assert summary["trades_on_last_marked_day"] == 1
+    assert summary["day"] == "2026-09-17"
     assert summary["equity"] == pytest.approx(100_000.0)
     assert len(summary["recent_fills"]) == 1
     assert summary["recent_fills"][0]["decision_id"] == "fill-test-1"
