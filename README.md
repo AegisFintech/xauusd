@@ -112,6 +112,8 @@ Every `data update/download` run records `reports/data_update_status.json` (`sta
 
 `data update` computes its start from the newest bar, so it can only extend the tail — an interior hole is permanent. A feed restart on 2026-10-12 lost 16 minutes that four daily updates could not reach, and they stayed missing until `data heal` existed. Heal finds market-open minutes the store does not have, using the same New York session logic as every other freshness decision, and downloads only those windows, bounded by `--days` and `--max-minutes` so it is safe on a timer; windows that do not fit the budget are reported as deferred rather than dropped. It also reports `unfilled_minutes` per window, because the broker has no bar for a minute in which nothing quoted: measured live, every window that survived a heal sat on the 21:00–22:00 UTC daily-break boundary and was unfillable rather than lost.
 
+The feed also keeps a bounded transition log at `reports/data_feed_events.json` — the last 200 state changes plus a `dropped` count. The status file holds only the latest state and these services write no journald logs, so a feed that crashed and was restarted by systemd previously left no trace at all: the 2026-10-12 outage was datable only by correlating a hole in the store against `ExecMainStartTimestamp`. Only transitions are recorded, not bars, and a failing event log is logged and ignored — losing the log must never cost the data it describes.
+
 ## Autonomous Agent
 
 `agent` runs one continuously trading AI plan-tool loop whose thinking is visible in a live web view. It is paper-first and reads `DD_*` and `AGENT_*` settings. The workflow returns one correlated `xauusd/1` envelope per invocation.

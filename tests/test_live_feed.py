@@ -22,6 +22,59 @@ def config(tmp_path, **overrides):
     return LiveFeedConfig(**values)
 
 
+def test_state_transitions_are_logged_beyond_the_latest_status(tmp_path):
+    """The status file holds only the latest state, and these services write no
+    journald logs, so a crash-and-restart left no trace at all. On 2026-10-12 the
+    feed was down for 17 minutes and the only way to date the outage was to
+    correlate a hole in the store against ExecMainStartTimestamp.
+    """
+    import json
+    from xauusd.live_feed import LiveBarFeed
+    events = tmp_path / "events.json"
+    feed = LiveBarFeed(config(tmp_path, events_path=str(events)))
+
+    feed._write_status("connecting")
+    feed._write_status("ok", bar_utc="2026-10-13T02:38:00+00:00")
+    feed._write_status("ok", bar_utc="2026-10-13T02:39:00+00:00")   # same state: not an event
+    feed._write_status("bar_write_failed", error_code="OSError")
+
+    log = json.loads(events.read_text())
+    assert [row["state"] for row in log["events"]] == ["connecting", "ok", "bar_write_failed"]
+    assert log["events"][-1]["error_code"] == "OSError"
+    # The event records the transition moment, not the latest bar: the second "ok"
+    # was not a transition, so it produced no event and the first one keeps 02:38.
+    assert log["events"][-2]["last_bar_utc"] == "2026-10-13T02:38:00+00:00"
+    assert log["dropped"] == 0
+
+
+def test_the_event_log_is_capped_and_counts_what_it_dropped(tmp_path):
+    """An unbounded file under reports/ is how a disk fills."""
+    import json
+    from xauusd.live_feed import FEED_EVENT_LIMIT, LiveBarFeed
+    events = tmp_path / "events.json"
+    feed = LiveBarFeed(config(tmp_path, events_path=str(events)))
+
+    for index in range(FEED_EVENT_LIMIT + 25):
+        feed._write_status("ok" if index % 2 else "connecting")
+
+    log = json.loads(events.read_text())
+    assert len(log["events"]) == FEED_EVENT_LIMIT
+    assert log["dropped"] == 25
+
+
+def test_an_unwritable_event_log_does_not_take_the_feed_down(tmp_path):
+    """Losing the log must never cost the data it describes."""
+    import json
+    from pathlib import Path
+    from xauusd.live_feed import LiveBarFeed
+    # A directory where the log file should be, so every write to it fails.
+    feed = LiveBarFeed(config(tmp_path, events_path=str(tmp_path)))
+
+    feed._write_status("connecting")
+
+    assert json.loads(Path(feed.config.status_path).read_text())["state"] == "connecting"
+
+
 def test_data_feed_run_exits_nonzero_and_refuses_a_non_demo_host(tmp_path):
     # Exiting 0 under Restart=always is an invisible infinite restart loop; the
     # exit code is the only signal systemd gets. A host that is not the pinned

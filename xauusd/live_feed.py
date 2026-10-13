@@ -48,6 +48,10 @@ from .ctrader_auth import DEMO_HOST, demo_accounts, resolve_symbol
 log = logging.getLogger(__name__)
 
 NEW_YORK = ZoneInfo("America/New_York")
+# State transitions only, so this stays small: one entry per state or error change,
+# not one per bar. Capped because an unbounded file under reports/ is how a disk fills.
+FEED_EVENT_LIMIT = 200
+FEED_EVENT_LOCK_SECONDS = 10.0
 # A live M1 bar is stamped at its open; it is only complete one interval later.
 BAR_INTERVAL_SECONDS = 60
 # Re-authenticate and resubscribe on this cadence so a silently dropped socket
@@ -103,6 +107,7 @@ class LiveFeedConfig:
     processed_dir: str = "data/processed"
     status_path: str = HEARTBEAT_PATH_DEFAULT
     state_path: str = "state/data_feed.json"
+    events_path: str = "reports/data_feed_events.json"
     demo_only_required: bool = True
     backfill_bars: int = 500
 
@@ -129,7 +134,8 @@ class LiveFeedConfig:
                    symbol=os.getenv("CTRADER_SYMBOL", "XAUUSD"),
                    processed_dir=str(store.processed_dir),
                    status_path=os.getenv("DATA_FEED_STATUS_PATH", HEARTBEAT_PATH_DEFAULT),
-                   state_path=os.getenv("DATA_FEED_STATE_PATH", "state/data_feed.json"))
+                   state_path=os.getenv("DATA_FEED_STATE_PATH", "state/data_feed.json"),
+                   events_path=os.getenv("DATA_FEED_EVENTS_PATH", "reports/data_feed_events.json"))
 
 
 def _heartbeat_phase(moment: datetime) -> str:
@@ -282,6 +288,7 @@ class LiveBarFeed:
         from .atomic import atomic_write_json
         from pathlib import Path
         now = datetime.now(timezone.utc)
+        previous = (self.status.get("state"), self.status.get("error_code"))
         self.status.update(state=state, recorded_at=now.isoformat(), error_code=error_code,
                            bars_written=self.bars_written,
                            last_bar_utc=bar_utc or self.status.get("last_bar_utc"),
@@ -293,6 +300,46 @@ class LiveBarFeed:
             atomic_write_json(Path(self.config.status_path), self.status)
         except OSError as exc:
             log.warning("data feed status write failed: %s", type(exc).__name__)
+        if previous != (state, error_code):
+            self._record_event(now, state, error_code)
+
+    def _record_event(self, when: datetime, state: str, error_code: str | None) -> None:
+        """Append a state transition to a bounded event log.
+
+        The status file holds only the latest state and these services write no
+        journald logs, so a feed that crashed and was restarted by systemd left no
+        trace at all. On 2026-10-12 it was down for 17 minutes and the only way to
+        date the outage was to correlate a hole in the store against
+        ExecMainStartTimestamp. Transitions are rare -- one per state or error
+        change, not one per bar -- so the log stays small, and it is capped rather
+        than grown because an unbounded file in reports/ is how a disk fills.
+        """
+        from .atomic import atomic_write_json, file_lock
+        from pathlib import Path
+        path = Path(self.config.events_path)
+        event = {"recorded_at": when.isoformat(), "state": state, "error_code": error_code,
+                 "bars_written": self.bars_written,
+                 "last_bar_utc": self.status.get("last_bar_utc")}
+        try:
+            with file_lock(path, FEED_EVENT_LOCK_SECONDS):
+                events, dropped = [], 0
+                if path.exists():
+                    try:
+                        loaded = json.loads(path.read_text())
+                    except ValueError:
+                        loaded = {}
+                    if isinstance(loaded, dict):
+                        events = [row for row in loaded.get("events", []) if isinstance(row, dict)]
+                        dropped = int(loaded.get("dropped", 0))
+                events.append(event)
+                overflow = len(events) - FEED_EVENT_LIMIT
+                if overflow > 0:
+                    events, dropped = events[overflow:], dropped + overflow
+                atomic_write_json(path, {"events": events, "dropped": dropped,
+                                         "limit": FEED_EVENT_LIMIT})
+        except (OSError, TimeoutError) as exc:
+            # Losing the event log must never take the feed down with it.
+            log.warning("data feed event log write failed: %s", type(exc).__name__)
 
     # -- lifecycle --------------------------------------------------------
     def stop(self) -> None:
