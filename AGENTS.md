@@ -169,3 +169,11 @@ Development speed is never a reason to relax a risk gate, skip a freshness or
 market-hours check, weaken the kill switch, weaken a test to make it pass, or trade an
 unvalidated strategy. If a rule blocks work, fix the rule's wording or ask the
 operator; do not route around it.
+
+## Required update workflow
+
+For every project update, refresh Graphify with `graphify update .`, update
+`README.md` and `AGENTS.md` to reflect the change, run the required checks,
+and commit and push the update. Keep credentials, runtime state, generated
+market data, and unrelated existing changes out of commits. Report any failed
+check or push explicitly.

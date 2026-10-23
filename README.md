@@ -414,3 +414,11 @@ python3 -m venv .venv
 ```
 
 Rebuilding the environment does not authorize starting paused services.
+
+## Required update workflow
+
+For every project update, refresh Graphify with `graphify update .`, update
+`README.md` and `AGENTS.md` to reflect the change, run the required checks,
+and commit and push the update. Keep credentials, runtime state, generated
+market data, and unrelated existing changes out of commits. Report any failed
+check or push explicitly.
