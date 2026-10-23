@@ -222,3 +222,16 @@ Committed branch history was consolidated into `main` on 2026-10-23. Updates
 are published to `main`; unrelated local cleanup and runtime data remain outside
 this release. The previously deployed harness modules and their integration tests
 are included as prerequisites for the Luna efficiency update.
+
+## Dashboard navigation — 2026-10-23
+
+The read-only dashboard now has four keyboard-accessible tabs. Overview keeps
+account metrics visible and shows the current task/blocker, market and equity
+charts, latest three findings, running/recently failed jobs, and main-account
+positions. Experiments compares independent unvalidated accounts and their
+retirement reasons, with detailed records collapsed. Research contains the full
+agenda, findings, candidate pipeline and activity stream. System contains Codex
+usage/compaction, tool/release diagnostics, data, storage and full job history.
+Measured account results take priority over the smaller aspiration label.
+Arrow keys, Home and End navigate tabs; hidden charts redraw on returning to
+Overview. Browser surfaces remain GET-only and issue no operator commands.

@@ -191,3 +191,27 @@ assert.equal(root.children[4].children[1].textContent,'Unavailable');
 '''
     result=subprocess.run(['node','-e',harness],capture_output=True,text=True,timeout=10)
     assert result.returncode==0,result.stderr
+
+
+def test_dashboard_tabs_preserve_one_selected_panel_and_reject_unknown_names():
+    import subprocess
+    from xauusd.lab_dashboard import PAGE
+    script=PAGE.split('<script>',1)[1].split('</script>',1)[0]
+    script=script[:script.index("$('timeframes').addEventListener")]
+    harness=r'''
+const assert=require('node:assert/strict');
+const names=['overview','experiments','research','system'];
+const tabs=names.map(name=>({dataset:{view:name},attrs:{},setAttribute(k,v){this.attrs[k]=v},classList:{toggle(){}}}));
+const panels=names.map(name=>({dataset:{panel:name},hidden:false}));
+global.document={getElementById:()=>null,querySelectorAll:selector=>selector==='[data-view]'?tabs:panels};
+'''+script+r'''
+selectView('experiments');
+assert.deepEqual(panels.map(p=>p.hidden),[true,false,true,true]);
+assert.equal(tabs[1].attrs['aria-selected'],'true');
+assert.equal(tabs[0].tabIndex,-1);
+assert.equal(tabs[1].tabIndex,0);
+selectView('unknown');
+assert.deepEqual(panels.map(p=>p.hidden),[true,false,true,true]);
+'''
+    result=subprocess.run(['node','-e',harness],capture_output=True,text=True,timeout=10)
+    assert result.returncode==0,result.stderr

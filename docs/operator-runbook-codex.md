@@ -176,3 +176,16 @@ previous model, so they do not establish savings from Luna or identify a bill.
 The compaction threshold is a context trigger, not a time schedule. Keep the
 operating prompt focused on one measurable task, reusable commands, compact results
 and evidence references; evaluate retries and completed findings alongside tokens.
+
+## Dashboard navigation — 2026-10-23
+
+The read-only dashboard now has four keyboard-accessible tabs. Overview keeps
+account metrics visible and shows the current task/blocker, market and equity
+charts, latest three findings, running/recently failed jobs, and main-account
+positions. Experiments compares independent unvalidated accounts and their
+retirement reasons, with detailed records collapsed. Research contains the full
+agenda, findings, candidate pipeline and activity stream. System contains Codex
+usage/compaction, tool/release diagnostics, data, storage and full job history.
+Measured account results take priority over the smaller aspiration label.
+Arrow keys, Home and End navigate tabs; hidden charts redraw on returning to
+Overview. Browser surfaces remain GET-only and issue no operator commands.
