@@ -251,3 +251,53 @@ assert.equal(nodes['jump-latest'].hidden,true);
     result = subprocess.run(['node', '-e', harness], capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
     assert 'views.research.append(parts.activity,parts.agenda' in PAGE
+
+
+def test_statistics_counts_retained_evidence_without_claiming_success():
+    from xauusd.lab_api import retained_statistics
+    from xauusd.lab_store import LabStore
+    from xauusd.local_state import SQLiteAgentTranscriptStore
+    import tempfile
+    with tempfile.TemporaryDirectory() as directory:
+        store = LabStore(SQLiteAgentTranscriptStore(directory + '/state.db'))
+        store.meta('research_outcomes', [{'verdict': 'reject'}, {'verdict': 'investigate'}])
+        store.meta('agent_calls', [
+            {'name': 'tc02_run', 'state': 'completed', 'result': {'ok': True}},
+            {'name': 'tc02_run', 'state': 'completed', 'result': {'ok': False}},
+            {'name': 'tc02_run', 'state': 'unknown'},
+            {'name': 'tc02_inspect', 'state': 'completed'},
+            {'name': 'analysis', 'state': 'completed', 'result': {'ok': True}},
+        ])
+        result = retained_statistics(store)
+        assert result['research']['total'] == 2
+        assert result['tc02']['requests'] == 3
+        assert result['tc02']['successful_results'] == 1
+        assert result['tc02']['states'] == {'completed': 2, 'unknown': 1}
+        assert result['tc02']['cpu_hours'] is None
+        assert result['scope'] == 'retained_records'
+        assert 'result' not in result['tools']
+
+
+def test_statistics_tab_renders_missing_metrics_and_untrusted_labels_safely():
+    import subprocess
+    from xauusd.lab_dashboard import PAGE
+    assert 'data-view="statistics"' in PAGE
+    script = PAGE.split('<script>', 1)[1].split('</script>', 1)[0]
+    script = script[:script.index("$('timeframes').addEventListener")]
+    harness = r"""
+const assert=require('node:assert/strict');
+function element(tag){return {tag,children:[],textContent:'',append(...nodes){this.children.push(...nodes)},replaceChildren(){this.children=[]}};}
+const root=element('div');
+global.document={getElementById:id=>id==='statistics-content'?root:null,createElement:element};
+"""+script+r"""
+renderStatistics({statistics:{scope:'retained_records',tc02:{requests:3,cpu_hours:null},tools:{'<img onerror=bad>':2}},codex_usage:{total_token_usage:{input_tokens:100,cached_input_tokens:80}}});
+const text=JSON.stringify(root);
+assert(text.includes('Retained records'));
+assert(text.includes('Unavailable'));
+assert(text.includes('<img onerror=bad>'));
+assert(text.includes('80.0%'));
+renderStatistics({});
+assert(JSON.stringify(root).includes('Unavailable'));
+"""
+    result = subprocess.run(['node', '-e', harness], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr

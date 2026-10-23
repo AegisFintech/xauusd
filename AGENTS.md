@@ -240,3 +240,8 @@ Overview. Browser surfaces remain GET-only and issue no operator commands.
 ## Research activity chat — 2026-10-23
 
 Research opens with the read-only live agent activity chat. Messages run oldest to newest, with Codex, tool and harness labels and expandable evidence. Auto-follow pauses when the reader scrolls up; Jump to latest resumes it. Refreshes preserve expanded evidence and do not rebuild an unchanged feed. Existing filters and UTC-day archival remain in place.
+
+
+## Dashboard statistics — 2026-10-23
+
+The read-only Statistics tab refreshes with the dashboard and consolidates retained research verdicts, research sessions, qualification outcomes, experiments, improvement states, tool calls and tc02 request outcomes. Completed remote calls count as successful only with an explicit successful result. It also shows cumulative persistent-thread Codex usage and cached share, latest-call usage, compactions, current paper/UTC daily metrics, data freshness, storage, release status and risk limits. Retained counts are not lifetime totals; remote CPU-hours, utilization and lifetime backtest totals remain unavailable. No execution or risk controls change.

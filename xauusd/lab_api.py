@@ -25,6 +25,33 @@ def _data():
         return _cache["bars"]
 
 
+def retained_statistics(store) -> dict:
+    """Counts only bounded retained evidence; never infer remote execution success."""
+    from collections import Counter
+    def rows(key):
+        return store.meta(key) or []
+    def states(items, field='state'):
+        return dict(Counter(row.get(field, 'unknown') for row in items))
+    calls = rows('agent_calls')
+    remote = [row for row in calls if row.get('name') == 'tc02_run']
+    return {
+        'scope': 'retained_records',
+        'recorded_at': datetime.now(timezone.utc).isoformat(),
+        'research': {'total': len(rows('research_outcomes')),
+                     'verdicts': states(rows('research_outcomes'), 'verdict')},
+        'sessions': {'total': len(store.jobs()), 'states': states(store.jobs())},
+        'qualification': {'total': len(store.candidates()), 'states': states(store.candidates())},
+        'experiments': {'current': len(rows('experiments')), 'retired': len(rows('experiment_archive'))},
+        'improvements': {'total': len(rows('improvements')), 'states': states(rows('improvements'))},
+        'tools': dict(Counter(row.get('name', 'unknown') for row in calls)),
+        'tc02': {'requests': len(remote), 'states': states(remote),
+                 'successful_results': sum(row.get('state') == 'completed' and
+                     isinstance(row.get('result'), dict) and row['result'].get('ok') is True for row in remote),
+                 'inspections': sum(row.get('name') == 'tc02_inspect' for row in calls),
+                 'cpu_hours': None, 'utilization_pct': None, 'lifetime_backtests': None},
+    }
+
+
 def snapshot(transcript, paper) -> dict:
     from .agent_daily import utc_day
     daily=utc_day()
@@ -113,7 +140,7 @@ def snapshot(transcript, paper) -> dict:
         alerts.append("Research has no changed experimental evidence in three sessions; review the evolving plan.")
     if engineering.get("state") in ("recovery_required","installing"):
         alerts.append("Engineering release recovery needs attention.")
-    return {"status": status, "alerts": alerts, "account": account, "active": active, "candidates": candidates[:40],
+    return {"statistics": retained_statistics(store) if hasattr(transcript, "connect") else {}, "status": status, "alerts": alerts, "account": account, "active": active, "candidates": candidates[:40],
             "jobs": jobs[:30], "equity": [r for r in equity if r.get('time','')>=daily['started_at']][-2000:], "activity": activity[-100:], "data": data,
             "storage": storage, "dataset": dataset, "memory": memory,
             "experiments": (store.meta("experiments") or []) if hasattr(transcript,"connect") else [],
