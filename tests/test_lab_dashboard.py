@@ -215,3 +215,39 @@ assert.deepEqual(panels.map(p=>p.hidden),[true,false,true,true]);
 '''
     result=subprocess.run(['node','-e',harness],capture_output=True,text=True,timeout=10)
     assert result.returncode==0,result.stderr
+
+
+def test_chat_orders_messages_and_pauses_following_without_losing_details():
+    import subprocess
+    from xauusd.lab_dashboard import PAGE
+    script = PAGE.split('<script>', 1)[1].split('</script>', 1)[0]
+    script = script[:script.index("$('timeframes').addEventListener")]
+    harness = r"""
+const assert=require('node:assert/strict');
+function element(tag){return {tag,children:[],value:'all',scrollTop:0,scrollHeight:1000,clientHeight:200,hidden:false,textContent:'',getClientRects(){return [1]},append(...nodes){this.children.push(...nodes)},replaceChildren(){this.children=[]}};}
+const nodes={activity:element('div'),'archived-activity':element('div'),'event-filter':element('select'),'jump-latest':element('button')};
+global.document={getElementById:id=>nodes[id],createElement:element};
+"""+script+r"""
+sessionStarted='2026-10-23T00:00:00Z';
+mergeEvents([{id:2,time:'2026-10-23T01:00:00Z',kind:'tool_result',summary:'second',payload:{ok:true}},{id:1,time:'2026-10-23T00:01:00Z',kind:'commentary',summary:'first'}]);
+assert.equal(nodes.activity.children[0].children[1].textContent,'first');
+assert.equal(nodes.activity.scrollTop,1000);
+const retained=nodes.activity.children[1];
+retained.children[2].open=true;
+nodes.activity.scrollTop=100;
+chatScrolled();
+mergeEvents([{id:3,time:'2026-10-23T02:00:00Z',kind:'error',summary:'third'}]);
+assert.equal(nodes.activity.scrollTop,100);
+assert.equal(nodes['jump-latest'].hidden,false);
+assert.equal(nodes.activity.children[1],retained);
+assert.equal(retained.children[2].open,true);
+const first=nodes.activity.children[0];
+mergeEvents([]);
+assert.equal(nodes.activity.children[0],first);
+jumpToLatest();
+assert.equal(nodes.activity.scrollTop,1000);
+assert.equal(nodes['jump-latest'].hidden,true);
+"""
+    result = subprocess.run(['node', '-e', harness], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert 'views.research.append(parts.activity,parts.agenda' in PAGE

@@ -235,3 +235,8 @@ usage/compaction, tool/release diagnostics, data, storage and full job history.
 Measured account results take priority over the smaller aspiration label.
 Arrow keys, Home and End navigate tabs; hidden charts redraw on returning to
 Overview. Browser surfaces remain GET-only and issue no operator commands.
+
+
+## Research activity chat — 2026-10-23
+
+Research opens with the read-only live agent activity chat. Messages run oldest to newest, with Codex, tool and harness labels and expandable evidence. Auto-follow pauses when the reader scrolls up; Jump to latest resumes it. Refreshes preserve expanded evidence and do not rebuild an unchanged feed. Existing filters and UTC-day archival remain in place.
