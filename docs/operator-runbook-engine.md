@@ -261,7 +261,55 @@ systemctl stop xauusd-engine.service
 
 ---
 
-## 9. Related documents
+## 9. Recovering the market-data store
+
+Symptoms: `reports/data_update_status.json` reports `error_code: "store_corrupt"`,
+or `data_feed_status.json` reports `bar_write_failed` while `session` is `open`, or
+any reader raises `StoreCorruptError`. The parquet exists but its footer cannot be
+parsed, so nothing can read it or append to it.
+
+The cause seen in practice was two writers sharing one temporary filename. That was
+fixed on 2026-10-09 — every store write now goes through `xauusd.atomic` under
+`file_lock` — so a recurrence means something new, and the corrupt file is the
+evidence. Do not delete it.
+
+1. Confirm, and preserve the evidence:
+   ```bash
+   .venv/bin/python -m xauusd.cli data validate      # raises StoreCorruptError
+   ls -la data/processed/
+   ```
+2. Stop the writer that keeps failing, so the rebuild does not race it:
+   ```bash
+   systemctl stop xauusd-data-feed.service
+   ```
+3. Rebuild offline from the raw page archive. No broker access is needed, and
+   `data/raw/` must never be purged for exactly this reason:
+   ```bash
+   .venv/bin/python -m xauusd.cli data rebuild --cutoff 2019-12-01
+   ```
+   `--cutoff` is required when the store cannot be read, and it must be the range the
+   store actually held. The archive reaches back to 2014; rebuilding from all of it
+   would grow the store backwards, change the dataset version, and risk consuming a
+   protected holdout twice. The command quarantines the unreadable file to
+   `<name>.corrupt-<UTC stamp>` instead of overwriting it. Measured: 2.4M bars from
+   6,806 pages in 45 minutes, needing roughly a gigabyte of headroom — check
+   `free -m` before starting.
+4. Fill the hole the outage left, then restart the feed:
+   ```bash
+   .venv/bin/python -m xauusd.cli data update
+   systemctl start xauusd-data-feed.service
+   .venv/bin/python -m xauusd.cli data heal --days 7 --dry-run   # review, then re-run without --dry-run
+   ```
+5. Verify: `data validate` reports `duplicates: 0`; the feed reaches `state: "ok"`
+   with `bars_written` climbing; `/api/health` drops the data-update alert.
+
+`data update` on its own extends only the tail, so an interior hole never closes by
+itself — that is why the timer runs `data update --heal`, bounded to 3 days back and
+120 missing minutes per run. Windows it reports as `unfilled_minutes` are usually the
+21:00–22:00 UTC daily break, where the broker has no bar because nothing quoted; they
+are not data loss and will reappear on every run.
+
+## 10. Related documents
 
 - `docs/agent-recovery-runbook.md` — interrupted-job recovery
 - `AGENTS.md` — repository operating rules and the operator-only boundary

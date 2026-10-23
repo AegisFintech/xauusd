@@ -1,6 +1,6 @@
 from __future__ import annotations
 import argparse,json,logging,os,shutil,signal,time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 from dotenv import load_dotenv
@@ -60,6 +60,17 @@ def research_campaign(start: str|None, end: str|None):
  if end: bars=bars.loc[:end]
  leaderboard=ResearchCampaign().run(bars)
  print(json.dumps(leaderboard,indent=2,allow_nan=False))
+
+def cftc_point_in_time(no_write: bool):
+ """Re-run the preregistered CFTC positioning-flow study end to end.
+
+A preregistered result that cannot be re-run is not evidence, so the chain that
+produced it is a supported command. It refuses to persist an artifact when any of
+its own integrity checks fails.
+"""
+ from .cftc_research import run
+ result=run(write=not no_write)
+ print(json.dumps(result,indent=2,allow_nan=False,default=str))
 
 def validate_strategy(strategy: str, start: str|None, end: str|None, bootstrap_samples: int):
  bars=HistoricalDataStore().read()
@@ -412,7 +423,48 @@ def _build_engine(paper=None, now_provider=None):
  return PaperTradingEngine(paper,coordinator,source,signals,BitsStore(transcript),transcript,
                             config,now_provider=now_provider)
 
-def engine_controller(action: str, reason: str|None=None) -> dict:
+def data_heal(store,args) -> dict:
+ """Fill interior gaps that the tail-only update can never reach.
+
+`data update` computes its start from the newest bar, so a hole in the middle of
+the store is permanent: on 2026-10-12 a feed restart lost 17 minutes that four
+daily updates could not recover, and they are still missing. Bounded twice -- only
+the last `days`, and at most `max_minutes` of missing data per run -- so this is
+safe on a timer and cannot turn into a multi-hour backfill of seven years of
+history. Windows that do not fit the budget are reported as deferred, not dropped.
+"""
+ from pandas import Timestamp, Timedelta
+ since=datetime.now(timezone.utc)-timedelta(days=args.days)
+ windows=store.missing_windows(since=since,min_minutes=args.min_minutes)
+ budget=args.max_minutes; healed=[]; deferred=[]
+ for window in windows:
+  if budget<window["minutes"]:
+   deferred.append(window); continue
+  rows=None
+  if not args.dry_run:
+   # One minute past the last missing bar, because the downloader's end is exclusive
+   # of the forming minute and the window's `end` is a bar that should exist.
+   outcome=_download_with_retry(Timestamp(window["start"]),
+                                Timestamp(window["end"])+Timedelta(minutes=1),
+                                page_size=args.page_size)
+   rows=(outcome or {}).get("downloaded_rows")
+  entry={**window,"downloaded_rows":rows}
+  if rows is not None:
+   # The broker has no bar for a minute in which nothing quoted, so a window can be
+   # genuinely market-open and still not be fillable. Measured on 2026-10-13: every
+   # window that survived the heal sat on the 21:00-22:00 UTC daily break boundary
+   # and returned one or two rows for three to five open minutes. Saying so keeps a
+   # boundary gap from reading as data loss on every run.
+   entry["unfilled_minutes"]=max(0,int(window["minutes"])-int(rows))
+  healed.append(entry)
+  budget-=window["minutes"]
+ return {"state":"ok","dry_run":bool(args.dry_run),"days":args.days,
+         "windows_found":len(windows),"windows_healed":len(healed),
+         "windows_unfilled":sum(1 for entry in healed if entry.get("unfilled_minutes")),
+         "windows_deferred":len(deferred),"minutes_budget":args.max_minutes,
+         "minutes_budget_remaining":budget,"healed":healed,"deferred":deferred[:20]}
+
+def engine_controller(action: str, reason: str|None=None, result: str|None=None) -> dict:
  """Operator and supervisor control for the deterministic trade engine."""
  import json as _json
  from pathlib import Path
@@ -434,6 +486,17 @@ def engine_controller(action: str, reason: str|None=None) -> dict:
   engine=_build_engine()
   outcome=engine.halt(reason) if action=="halt" else engine.resume(reason)
   return {"state":"halted" if action=="halt" else "resumed", **outcome}
+ if action=="validate-strategy":
+  # Operator-only. This is what permits the engine to trade a strategy at all, so it
+  # is granted from a verified artifact and never asserted: the file itself must
+  # record passes_validation=true, and its sha256 is pinned into the ledger.
+  if not (reason or "").strip(): raise ValueError("engine validate-strategy requires --reason")
+  if not (result or "").strip():
+   raise ValueError("engine validate-strategy requires --result pointing at a research "
+                    "result artifact that records passes_validation=true")
+  return {"state":"validated","record":_build_engine().record_validation(result,reason)}
+ if action=="validated":
+  return {"state":"validations","validations":_build_engine().validations()}
  if action=="once":
   engine=_build_engine()
   return engine.evaluate_once()
@@ -615,6 +678,7 @@ def build_parser() -> argparse.ArgumentParser:
  vld=sub.add_parser("validate-strategy"); vld.add_argument("--strategy",choices=["mean_reversion","momentum"],default="mean_reversion"); vld.add_argument("--start"); vld.add_argument("--end"); vld.add_argument("--bootstrap-samples",type=int,default=500)
  ml=sub.add_parser("ml-research"); ml.add_argument("--start"); ml.add_argument("--end"); ml.add_argument("--threshold",type=float,default=.58)
  mlwf=sub.add_parser("ml-walk-forward"); mlwf.add_argument("--start"); mlwf.add_argument("--end"); mlwf.add_argument("--threshold",type=float,default=.58)
+ cftc=sub.add_parser("cftc-point-in-time"); cftc.add_argument("--no-write",action="store_true")
  sub.add_parser("daily-run"); sub.add_parser("weekly-report")
  sub.add_parser("automated-run")
  td=sub.add_parser("tournament-data"); td.add_argument("action",choices=["create","status","verify"]); td.add_argument("--partition",choices=["train","validation","test"])
@@ -635,8 +699,9 @@ def build_parser() -> argparse.ArgumentParser:
  tool.add_argument("name",choices=["read_market","paper_state","propose_trade","canary_signal"])
  tool.add_argument("--input",default="{}")
  engine=sub.add_parser("engine",help="deterministic paper-trading engine (no LLM on the decision path)")
- engine.add_argument("action",nargs="?",choices=["status","once","run","halt","resume"],default="status")
- engine.add_argument("--reason",help="required for halt/resume: why the engine may be paused or resumed")
+ engine.add_argument("action",nargs="?",choices=["status","once","run","halt","resume","validate-strategy","validated"],default="status")
+ engine.add_argument("--reason",help="required for halt/resume/validate-strategy: why the engine may be paused, resumed, or a strategy may be traded")
+ engine.add_argument("--result",help="required for validate-strategy: path to a research result artifact recording passes_validation=true")
  feed=sub.add_parser("data-feed",help="live M1 subscription that keeps the persisted store fresh")
  feed.add_argument("action",nargs="?",choices=["run","once","status"],default="run")
  recover=sub.add_parser("bits-recover",help="acknowledge reconciled interrupted commands; leaves paper stopped")
@@ -675,6 +740,19 @@ def build_parser() -> argparse.ArgumentParser:
  download=ds.add_parser("download"); download.add_argument("--start",required=True,help="UTC start date/time (for example 2026-08-01)"); download.add_argument("--end",help="UTC end date/time; defaults to now"); download.add_argument("--page-size",type=int,default=int(os.getenv("CTRADER_DATA_UPDATE_PAGE_SIZE","5000")))
  download.add_argument("--result-file",help="internal: write the result here instead of the data-update status file")
  update=ds.add_parser("update"); update.add_argument("--overlap-minutes",type=int,default=int(os.getenv("CTRADER_DATA_UPDATE_OVERLAP_MINUTES","10"))); update.add_argument("--page-size",type=int,default=int(os.getenv("CTRADER_DATA_UPDATE_PAGE_SIZE","5000")))
+ update.add_argument("--heal",action="store_true",help="also fill interior gaps; the tail-only download can never reach them")
+ update.add_argument("--heal-days",type=int,default=3,help="with --heal: how far back to look for gaps")
+ update.add_argument("--heal-max-minutes",type=int,default=120,help="with --heal: bound on missing minutes per run, so a timer job cannot run away")
+ rebuild=ds.add_parser("rebuild",help="rebuild the store offline from the raw page archive; no broker call")
+ rebuild.add_argument("--cutoff",help="UTC start of the range to reproduce; defaults to the current store's first bar, and is required when the store is unreadable")
+ rebuild.add_argument("--chunk-pages",type=int,default=200)
+ ds.add_parser("raw-retention",help="report which archived raw pages a minimal cover makes redundant; deletes nothing")
+ heal=ds.add_parser("heal",help="download interior gaps that the tail-only update can never reach")
+ heal.add_argument("--days",type=int,default=7,help="only look for gaps in the last N days; the store holds years of older ones")
+ heal.add_argument("--max-minutes",type=int,default=240,help="bound on missing minutes downloaded per run, so a timer job cannot run away")
+ heal.add_argument("--min-minutes",type=int,default=2,help="ignore gaps shorter than this")
+ heal.add_argument("--page-size",type=int,default=5000)
+ heal.add_argument("--dry-run",action="store_true",help="report the windows without contacting the broker")
  p.subcommands=sorted(sub.choices)
  return p
 
@@ -688,6 +766,7 @@ def main():
  if a.cmd=="validate-strategy": validate_strategy(a.strategy,a.start,a.end,a.bootstrap_samples)
  if a.cmd=="ml-research": ml_research(a.start,a.end,a.threshold)
  if a.cmd=="ml-walk-forward": ml_walk_forward(a.start,a.end,a.threshold)
+ if a.cmd=="cftc-point-in-time": cftc_point_in_time(a.no_write)
  if a.cmd=="daily-run": daily_run()
  if a.cmd=="weekly-report": print(json.dumps(weekly_comparison(),indent=2,allow_nan=False))
  if a.cmd=="automated-run":
@@ -771,7 +850,7 @@ def main():
   _print_structured(result)
   if result.get("status")=="failed": raise SystemExit(1)
  if a.cmd=="engine":
-  try: result=engine_controller(a.action,a.reason)
+  try: result=engine_controller(a.action,a.reason,a.result)
   except Exception as exc: result={"status":"failed","error_type":type(exc).__name__}
   _print_structured(result)
   if result.get("status")=="failed": raise SystemExit(1)
@@ -858,8 +937,35 @@ def main():
      return
    elif a.data_cmd=="update":
     if not s.path.exists(): raise RuntimeError("no local data; run data download --start DATE first")
-    start=s.read().index.max()-__import__('pandas').Timedelta(minutes=a.overlap_minutes)
+    start=s.last_timestamp()-__import__('pandas').Timedelta(minutes=a.overlap_minutes)
     result=_download_with_retry(start,end=datetime.now(timezone.utc),page_size=a.page_size)
+    if a.heal:
+     try:
+      result["heal"]=data_heal(s,argparse.Namespace(days=a.heal_days,max_minutes=a.heal_max_minutes,
+                                                    min_minutes=2,page_size=a.page_size,dry_run=False))
+     except Exception as exc:
+      # A failed heal must not mask a successful tail update. The store is current,
+      # and an interior hole is a smaller problem than reporting the whole refresh
+      # as failed when it was not -- which is what the status file drives.
+      from .data import classify_store_error
+      result["heal"]={"state":"failed","error_type":type(exc).__name__,
+                      "error_code":classify_store_error(exc)}
+   elif a.data_cmd=="rebuild":
+    from .data import StoreCorruptError
+    quarantined=None
+    if s.path.exists():
+     try: s.last_timestamp()
+     except StoreCorruptError:
+      # Quarantine rather than overwrite. The unreadable file is the evidence of how
+      # the store broke, and a rebuild is exactly when that evidence is easiest to
+      # destroy by accident.
+      quarantined=str(s.path.with_name(s.path.name+".corrupt-"+datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")))
+      shutil.move(str(s.path),quarantined)
+    steps=[]
+    result=s.rebuild_from_raw(a.cutoff,chunk_pages=a.chunk_pages,progress=steps.append)
+    result["quarantined"]=quarantined; result["progress_tail"]=steps[-3:]
+   elif a.data_cmd=="raw-retention": result=s.raw_retention_plan()
+   elif a.data_cmd=="heal": result=data_heal(s,a)
    else: p.error("choose a data command")
    if a.data_cmd in ("download","update"):
     # Atomic: a torn read maps to "missing" for both readers, and the live view
@@ -869,10 +975,17 @@ def main():
        "end":result.get("end"),"downloaded_rows":result.get("downloaded_rows"),"error_code":None})
    print(json.dumps(result,indent=2))
   except Exception as exc:
-   from .data import CTraderAuthError
-   code=getattr(exc,"code",None) if isinstance(exc,CTraderAuthError) else None
-   description=getattr(exc,"description",None) if isinstance(exc,CTraderAuthError) else None
-   status={"state":"auth_error" if code else "failed","recorded_at":datetime.now(timezone.utc).isoformat(),
+   from .data import CTraderAuthError, classify_store_error
+   auth=isinstance(exc,CTraderAuthError)
+   # A code makes a failure diagnosable without putting exception text into a report,
+   # because text can carry a URL with a token in it. Only the auth error, which is
+   # built from broker fields rather than from a traceback, carries a description.
+   # Before this a corrupt store and a network failure both reported
+   # `error_type: OSError` with `error_code: null`, and telling them apart meant
+   # reproducing the failure by hand.
+   code=getattr(exc,"code",None) if auth else classify_store_error(exc)
+   description=getattr(exc,"description",None) if auth else None
+   status={"state":"auth_error" if auth else "failed","recorded_at":datetime.now(timezone.utc).isoformat(),
            "error_code":code,"description":description,"error_type":type(exc).__name__}
    atomic_write_json(status_path,status)
    print(json.dumps(status,indent=2)); raise SystemExit(1)

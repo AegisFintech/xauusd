@@ -91,6 +91,25 @@ def test_every_published_operation_is_a_real_cli_command(tmp_path):
         parser.parse_args(shlex.split(rest))  # raises SystemExit on an unsupported example
 
 
+def test_manifest_publishes_a_bounded_repository_search(tmp_path):
+    """Recursive searches from the repository root overrun the 1200s shell ceiling.
+
+    Jobs globbing '**' walked data/ (multi-GB) and graphify-out/cache until the
+    executor SIGKILLed them at the ceiling, and a timed-out job stops paper with
+    recovery_failed and needs operator-only recovery -- three jobs died this way.
+    The bound is only real if it reaches the model, so it is published in the
+    manifest *and* forwarded by prompt_view: a data key prompt_view drops is
+    guidance nobody ever reads.
+    """
+    manifest = build_manifest(cwd=str(tmp_path))
+    guidance = manifest['data']['repository_search']
+
+    for heavy in ('data/', 'graphify-out/', 'backups/', 'build/', '.venv/', '.git/'):
+        assert heavy in guidance, heavy
+    assert '1200s' in guidance and 'recovery_failed' in guidance
+    assert prompt_view(manifest)['data']['repository_search'] == guidance
+
+
 def test_manifest_never_includes_environment_values(tmp_path, monkeypatch):
     secret, setting = uuid4().hex, uuid4().hex
     monkeypatch.setenv('EXAMPLE_API_KEY', secret)

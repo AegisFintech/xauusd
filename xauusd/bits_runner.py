@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import os
 from threading import Thread
+from typing import Any
 from uuid import uuid4
 
 from .agent_loop import ContinuousAgentRunner, paper_state_tool, _redact_for_transcript
@@ -16,8 +17,8 @@ from .bits_jobs import (BitsStore, ShellJobs, SecretFilter, AgentLock, MAX_SHELL
 from .engine_loop import EngineConfig
 from .paper_trading import market_is_open
 from .bits_memory import BitsMemory, result_for_prompt, excerpt
-from .bits_research import (RESEARCH_POLICY, fills_since, finish_research_cycle,
-                           guidance_revision, market_research)
+from .bits_research import (REPEATED_PATH_INSTRUCTION, RESEARCH_POLICY, fills_since, finish_research_cycle,
+                           guidance_revision, market_research, record_cycle_paths, repeated_paths)
 
 
 # The ceiling lives with the executor that enforces it; re-exported here because
@@ -91,10 +92,22 @@ class BitsAgentRunner(ContinuousAgentRunner):
                            monitor_error=self.monitor_error,
                            monitor_thread_alive=bool(self.monitor_thread and self.monitor_thread.is_alive()),
                            research_progress=self.bits_store.get("research_progress", {}),
+                           repeated_paths=self._repeated_paths_view(),
                            memory=self.memory.status(),
                            capabilities=heartbeat_view(self._capabilities()),
                            next_review_at=self.bits_store.get("cycle", {}).get("next_at"), **extra)
         return {"tick": self._tick, "status": status, **extra}
+
+    def _repeated_paths_view(self) -> dict[str, Any]:
+        """Retrieval-loop evidence for the heartbeat, which this file writes every tick.
+
+        A count plus the paths and their cycle counts: the prompt context gets the
+        full rows, the operator only needs to know which file is being re-read.
+        """
+        repeats = repeated_paths(self.bits_store)
+        return {"count": len(repeats),
+                "window": repeats[0]["window"] if repeats else 0,
+                "paths": [{"path": row["path"], "cycles": row["cycles"]} for row in repeats]}
 
     def _capabilities(self, force=False):
         """Manifest of the shell-job environment, persisted so its facts survive cycles and restarts."""
@@ -235,6 +248,15 @@ class BitsAgentRunner(ContinuousAgentRunner):
         repair = self.memory.repair_task()
         if repair:
             context["repair_task"] = repair
+        repeats = repeated_paths(self.bits_store)
+        if repeats:
+            # The loop this breaks: 19 consecutive cycles re-fetching one 7,271-byte
+            # preregistration, each convinced the content was "still omitted". The
+            # counter said "unproductive" but not what was being re-read.
+            context["repeated_paths"] = {
+                "instruction": REPEATED_PATH_INSTRUCTION.format(seen=repeats[0]["cycles"],
+                                                                window=repeats[0]["window"]),
+                "paths": repeats}
         return context
 
     def _submit(self, cycle, market, results=None):
@@ -391,6 +413,10 @@ class BitsAgentRunner(ContinuousAgentRunner):
                 return self._outcome("step_limit")
             proposed = cycle["reply"]["actions"][0]
             action = {**proposed, "args": {**proposed["args"], "timeout_sec": SHELL_TIMEOUT_SECONDS}}
+            # Observation only, before the job runs: record what this cycle touches
+            # so a retrieval loop can be named in a later prompt. It never filters,
+            # rewrites or gates the command.
+            record_cycle_paths(self.bits_store, cycle["cycle_id"], action["args"].get("command"))
             self._record("tool_call", {"tool": "shell", "input": action["args"],
                                        "description": cycle["reply"]["summary"]})
             result = self.jobs.start(cycle["cycle_id"], action)

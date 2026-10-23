@@ -176,6 +176,15 @@ def data_access(cwd: str) -> dict:
                              "for any per-anchor or per-event window sweep: Index.get_indexer rebuilds a hash "
                              "table per call, so a lookup inside the loop over a multi-million row M1 frame "
                              "runs for tens of minutes and overruns the 1200s shell ceiling",
+            "repository_search": "Scope every recursive search to the directory that can hold the target, "
+                                 "e.g. Path('reports/research').glob('*cftc*') or find reports -name '*cftc*'. "
+                                 "Never glob '**' or find from the repository root: data/ (multi-GB, thousands "
+                                 "of entries), graphify-out/cache, backups/, build/, .venv/ and .git/ are "
+                                 "generated or huge, and walking them overruns the 1200s shell ceiling. A job "
+                                 "that reaches the ceiling is SIGKILLed, and a timed-out job stops paper with "
+                                 "recovery_failed and needs operator-only recovery -- a slow search takes the "
+                                 "whole deployment down. A traversal that must start at the root has to prune "
+                                 "those directories.",
             "backtester": "xauusd.engine.EventDrivenBacktester",
             "market_session": "xauusd.paper_trading.market_is_open (New York session; the UTC break "
                               "moves with US daylight time)",
@@ -362,7 +371,7 @@ def prompt_view(manifest: dict) -> dict:
     tools = {name: tool_view(tool) for name, tool in (manifest.get("tools") or {}).items()}
     ops = {key: value for key, value in (manifest.get("operations") or {}).items() if not key.startswith("notes_")}
     data = {key: manifest["data"][key] for key in ("entry_point", "state", "path", "exists", "index", "read_example",
-                                                   "window_lookup")
+                                                   "window_lookup", "repository_search")
             if key in (manifest.get("data") or {})}
     entries = manifest["path"]["entries"]
     status = manifest.get("status") if manifest.get("status") in ("ok", "partial", "failed") else "unknown"

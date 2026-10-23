@@ -471,3 +471,142 @@ def test_bits_capabilities_stored_check_rejects_a_stale_manifest(tmp_path, monke
     assert code == 0 and result['check']['stale'] and not result['check']['passed']
     code, result, _ = _run_cli(monkeypatch, capsys, 'bits-capabilities', '--stored', '--check')
     assert code == 1 and [failure['kind'] for failure in result['check']['failures']] == ['stale']
+
+
+def _heal_args(**overrides):
+    from types import SimpleNamespace
+    defaults = dict(days=7, max_minutes=240, min_minutes=2, page_size=5000, dry_run=False)
+    return SimpleNamespace(**{**defaults, **overrides})
+
+
+def _window(start, end, minutes):
+    return {"start": start, "end": end, "minutes": minutes, "after": start, "before": end}
+
+
+def _store_with_windows(windows):
+    from types import SimpleNamespace
+    return SimpleNamespace(missing_windows=lambda since=None, min_minutes=2: list(windows))
+
+
+def test_data_heal_downloads_an_interior_window(monkeypatch):
+    """The 2026-10-12 feed restart lost 17 minutes no tail-only update could reach."""
+    calls = []
+
+    def fake_download(start, end, page_size=5000):
+        calls.append((start, end, page_size))
+        return {"downloaded_rows": 17}
+
+    monkeypatch.setattr(cli, "_download_with_retry", fake_download)
+    store = _store_with_windows([_window("2026-10-12T08:32:00+00:00",
+                                         "2026-10-12T08:48:00+00:00", 17)])
+
+    result = cli.data_heal(store, _heal_args())
+
+    assert result["windows_healed"] == 1
+    assert result["healed"][0]["downloaded_rows"] == 17
+    assert result["healed"][0]["unfilled_minutes"] == 0
+    assert result["windows_unfilled"] == 0
+    assert result["minutes_budget_remaining"] == 223
+    # One minute past the last missing bar, because the downloader's end excludes it.
+    assert [(start.isoformat(), end.isoformat(), size) for start, end, size in calls] == [
+        ("2026-10-12T08:32:00+00:00", "2026-10-12T08:49:00+00:00", 5000)]
+
+
+def test_data_heal_defers_a_window_that_does_not_fit_the_budget(monkeypatch):
+    """Deferred, not dropped: a bounded timer job must still report what it skipped."""
+    calls = []
+    monkeypatch.setattr(cli, "_download_with_retry",
+                        lambda start, end, page_size=5000: calls.append(start) or {"downloaded_rows": 5})
+    store = _store_with_windows([
+        _window("2026-10-12T08:32:00+00:00", "2026-10-12T08:36:00+00:00", 5),
+        _window("2026-10-12T09:00:00+00:00", "2026-10-12T09:59:00+00:00", 60)])
+
+    result = cli.data_heal(store, _heal_args(max_minutes=30))
+
+    assert result["windows_healed"] == 1
+    assert result["windows_deferred"] == 1
+    assert result["deferred"][0]["minutes"] == 60
+    assert len(calls) == 1
+
+
+def test_data_heal_reports_a_window_the_broker_cannot_fill(monkeypatch):
+    """An open minute in which nothing quoted has no bar, so it can never be filled.
+
+    Measured on the live store: every window that survived a heal sat on the
+    21:00-22:00 UTC daily break boundary. Without this field the same window is
+    reported as missing on every run and reads as recurring data loss.
+    """
+    monkeypatch.setattr(cli, "_download_with_retry",
+                        lambda start, end, page_size=5000: {"downloaded_rows": 2})
+    store = _store_with_windows([_window("2026-10-12T20:58:00+00:00",
+                                         "2026-10-12T22:01:00+00:00", 4)])
+
+    result = cli.data_heal(store, _heal_args())
+
+    assert result["windows_unfilled"] == 1
+    assert result["healed"][0]["unfilled_minutes"] == 2
+
+
+def test_data_heal_dry_run_never_contacts_the_broker(monkeypatch):
+    monkeypatch.setattr(cli, "_download_with_retry", no_broker)
+    store = _store_with_windows([_window("2026-10-12T08:32:00+00:00",
+                                         "2026-10-12T08:48:00+00:00", 17)])
+
+    result = cli.data_heal(store, _heal_args(dry_run=True))
+
+    assert result["dry_run"] is True
+    assert result["windows_healed"] == 1
+    assert result["healed"][0]["downloaded_rows"] is None
+
+
+def test_the_heal_command_is_in_the_cli_grammar():
+    parsed = cli.build_parser().parse_args(["data", "heal", "--days", "3", "--dry-run"])
+
+    assert (parsed.data_cmd, parsed.days, parsed.dry_run) == ("heal", 3, True)
+
+
+def test_update_can_heal_and_the_timer_does():
+    """Without this the command exists but nothing runs it, so a hole still sits for days."""
+    parsed = cli.build_parser().parse_args(["data", "update", "--heal"])
+
+    assert (parsed.data_cmd, parsed.heal, parsed.heal_days, parsed.heal_max_minutes) == \
+        ("update", True, 3, 120)
+    assert cli.build_parser().parse_args(["data", "update"]).heal is False
+
+
+def test_update_reports_a_failed_heal_without_failing_the_update(tmp_path, monkeypatch, capsys):
+    """An interior hole is a smaller problem than a refresh reported as failed.
+
+    The status file drives the live view's data-update alert, so letting heal
+    trouble mask a successful tail download would cry wolf four times a day -- and
+    the store would still be current, which is the part that matters.
+    """
+    import pandas as pd
+    from xauusd.data import DataConfig, HistoricalDataStore
+    monkeypatch.chdir(tmp_path)
+    store = HistoricalDataStore(DataConfig(processed_dir=tmp_path / "data" / "processed",
+                                           raw_dir=tmp_path / "data" / "raw"))
+    index = pd.date_range("2026-10-13 01:00", periods=5, freq="min", tz="UTC")
+    store.write(pd.DataFrame({"open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5,
+                              "volume": 1.0}, index=index), merge=False)
+    monkeypatch.setattr(cli, "HistoricalDataStore", lambda: store)
+    monkeypatch.setattr(cli, "_download_with_retry",
+                        lambda start, end=None, page_size=5000, **kwargs: {
+                            "ok": True, "downloaded_rows": 3, "end": "2026-10-13T03:32:00+00:00"})
+
+    def exploding_heal(*args, **kwargs):
+        raise RuntimeError("heal exploded")
+
+    monkeypatch.setattr(cli, "data_heal", exploding_heal)
+
+    code, result, _ = _run_cli(monkeypatch, capsys, "data", "update", "--heal")
+
+    assert code == 0
+    assert result["downloaded_rows"] == 3
+    assert result["heal"]["state"] == "failed"
+    assert result["heal"]["error_type"] == "RuntimeError"
+    # The status file still says the refresh itself succeeded.
+    import json as _json
+    status = _json.loads((tmp_path / "reports" / "data_update_status.json").read_text())
+    assert status["state"] == "ok"
+    assert status["error_code"] is None

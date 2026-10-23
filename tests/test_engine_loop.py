@@ -1,13 +1,18 @@
 from datetime import datetime, timedelta, timezone
+from dataclasses import replace
 from types import SimpleNamespace
+import hashlib
+import json
+import os
+import tempfile
 
 import pandas as pd
 import pytest
 
 from xauusd.agent_loop import InMemoryAgentTranscriptStore
 from xauusd.demo_execution import NormalizedDecision, PaperToCTraderDemoCoordinator
-from xauusd.engine_loop import (HALT_STATE_KEY, EngineConfig, PaperTradingEngine,
-                                 engine_decision_id)
+from xauusd.engine_loop import (HALT_STATE_KEY, VALIDATION_STATE_KEY, EngineConfig,
+                                 PaperTradingEngine, engine_decision_id)
 from xauusd.paper_trading import (DAILY_LOSS_LIMIT, KILL_SWITCH, MARKET_CLOSED, MAX_POSITION,
                                   InMemoryPaperTradingStore, PaperRiskConfig, PaperTrading)
 
@@ -49,7 +54,20 @@ class Signals:
         return NormalizedDecision("sig", "XAUUSD", self.side, self.quantity, market.observed_at)
 
 
-def build(paper=None, source=None, signals=None, config=None, store=None, transcript=None):
+def _validated_ledger(strategy):
+    """A passing-validation record, so fixtures can exercise the trade path.
+
+    Written straight into the store rather than through `record_validation`, because
+    that method also appends a transcript row and writes a status file, and several
+    tests here assert exact transcript phase sequences.
+    """
+    return {strategy: {"strategy": strategy, "validated_at": NOW.isoformat(),
+                       "result_path": "tests/fixture_result.json", "result_sha256": "0" * 64,
+                       "verdict": "accepted", "reason": "test fixture"}}
+
+
+def build(paper=None, source=None, signals=None, config=None, store=None, transcript=None,
+          validated=True):
     paper = paper or PaperTrading(InMemoryPaperTradingStore(),
                                   PaperRiskConfig(max_market_data_age_seconds=180))
     paper.start("test")
@@ -57,10 +75,21 @@ def build(paper=None, source=None, signals=None, config=None, store=None, transc
     signals = signals or Signals()
     transcript = transcript or InMemoryAgentTranscriptStore()
     transcript.initialize()
+    store = store or Store()
+    config = config or EngineConfig(quantity=0.1, poll_seconds=0.01)
+    if config.status_path == "reports/engine_status.json":
+        # That default is the file the live engine service owns and that
+        # `cli engine status` and the view serve. Without this redirect, running a
+        # single engine test overwrote production status with test data -- observed
+        # as run_id engine_d40bc8ed27fc tick 71557 becoming engine_5c95cdc99191
+        # tick 1. The service rewrites it within seconds, but an operator or the
+        # supervisor reading it in that window was served a phantom engine.
+        config = replace(config, status_path=os.path.join(tempfile.mkdtemp(), "engine_status.json"))
+    if validated:
+        store.put(VALIDATION_STATE_KEY, _validated_ledger(config.strategy))
     engine = PaperTradingEngine(
         paper, PaperToCTraderDemoCoordinator(paper, paper_only=True),
-        source, signals, store or Store(), transcript,
-        config or EngineConfig(quantity=0.1, poll_seconds=0.01),
+        source, signals, store, transcript, config,
         now_provider=lambda: NOW)
     return engine, paper, transcript
 
@@ -367,3 +396,102 @@ def test_engine_status_reports_the_running_process_not_a_phantom(tmp_path, monke
     assert result["run_id"] == "engine_real"
     assert result["tick"] == 2265
     assert result["state"] == "halted"
+
+
+# ------------------------------------------------------- validated-edge gate
+def _result_file(tmp_path, passes=True, verdict="accepted"):
+    path = tmp_path / "result.json"
+    path.write_text(json.dumps({"passes_validation": passes, "verdict": verdict,
+                                "complete_trades": 150}))
+    return path
+
+
+def test_engine_refuses_to_evaluate_a_strategy_with_no_recorded_validation():
+    """The halt was the only thing between the engine and an unvalidated strategy.
+
+    A deploy, a cleared key or one `engine resume` removed it, and on 2026-10-05 an
+    engine restart with no halt key traded `confirmed_breakout` -- which had failed
+    cost-aware chronological validation -- until the LLM supervisor noticed, halted
+    the engine and flattened the position. A halt is a control; this is a
+    precondition, so it has to hold with no halt in force.
+    """
+    signals = Signals()
+    engine, paper, _ = build(validated=False, signals=signals)
+
+    outcome = engine.evaluate_once()
+
+    assert outcome["status"] == "unvalidated_strategy"
+    assert signals.calls == 0, "the strategy must not even be consulted"
+    assert engine.decisions == []
+    assert paper.state()["position"] == 0.0
+
+
+def test_a_recorded_validation_lets_the_same_engine_trade_without_a_restart(tmp_path):
+    """Re-read every tick, like the halt: a cached answer fails silently until restart."""
+    engine, paper, _ = build(validated=False)
+    assert engine.evaluate_once()["status"] == "unvalidated_strategy"
+
+    engine.record_validation(_result_file(tmp_path), "cost-aware chronological validation passed")
+
+    engine.evaluate_once()
+    assert paper.state()["position"] != 0.0
+
+
+def test_record_validation_refuses_a_result_that_did_not_pass(tmp_path):
+    """All 26 research results so far are rejected, so this is the common case."""
+    engine, _, _ = build(validated=False)
+    rejected = _result_file(tmp_path, passes=False,
+                            verdict="rejected_insufficient_complete_trades")
+
+    with pytest.raises(ValueError, match="passes_validation"):
+        engine.record_validation(rejected, "operator override")
+
+    assert engine.validations() == {}
+    assert engine.evaluate_once()["status"] == "unvalidated_strategy"
+
+
+def test_record_validation_requires_a_reason_and_pins_the_result_hash(tmp_path):
+    """The hash stops a later edit to the artifact redefining what was granted."""
+    engine, _, _ = build(validated=False)
+    result = _result_file(tmp_path)
+
+    with pytest.raises(ValueError, match="--reason"):
+        engine.record_validation(result, "   ")
+
+    record = engine.record_validation(result, "cost-aware chronological validation passed")
+
+    assert record["result_sha256"] == hashlib.sha256(result.read_bytes()).hexdigest()
+    assert engine.validations()[engine.config.strategy]["reason"].startswith("cost-aware")
+
+
+def test_a_validation_for_another_strategy_does_not_authorise_this_one(tmp_path):
+    engine, _, _ = build(validated=False)
+
+    engine.record_validation(_result_file(tmp_path), "passed", strategy="some_other_strategy")
+
+    assert engine.validations()
+    assert engine.validation is None
+    assert engine.evaluate_once()["status"] == "unvalidated_strategy"
+
+
+def test_status_reports_an_unvalidated_strategy_rather_than_running():
+    """`engine status` said `running` for an engine that could not trade."""
+    engine, _, _ = build(validated=False)
+
+    status = engine.status()
+
+    assert status["state"] == "unvalidated_strategy"
+    assert status["validation"] is None
+
+
+def test_the_gate_holds_with_no_halt_key_and_survives_a_restart(tmp_path):
+    """The 2026-10-05 sequence: a fresh engine, no halt anywhere, still no trade."""
+    store = Store()
+    engine, paper, _ = build(store=store, validated=False)
+    assert store.get(HALT_STATE_KEY) is None
+
+    restarted, restarted_paper, _ = build(paper=paper, store=store, validated=False)
+
+    assert restarted.evaluate_once()["status"] == "unvalidated_strategy"
+    assert restarted_paper.state()["position"] == 0.0
+    assert engine.validation is None

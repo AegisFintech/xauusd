@@ -107,6 +107,7 @@ class AgentTranscriptStore(Protocol):
     def start_run(self, run_id: str) -> None: ...
     def finish_run(self, run_id: str, status: str) -> None: ...
     def reconcile_running_runs(self, excluding: str | None = None) -> int: ...
+    def resume_run(self, run_id: str) -> bool: ...
     def append(self, run_id: str, tick: int, phase: str, content: dict[str, Any]) -> int: ...
     def steps(self, run_id: str | None = None, after_id: int = 0, before_id: int | None = None,
               desc: bool = False, limit: int = 100) -> list[dict[str, Any]]: ...
@@ -184,15 +185,29 @@ class CockroachAgentTranscriptStore:
         return row["status"] if row else None
 
     def reconcile_running_runs(self, excluding: str | None = None) -> int:
-        parameters: list[Any] = ["stopped", _now()]
-        where = ["status='running'"]
-        if excluding:
-            where.append("run_id != ?")
-            parameters.append(excluding)
+        """Close the caller's own interrupted runs left 'running' by a killed process.
+
+        Mirrors the SQLite store, including the run-family scope: the agent and the
+        engine share this table, so an unscoped update let either process close the
+        other's live run.
+        """
+        if not excluding:
+            return 0
+        from .local_state import _run_family
+        family = _run_family(excluding)
+        parameters: list[Any] = ["stopped", _now(), excluding, len(family), family]
         with self.connect() as db:
-            cursor = db.execute(f"UPDATE agent_runs SET status=?,finished_at=? WHERE {' AND '.join(where)}",
+            cursor = db.execute("UPDATE agent_runs SET status=?,finished_at=? "
+                                "WHERE status='running' AND run_id != ? AND substr(run_id,1,?) = ?",
                                 tuple(parameters))
         return int(cursor.rowcount or 0)
+
+    def resume_run(self, run_id: str) -> bool:
+        """Re-assert a live process's own run row; see the SQLite store."""
+        with self.connect() as db:
+            cursor = db.execute("UPDATE agent_runs SET status='running',finished_at=NULL "
+                                "WHERE run_id=? AND status != 'running'", (run_id,))
+        return bool(cursor.rowcount)
 
     @staticmethod
     def _row(row: Any) -> dict[str, Any]:
@@ -246,14 +261,25 @@ class InMemoryAgentTranscriptStore:
         self._steps = kept
         return {"runs_removed": 0, "steps_removed": dropped}
     def reconcile_running_runs(self, excluding=None):
+        """Family-scoped mirror of the SQL stores: never close another family's run."""
+        from .local_state import _run_family
+        family = _run_family(excluding) if excluding else None
         closed = 0
         for rid, run in self._runs.items():
-            if rid == excluding or run.get("status") != "running":
+            if family is None or rid == excluding or not rid.startswith(family) \
+                    or run.get("status") != "running":
                 continue
             run["status"] = "stopped"
             run["finished_at"] = _now()
             closed += 1
         return closed
+    def resume_run(self, run_id):
+        run = self._runs.get(run_id)
+        if run is None or run.get("status") == "running":
+            return False
+        run["status"] = "running"
+        run.pop("finished_at", None)
+        return True
 
 
 def agent_transcript_store_from_env(initialize: bool = True) -> AgentTranscriptStore:
@@ -570,6 +596,11 @@ class ContinuousAgentRunner:
         return refreshed
 
     def run_tick(self) -> dict[str, Any]:
+        # This process is the only authority on whether its own run is live, and
+        # every reader trusts the stored row: an engine start once closed that row
+        # while this loop kept ticking, so the live view served a running agent as
+        # stopped. Re-asserting it is a no-op unless something else wrote a lie.
+        self.transcript.resume_run(self.run_id)
         self._tick += 1
         tick = self._tick
         now_utc = self._now()

@@ -39,9 +39,12 @@ from uuid import uuid4
 from .demo_execution import NormalizedDecision, PaperToCTraderDemoCoordinator
 from .paper_trading import PaperTrading
 
-ENGINE_PHASES = ("halted", "waiting", "evaluating", "filled", "refused")
+ENGINE_PHASES = ("halted", "unvalidated_strategy", "waiting", "evaluating", "filled", "refused")
 # The engine is the supervisor's only stop control, so it is explicit and durable.
 HALT_STATE_KEY = "engine_halt"
+# A halt is a control someone sets and someone can clear; this is the precondition
+# that decides whether a strategy may be traded at all. See `validation`.
+VALIDATION_STATE_KEY = "engine_validated_strategies"
 
 
 class EngineStore(Protocol):
@@ -223,6 +226,56 @@ class PaperTradingEngine:
                 self._write_status("resumed")
         return self.halted_reason is not None
 
+    @property
+    def validation(self) -> dict[str, Any] | None:
+        """The recorded passing validation for the configured strategy, if any.
+
+        Re-read from the store on every tick for the same reason `halted` is: a
+        cached answer means the control silently fails until someone restarts the
+        service. Absent means the engine may not trade -- see `evaluate_once`.
+        """
+        ledger = self.store.get(VALIDATION_STATE_KEY)
+        if not isinstance(ledger, dict):
+            return None
+        record = ledger.get(self.config.strategy)
+        return record if isinstance(record, dict) else None
+
+    def record_validation(self, result_path: Any, reason: str,
+                          strategy: str | None = None) -> dict[str, Any]:
+        """Record that a strategy passed validation, from its own result artifact.
+
+        Operator-only. This is what lets the engine trade, so it is granted from a
+        verified artifact and never asserted: the file must record
+        ``passes_validation: true``, and its sha256 is pinned into the ledger so a
+        later edit cannot silently redefine the validation that was granted.
+        """
+        from pathlib import Path
+        name = (strategy or self.config.strategy).strip()
+        if not name:
+            raise ValueError("a strategy name is required")
+        if not (reason or "").strip():
+            raise ValueError("recording a validation requires --reason")
+        path = Path(result_path)
+        payload = json.loads(path.read_text())
+        if payload.get("passes_validation") is not True:
+            raise ValueError(f"{path.name} does not record passes_validation=true "
+                             f"(verdict: {payload.get('verdict')})")
+        record = {"strategy": name, "validated_at": self._now().isoformat(),
+                  "result_path": str(path),
+                  "result_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                  "verdict": payload.get("verdict"), "reason": reason.strip()}
+        ledger = dict(self.store.get(VALIDATION_STATE_KEY) or {})
+        ledger[name] = record
+        self.store.put(VALIDATION_STATE_KEY, ledger)
+        self._record("engine_validation", {"summary": f"Strategy validated: {name}", **record})
+        self._write_status("validated")
+        return record
+
+    def validations(self) -> dict[str, Any]:
+        """Every recorded validation, for `engine validated`."""
+        ledger = self.store.get(VALIDATION_STATE_KEY)
+        return dict(ledger) if isinstance(ledger, dict) else {}
+
     def stop(self) -> None:
         self._stop.set()
 
@@ -233,6 +286,20 @@ class PaperTradingEngine:
         if self.halted:
             self._write_status("halted")
             return {"tick": self.tick, "status": "halted", "reason": self.halted_reason}
+        if self.validation is None:
+            # Fail closed, and independently of the halt. Until now the only thing
+            # between the engine and an unvalidated strategy was a flag a human
+            # sets: a deploy, a cleared key or one `engine resume` removed it, and on
+            # 2026-10-05 an engine restart with no halt key traded
+            # `confirmed_breakout` -- which had failed cost-aware chronological
+            # validation -- until the LLM supervisor noticed, halted the engine and
+            # flattened the position six minutes later. A halt is a control; this is
+            # a precondition. No transcript row per tick: at one evaluation every
+            # five seconds that is 17,280 rows a day saying the same thing.
+            reason = f"no recorded passing validation for strategy {self.config.strategy!r}"
+            self._write_status("unvalidated_strategy", reason=reason)
+            return {"tick": self.tick, "status": "unvalidated_strategy",
+                    "strategy": self.config.strategy, "reason": reason}
         try:
             outcome = self._decide()
         except Exception as exc:
@@ -362,10 +429,13 @@ class PaperTradingEngine:
         now = self._now()
         last = self.decisions[-1] if self.decisions else None
         paper = self.paper.state()
+        validation = self.validation
         return {
             "run_id": self.run_id, "tick": self.tick,
-            "state": "halted" if self.halted else "running",
+            "state": ("halted" if self.halted
+                      else "running" if validation else "unvalidated_strategy"),
             "halted_reason": self.halted_reason,
+            "validation": validation,
             "strategy": self.config.strategy, "quantity": self.config.quantity,
             "poll_seconds": self.config.poll_seconds,
             "decisions": len(self.decisions), "consecutive_errors": self.consecutive_errors,

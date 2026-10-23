@@ -16,16 +16,24 @@ Guarantees:
   one inode;
 * ``0o600`` is applied to the temporary file *before* any content is written, so
   a credential file is never briefly world-readable.
+
+A read-modify-write needs one more thing: :func:`file_lock` makes the whole
+read-merge-swap exclusive, because two writers that both read the previous
+content lose one of their updates even when every individual swap is atomic.
 """
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
 SECURE_MODE = 0o600
+LOCK_TIMEOUT_SECONDS = 30.0
 
 
 def atomic_write_bytes(target: str | Path, payload: bytes, mode: int | None = None) -> Path:
@@ -81,3 +89,40 @@ def _fsync_directory(directory: Path) -> None:
         pass
     finally:
         os.close(fd)
+
+
+@contextlib.contextmanager
+def file_lock(target: str | Path, timeout: float = LOCK_TIMEOUT_SECONDS,
+              poll_seconds: float = 0.05):
+    """Exclusive cross-process lock around a read-modify-write of ``target``.
+
+    ``atomic_write_bytes`` makes the swap safe; it cannot make a
+    read-modify-write safe. Two processes that both read the previous content
+    still lose one of their updates, so the read, the merge and the swap have to
+    be one exclusive section. The lock file sits beside the target and is never
+    the target, so no reader can mistake it for data.
+
+    Raises ``TimeoutError`` rather than waiting forever: a writer that cannot get
+    the lock has to fail loudly, not silently skip a merge.
+    """
+    destination = Path(target)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = destination.with_name(destination.name + ".lock")
+    handle = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as exc:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"timed out after {timeout}s waiting for the "
+                                       f"{destination.name} write lock") from exc
+                time.sleep(poll_seconds)
+        try:
+            yield lock_path
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+    finally:
+        os.close(handle)

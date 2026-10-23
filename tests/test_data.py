@@ -1,9 +1,342 @@
 from types import SimpleNamespace
 
+import errno
+import json
+import threading
+
 import pandas as pd
 import pytest
 
-from xauusd.data import CTraderAuthError, CTraderOpenApiConfig, CTraderOpenApiDownloader, DataConfig, HistoricalDataStore, trendbars_to_frame
+from xauusd.atomic import file_lock
+from xauusd.data import (CTraderAuthError, CTraderOpenApiConfig, CTraderOpenApiDownloader,
+                         DataConfig, HistoricalDataStore, StoreCorruptError,
+                         classify_store_error, trendbars_to_frame)
+
+
+def _bars(offset):
+    """Three valid, non-overlapping minutes, shifted so writers never collide."""
+    index = pd.date_range("2024-01-01", periods=3, freq="min", tz="UTC") + pd.Timedelta(minutes=10 * offset)
+    return pd.DataFrame({"open": [1.0, 2.0, 3.0], "high": [2.0, 3.0, 4.0], "low": [0.0, 1.0, 2.0],
+                         "close": [1.5, 2.5, 3.5], "volume": [1.0, 2.0, 3.0]}, index=index)
+
+
+def _store(tmp_path):
+    return HistoricalDataStore(DataConfig(processed_dir=tmp_path / "data" / "processed",
+                                          raw_dir=tmp_path / "data" / "raw"))
+
+
+def _raw_page(tmp_path, first_minute, count, low=120_000_000):
+    """One archived page in the downloader's own format: low plus deltas, 1/100000."""
+    directory = tmp_path / "data" / "raw" / "ctrader" / "XAUUSD" / "M1"
+    directory.mkdir(parents=True, exist_ok=True)
+    payload = {"source": "ctrader-open-api", "digits": 2, "symbol": "XAUUSD",
+               "timeframe": "M1",
+               "bars": [{"utcTimestampInMinutes": first_minute + step, "low": low + step,
+                         "deltaOpen": 1000, "deltaHigh": 2000, "deltaClose": 1500,
+                         "volume": 10} for step in range(count)]}
+    path = directory / f"{first_minute}_{first_minute + count - 1}_page0001.json"
+    path.write_text(json.dumps(payload))
+    return path
+
+
+def test_a_corrupt_store_is_reported_as_corrupt_not_as_a_bare_oserror(tmp_path):
+    """`error_type: OSError` with `error_code: null` was undiagnosable.
+
+    That is all the status file said for the rest of 2026-10-08, after two writers
+    shared one temporary name and the parquet footer became undecodable. Telling a
+    corrupt store from a network failure meant reproducing the failure by hand.
+    """
+    store = _store(tmp_path)
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    store.path.write_bytes(b"not a parquet file")
+
+    for call in (store.read, store.last_timestamp):
+        with pytest.raises(StoreCorruptError) as info:
+            call()
+        assert info.value.code == "store_corrupt"
+        assert classify_store_error(info.value) == "store_corrupt"
+    # Still an OSError, so every handler that catches OSError keeps working.
+    assert isinstance(StoreCorruptError(store.path), OSError)
+
+
+def test_classify_store_error_names_a_full_disk_and_refuses_to_guess():
+    assert classify_store_error(OSError(errno.ENOSPC, "No space left on device")) == "disk_full"
+    # An unrecognised failure gets no code. An invented one is worse than none, and
+    # message text is never persisted because it can carry a token inside a URL.
+    assert classify_store_error(OSError("socket reset by peer")) is None
+    assert classify_store_error(ValueError("nope")) is None
+
+
+def test_rebuild_from_raw_reproduces_the_store_without_the_broker(tmp_path):
+    """Recovery has to work with the store unreadable and the market open.
+
+    That was the 2026-10-09 situation: 2.4M bars unreadable, 15 hours of an open
+    session already lost, and no supported way back.
+    """
+    first = 2_800_000
+    _raw_page(tmp_path, first, 5)
+    _raw_page(tmp_path, first + 3, 5)   # overlapping, exactly as real re-downloads are
+    store = _store(tmp_path)
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    store.path.write_bytes(b"corrupt footer")
+
+    summary = store.rebuild_from_raw(cutoff=pd.Timestamp(first, unit="m", tz="UTC"))
+
+    assert summary["rows"] == 8          # 5 + 5, with the 2 overlapping minutes deduped
+    assert summary["duplicates"] == 0
+    rebuilt = store.read()
+    assert rebuilt.index.min() == pd.Timestamp(first, unit="m", tz="UTC")
+    assert rebuilt.index.max() == pd.Timestamp(first + 7, unit="m", tz="UTC")
+    # Decoded through the same path as a live download, so low-plus-delta is right.
+    assert float(rebuilt["low"].iloc[0]) == pytest.approx(1200.0)
+    assert float(rebuilt["open"].iloc[0]) == pytest.approx(1200.01)
+
+
+def test_rebuild_refuses_to_guess_the_range_of_an_unreadable_store(tmp_path):
+    """The archive reaches back years before the store did.
+
+    Rebuilding from all of it would grow the store backwards, change the dataset
+    version, and risk consuming a protected holdout twice -- so an unreadable store
+    has to be told what range it held.
+    """
+    _raw_page(tmp_path, 2_800_000, 5)
+    store = _store(tmp_path)
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    store.path.write_bytes(b"corrupt footer")
+
+    with pytest.raises(ValueError, match="cutoff"):
+        store.rebuild_from_raw()
+
+
+def test_rebuild_bounds_the_store_to_the_cutoff(tmp_path):
+    early = 2_000_000
+    _raw_page(tmp_path, early, 5)
+    _raw_page(tmp_path, early + 1000, 5)
+    store = _store(tmp_path)
+
+    summary = store.rebuild_from_raw(cutoff=pd.Timestamp(early + 1000, unit="m", tz="UTC"))
+
+    assert summary["rows"] == 5
+    assert store.read().index.min() == pd.Timestamp(early + 1000, unit="m", tz="UTC")
+
+
+def test_rebuild_from_raw_needs_an_archive(tmp_path):
+    store = _store(tmp_path)
+
+    with pytest.raises(FileNotFoundError, match="no raw page archive"):
+        store.rebuild_from_raw(cutoff="2020-01-01")
+
+
+def test_the_rebuild_command_is_in_the_cli_grammar():
+    from xauusd.cli import build_parser
+
+    parsed = build_parser().parse_args(["data", "rebuild", "--cutoff", "2019-12-01",
+                                        "--chunk-pages", "50"])
+
+    assert (parsed.data_cmd, parsed.cutoff, parsed.chunk_pages) == ("rebuild", "2019-12-01", 50)
+
+
+def test_raw_retention_plan_names_the_redundancy_and_preserves_the_range(tmp_path):
+    """The archive is the only rebuild path, so a plan must prove it loses no range.
+
+    `_archive` skips a page only when that exact filename exists, so overlapping
+    re-downloads accumulate: the live archive holds 6,806 pages for 2.4M unique
+    minutes. Reporting the redundancy is useful; silently deleting it is not.
+    """
+    _raw_page(tmp_path, 0, 10)     # 0-9
+    _raw_page(tmp_path, 3, 10)     # 3-12, fully covered by 0-9 plus 5-20
+    _raw_page(tmp_path, 5, 16)     # 5-20, extends the run furthest
+    _raw_page(tmp_path, 30, 10)    # 30-39, after a gap
+    store = _store(tmp_path)
+
+    plan = store.raw_retention_plan()
+
+    assert (plan["pages"], plan["cover_pages"], plan["redundant_pages"]) == (4, 3, 1)
+    assert plan["cover_preserves_the_full_range"] is True
+    assert plan["archive_range_minutes"] == plan["cover_range_minutes"] == [0, 39]
+    assert plan["gaps_in_archive"] == 1
+    assert plan["redundant_bytes"] > 0
+    assert plan["deletes"].startswith("nothing")
+
+
+def test_raw_retention_plan_deletes_nothing(tmp_path):
+    for minute in (0, 3, 5, 30):
+        _raw_page(tmp_path, minute, 10)
+    store = _store(tmp_path)
+    before = sorted(path.name for path in store.raw_archive_dir.glob("*.json"))
+
+    store.raw_retention_plan()
+
+    assert sorted(path.name for path in store.raw_archive_dir.glob("*.json")) == before
+    assert len(before) == 4
+
+
+def test_raw_retention_plan_on_an_empty_archive(tmp_path):
+    plan = _store(tmp_path).raw_retention_plan()
+
+    assert plan["pages"] == 0
+    assert plan["redundant_pages"] == 0
+
+
+def test_the_raw_retention_command_is_in_the_cli_grammar():
+    from xauusd.cli import build_parser
+
+    assert build_parser().parse_args(["data", "raw-retention"]).data_cmd == "raw-retention"
+
+
+def _minute_bars(start, count):
+    index = pd.date_range(start, periods=count, freq="min", tz="UTC")
+    return pd.DataFrame({"open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5,
+                         "volume": 1.0}, index=index)
+
+
+def test_missing_windows_finds_the_interior_hole_a_tail_only_update_cannot(tmp_path):
+    """`data update` starts from the newest bar, so a hole in the middle is permanent.
+
+    A feed restart on 2026-10-12 lost 17 minutes that four daily updates could not
+    recover, and they are still missing from the store.
+    """
+    bars = _minute_bars("2026-10-07 12:00", 60)     # a Wednesday afternoon in New York
+    holed = pd.concat([bars.iloc[:20], bars.iloc[37:]])
+
+    windows = _store(tmp_path).missing_windows(bars=holed)
+
+    assert len(windows) == 1
+    assert windows[0]["minutes"] == 17
+    assert windows[0]["start"] == "2026-10-07T12:20:00+00:00"
+    assert windows[0]["end"] == "2026-10-07T12:36:00+00:00"
+
+
+def test_missing_windows_ignores_a_closed_market(tmp_path):
+    """A weekend is not data loss; counting it as such hides the gaps that matter."""
+    bars = pd.concat([_minute_bars("2026-10-09 20:00", 60),    # Friday 16:00-16:59 EDT
+                      _minute_bars("2026-10-11 22:00", 30)])   # Sunday 18:00 EDT reopen
+
+    assert _store(tmp_path).missing_windows(bars=bars) == []
+
+
+def test_missing_windows_respects_since_and_the_minimum(tmp_path):
+    bars = pd.concat([_minute_bars("2026-10-07 12:00", 60), _minute_bars("2026-10-08 12:00", 60)])
+    store = _store(tmp_path)
+    one_minute = pd.concat([_minute_bars("2026-10-07 12:00", 10).iloc[:4],
+                            _minute_bars("2026-10-07 12:00", 10).iloc[5:]])
+
+    assert store.missing_windows(bars=bars, min_minutes=2)
+    # Bounding the scan is what keeps this usable on a timer over seven years of gaps.
+    assert store.missing_windows(bars=bars, since="2026-10-08 13:00") == []
+    assert store.missing_windows(bars=one_minute, min_minutes=2) == []
+    assert store.missing_windows(bars=one_minute, min_minutes=1)[0]["minutes"] == 1
+
+
+def test_missing_windows_reads_the_store_when_no_frame_is_given(tmp_path):
+    """The path the CLI takes: no frame passed in."""
+    bars = _minute_bars("2026-10-07 12:00", 60)
+    store = _store(tmp_path)
+    store.write(pd.concat([bars.iloc[:20], bars.iloc[37:]]), merge=False)
+
+    assert store.missing_windows()[0]["minutes"] == 17
+
+
+def test_write_never_reuses_one_temporary_name(tmp_path, monkeypatch):
+    """A shared temporary name lets two writers interleave into one inode.
+
+    That is how the store was destroyed on 2026-10-08: the data-update timer and
+    the feed both wrote `XAUUSD_M1.parquet.tmp`, and the file that landed had an
+    undecodable thrift footer, so 2,391,574 bars became unreadable.
+    """
+    store = _store(tmp_path)
+    seen = []
+    real = pd.DataFrame.to_parquet
+
+    def spy(frame, destination, *args, **kwargs):
+        seen.append(destination)
+        return real(frame, destination, *args, **kwargs)
+
+    monkeypatch.setattr(pd.DataFrame, "to_parquet", spy)
+    store.write(_bars(0), merge=False)
+    store.write(_bars(1), merge=False)
+
+    assert len(seen) == 2
+    assert not any(str(item).endswith("XAUUSD_M1.parquet.tmp") for item in seen), seen
+    assert seen[0] is not seen[1]
+
+
+def test_write_waits_for_the_store_lock_and_fails_loudly(tmp_path, monkeypatch):
+    """Read-merge-swap has to be exclusive, and a wedged writer must not be skipped.
+
+    An atomic swap alone still lets two writers merge the same stale frame and
+    lose one of their updates, which for the feed means silently dropped bars.
+    """
+    monkeypatch.setattr("xauusd.data.STORE_LOCK_TIMEOUT_SECONDS", 0.2)
+    store = _store(tmp_path)
+
+    with file_lock(store.path, timeout=5):
+        with pytest.raises(TimeoutError, match="write lock"):
+            store.write(_bars(0), merge=False)
+
+
+def test_concurrent_writers_leave_a_readable_complete_store(tmp_path):
+    """The invariant the corruption broke: every writer's bars survive, and it reads."""
+    store = _store(tmp_path)
+    store.write(_bars(0), merge=False)
+    errors = []
+
+    def append(offset):
+        try:
+            store.write(_bars(offset), merge=True)
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=append, args=(offset,)) for offset in range(1, 6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    result = store.validate(store.read())
+    assert result["rows"] == 18
+    assert result["duplicates"] == 0
+
+
+def test_last_timestamp_agrees_with_a_full_read(tmp_path):
+    store = _store(tmp_path)
+    store.write(_bars(0), merge=False)
+    store.write(_bars(3), merge=True)
+
+    assert store.last_timestamp() == store.read().index.max()
+
+
+def test_last_timestamp_reads_the_index_column_only(tmp_path, monkeypatch):
+    """One value must not cost the whole frame.
+
+    `data update` runs four times a day on a timer and needs only the newest bar to
+    decide where to resume downloading. Reading all six columns of 2.4M rows for that
+    costs ~134 MB on a host with ~1.4 GB available; the index column alone is ~20 MB.
+    """
+    store = _store(tmp_path)
+    store.write(_bars(0), merge=False)
+    calls = []
+    real = pd.read_parquet
+
+    def spy(path, *args, **kwargs):
+        calls.append(kwargs.get("columns", "unset"))
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(pd, "read_parquet", spy)
+
+    assert store.last_timestamp() == _bars(0).index.max()
+    assert calls == [[]], calls
+
+
+def test_last_timestamp_raises_for_a_missing_store(tmp_path):
+    """Silently returning None would make `data update` download from the epoch."""
+    store = _store(tmp_path)
+
+    with pytest.raises(FileNotFoundError):
+        store.last_timestamp()
+
+
 def test_store_roundtrip(tmp_path):
  idx=pd.date_range("2024-01-01",periods=3,freq="min",tz="UTC"); b=pd.DataFrame({"open":[1,2,3],"high":[2,3,4],"low":[0,1,2],"close":[1.5,2.5,3.5],"volume":[1,2,3]},index=idx)
  s=HistoricalDataStore(); object.__setattr__(s.config,"processed_dir",tmp_path)

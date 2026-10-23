@@ -240,6 +240,38 @@ def test_runner_records_thinking_steps(tmp_path):
     assert transcript.run_status(runner.run_id) == "running"
 
 
+def test_tick_reasserts_a_run_row_another_process_closed(tmp_path):
+    """A ticking agent must not be served as stopped.
+
+    The engine's startup reconcile closed the agent's `agent_runs` row while this
+    loop kept running, and the store is authoritative for `agent status`,
+    `/api/runs` and the live view header. The owner corrects its own row.
+    """
+    runner, transcript = agent_runner(tmp_path, [
+        ("raw", {"action": "final", "summary": "no action needed"}),
+    ])
+    transcript.finish_run(runner.run_id, "stopped")
+    assert transcript.run_status(runner.run_id) == "stopped"
+
+    runner.run_tick()
+
+    assert transcript.run_status(runner.run_id) == "running"
+
+
+def test_in_memory_reconcile_is_scoped_to_the_caller_family():
+    """The test double must mirror the SQL stores, or tests prove nothing."""
+    store = InMemoryAgentTranscriptStore()
+    store.initialize()
+    store.start_run("agent_live")
+    store.start_run("engine_orphan")
+
+    assert store.reconcile_running_runs(excluding="engine_new") == 1
+    assert store.run_status("engine_orphan") == "stopped"
+    assert store.run_status("agent_live") == "running"
+    assert store.reconcile_running_runs() == 0
+    assert store.run_status("agent_live") == "running"
+
+
 def test_runner_final_action_only_records_summary(tmp_path):
     runner, transcript = agent_runner(tmp_path, [
         ("raw", {"action": "final", "summary": "no action needed"}),

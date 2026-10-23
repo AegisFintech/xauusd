@@ -370,13 +370,13 @@ def create_app(store: AgentTranscriptStore | None = None,
 
     @app.get("/api/status")
     def status() -> dict[str, Any]:
-        runs = transcript.runs(limit=1)
+        latest = _latest_agent_run(transcript)
         reset = None
         if hasattr(transcript, "connect"):
             from .bits_jobs import BitsStore
             reset = BitsStore(transcript).get("session_reset")
-        return {"latest_run_id": runs[0]["run_id"] if runs else None,
-                "latest_run_status": runs[0]["status"] if runs else None, "session_reset": reset}
+        return {"latest_run_id": latest["run_id"] if latest else None,
+                "latest_run_status": latest["status"] if latest else None, "session_reset": reset}
 
     @app.get("/api/runs")
     def runs(limit: int = Query(default=20, ge=1, le=100)) -> dict[str, Any]:
@@ -551,8 +551,7 @@ def create_app(store: AgentTranscriptStore | None = None,
                     "agent": {}, "paper": {}, "data_update": {}, "database": {}}
         heartbeat = read_status()
         heartbeat_age = _age_seconds((heartbeat or {}).get("recorded_at"))
-        runs = transcript.runs(limit=1)
-        latest = runs[0] if runs else None
+        latest = _latest_agent_run(transcript)
         if heartbeat is None:
             alerts.append("agent heartbeat missing")
         elif heartbeat.get("stalled"):
@@ -565,6 +564,13 @@ def create_app(store: AgentTranscriptStore | None = None,
         progress = (heartbeat or {}).get("research_progress") or {}
         if progress.get("needs_attention"):
             alerts.append(f"Research progress needs review: {progress.get('cycles_without_new_notes')} cycles without updated research notes")
+        # The counter above names the symptom; this names the file being re-read.
+        # An alert only: no research-progress signal may ever gate a cycle or a trade.
+        repeats = (heartbeat or {}).get("repeated_paths") or {}
+        if repeats.get("paths"):
+            named = ", ".join(f"{row.get('path')} ({row.get('cycles')} of the last {repeats.get('window', 0)} cycles)"
+                              for row in repeats["paths"])
+            alerts.append(f"Research retrieval loop: re-reading {named}")
         alerts.extend(bits_alerts(heartbeat))
         monitor = (heartbeat or {}).get("monitor") or {}
         if monitor.get("status") in {"unavailable", "stale_data"}:
@@ -606,11 +612,10 @@ def create_app(store: AgentTranscriptStore | None = None,
             storage = BitsStore(transcript).storage()
         except Exception as exc:
             storage = {"error_type": type(exc).__name__}
-        # Feed state, informational only: it is deliberately not an alert, because
-        # the feed is not deployed yet. It is surfaced so a feed that is deployed
-        # and failing cannot be invisible, which is how a Restart=always loop
-        # against an unimplemented feed went unnoticed.
+        # Feed state is an alert source now that the feed is deployed; see
+        # `_feed_alerts` for the outage that the old informational-only exemption hid.
         data_feed = _feed_health()
+        alerts.extend(_feed_alerts(data_feed))
         return {"status": "ok" if not alerts else "degraded", "alerts": alerts,
                 "agent": {"heartbeat": heartbeat, "heartbeat_age_seconds": heartbeat_age,
                           "latest_run_id": latest["run_id"] if latest else None,
@@ -627,6 +632,29 @@ def create_app(store: AgentTranscriptStore | None = None,
                 "database": {"backend": state_backend(), "integrity": integrity}}
 
     return app
+
+
+# How many runs to scan for the newest agent one. The engine writes to the same
+# table, so the newest row overall is not necessarily an agent run.
+RUN_SCAN_LIMIT = 50
+
+
+def _latest_agent_run(transcript: AgentTranscriptStore,
+                      limit: int = RUN_SCAN_LIMIT) -> dict[str, Any] | None:
+    """The newest *agent* run, skipping engine runs that share the table.
+
+    ``runs()`` orders every run by ``created_at`` and the deterministic engine
+    writes to the same ``agent_runs`` table, so taking the newest row returned an
+    ``engine_...`` run whenever the engine had been started more recently than the
+    agent. The page scopes its whole transcript feed to this id, so the live view
+    — the only observability this deployment has, since the services write no
+    journald logs — showed the engine's handful of events instead of the agent's
+    reasoning and labelled a ticking agent with the engine's status.
+    """
+    for run in transcript.runs(limit=limit):
+        if str(run.get("run_id") or "").startswith("agent_"):
+            return run
+    return None
 
 
 def _feed_health() -> dict[str, Any]:
@@ -647,7 +675,54 @@ def _feed_health() -> dict[str, Any]:
         status = json.loads(path.read_text())
     except (OSError, ValueError) as exc:
         return {"state": "unreadable", "error_type": type(exc).__name__}
-    return {**status, "age_seconds": _age_seconds(status.get("recorded_at"))}
+    if not isinstance(status, dict):
+        return {"state": "unreadable", "error_type": "not_an_object"}
+    # The feed's own `age_seconds` is the age of the last *bar*. This function has
+    # always reported the age of the *status file* under that same key, silently
+    # discarding the bar age -- the one number that shows a feed which is alive but
+    # no longer persisting bars. Keep both, under distinct names.
+    return {**status, "bar_age_seconds": status.get("age_seconds"),
+            "age_seconds": _age_seconds(status.get("recorded_at"))}
+
+
+# A feed writes its status every cycle and a bar every closed minute, so five
+# minutes of silence means something is wrong rather than idle.
+FEED_STATUS_STALE_SECONDS = 300.0
+FEED_BAR_STALE_SECONDS = 300.0
+# States that are healthy or transient. `not_deployed` stays quiet on purpose: an
+# absent feed is a deployment choice, and alerting on it was what made the whole
+# signal ignorable in the first place.
+FEED_QUIET_STATES = ("ok", "connecting")
+
+
+def _feed_alerts(feed: dict[str, Any]) -> list[str]:
+    """Turn feed state into alerts.
+
+    This used to be deliberately informational, on the reasoning that the feed was
+    not deployed yet. It is deployed, and that exemption cost 14.85 hours of an open
+    session: the store was corrupted, every write failed, and the feed recorded
+    `bar_write_failed` with `session: open` the entire time while health reported
+    only the agent and paper alerts. A feed that cannot persist bars means the
+    engine and the agent are both trading off stale data, which is a freshness
+    failure the gates can only catch one observation at a time.
+    """
+    state = str(feed.get("state") or "")
+    if not state or state == "not_deployed":
+        return []
+    if state in ("unknown", "unreadable"):
+        return [f"data feed state {state} ({feed.get('error_type')})"]
+    age = feed.get("age_seconds")
+    if age is not None and age > FEED_STATUS_STALE_SECONDS:
+        # A frozen status file means the process stopped updating it. Without this,
+        # a dead feed keeps reporting its last known state as healthy forever.
+        return [f"data feed status stale ({int(age)}s, last state {state})"]
+    if state not in FEED_QUIET_STATES:
+        code = feed.get("error_code")
+        return [f"data feed {state}" + (f": {code}" if code else "")]
+    bar_age = feed.get("bar_age_seconds")
+    if feed.get("session") == "open" and bar_age is not None and bar_age > FEED_BAR_STALE_SECONDS:
+        return [f"live M1 bar stale ({int(bar_age)}s) while the session is open"]
+    return []
 
 
 def _age_seconds(iso: str | None) -> float | None:

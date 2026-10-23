@@ -1,6 +1,7 @@
 """Compact observations and persistent research-progress signals, never trade signals."""
 import hashlib
 import json
+import re
 from pathlib import Path
 
 RESEARCH_POLICY = (
@@ -120,6 +121,9 @@ def finish_research_cycle(store, cycle_id, filled: bool = False):
     changed = bool(notes.get('notes')) and fingerprint != progress.get('notes_fingerprint')
     if filled or changed:
         count = 0
+        # Progress clears the retrieval evidence with the counter: both describe the
+        # same unproductive streak, and a cycle that wrote notes is not a loop.
+        store.put('cycle_paths', {'window': []})
     else:
         count = progress.get('cycles_without_new_notes', 0) + 1
     progress = {'cycle_id': cycle_id, 'notes_fingerprint': fingerprint,
@@ -129,3 +133,90 @@ def finish_research_cycle(store, cycle_id, filled: bool = False):
                                'this is a progress proxy, not a trade requirement.'}
     store.put('research_progress', progress)
     return progress
+
+
+# Retrieval-loop evidence. `cycles_without_new_notes` says a streak is unproductive
+# but not *what* is being re-fetched, so a model that spent 19 cycles re-reading one
+# 7,271-byte preregistration kept believing the content was "still omitted". These
+# bounds are descriptive only: the harness never filters, rewrites or blocks a
+# command (there is no command allow-list and no per-command approval), it records
+# what the model keeps touching so the next prompt can name it.
+PATH_WINDOW = 5
+PATH_REPEAT_THRESHOLD = 3
+PATHS_PER_CYCLE = 12
+_PATH_SUFFIX = re.compile(r"[\w./+-]*\w\.(?:json|csv|parquet|py|md|txt|ya?ml)")
+# Generated or huge trees. A path inside them is not a retrieval loop, and counting
+# them would bury the signal in data/ and graphify-out/ noise.
+_PATH_SKIP = ("data/", "graphify-out/", "backups/", "build/", ".venv/", ".git/", ".qwen/",
+              "__pycache__/", "reports/automation/", "reports/tournament/")
+
+REPEATED_PATH_INSTRUCTION = (
+    'These repository paths were named by your shell commands in {seen} of the last '
+    '{window} cycles. Their content is already in your history, so reading them again '
+    'is a repeated no-op, not progress. The next action must produce something that did '
+    'not exist before: write the implementation, save a result file, or update the '
+    'research notes. If a path below is one you write rather than read, say what '
+    'changed in it.')
+
+
+def command_paths(command, cwd="."):
+    """Existing repository-relative paths that a shell command names.
+
+    Deliberately conservative: a token counts only when it resolves to a real file
+    under ``cwd``, so a hallucinated or partial path contributes nothing.
+    """
+    root = Path(cwd)
+    found = []
+    for token in _PATH_SUFFIX.findall(str(command or "")):
+        if "/" not in token or token.startswith("/") or token.startswith(_PATH_SKIP):
+            continue
+        if token in found:
+            continue
+        try:
+            if not (root / token).is_file():
+                continue
+        except OSError:
+            continue
+        found.append(token)
+        if len(found) >= PATHS_PER_CYCLE:
+            break
+    return found
+
+
+def record_cycle_paths(store, cycle_id, command, cwd="."):
+    """Add the paths one cycle's command named to a bounded window of cycles."""
+    paths = command_paths(command, cwd)
+    if not paths or not cycle_id:
+        return []
+    window = [dict(row) for row in (store.get('cycle_paths') or {}).get('window', [])
+              if isinstance(row, dict) and row.get('cycle_id')]
+    for row in window:
+        if row['cycle_id'] == cycle_id:
+            row['paths'] = list(dict.fromkeys([*row.get('paths', []), *paths]))[:PATHS_PER_CYCLE]
+            break
+    else:
+        window.append({'cycle_id': cycle_id, 'paths': paths})
+    store.put('cycle_paths', {'window': window[-PATH_WINDOW:]})
+    return paths
+
+
+def repeated_paths(store, cwd="."):
+    """Paths named in most of the recent window, with the evidence to publish."""
+    window = [row for row in (store.get('cycle_paths') or {}).get('window', [])
+              if isinstance(row, dict)]
+    if len(window) < PATH_REPEAT_THRESHOLD:
+        return []
+    counts: dict[str, int] = {}
+    for row in window:
+        for path in dict.fromkeys(row.get('paths') or []):
+            counts[path] = counts.get(path, 0) + 1
+    repeats = []
+    for path, seen in sorted(counts.items(), key=lambda item: (-item[1], item[0])):
+        if seen < PATH_REPEAT_THRESHOLD:
+            continue
+        try:
+            size = (Path(cwd) / path).stat().st_size
+        except OSError:
+            size = None
+        repeats.append({'path': path, 'cycles': seen, 'window': len(window), 'bytes': size})
+    return repeats[:5]

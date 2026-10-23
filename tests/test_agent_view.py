@@ -142,6 +142,36 @@ def test_status_endpoint_returns_latest_run(server):
     assert payload["latest_run_status"] == "running"
 
 
+def test_status_and_health_select_the_agent_run_not_a_newer_engine_run(tmp_path, paper_trading,
+                                                                      monkeypatch):
+    """The deterministic engine writes to the same `agent_runs` table.
+
+    Taking the newest run overall returned an `engine_...` row whenever the engine
+    had been started more recently than the agent, and the page scopes its whole
+    transcript feed to that id — so the only observability this deployment has
+    showed the engine's handful of events instead of the agent's reasoning, and
+    labelled a ticking agent with the engine's status.
+    """
+    import xauusd.agent_view as view
+    from xauusd.local_state import SQLiteAgentTranscriptStore
+
+    monkeypatch.setenv("AGENT_STATUS_FILE", str(tmp_path / "absent.json"))
+    store = SQLiteAgentTranscriptStore(str(tmp_path / "view.db"))
+    store.start_run("agent_live")
+    store.append("agent_live", 1, "assistant", {"summary": "the agent's reasoning"})
+    store.start_run("engine_newer")  # an engine restart after the agent, as deployed
+    store.append("engine_newer", 1, "engine_signal", {"signal": "NONE"})
+    client = TestClient(view.create_app(store, paper=paper_trading))
+
+    status = client.get("/api/status").json()
+    assert status["latest_run_id"] == "agent_live"
+    assert status["latest_run_status"] == "running"
+    assert client.get("/api/health").json()["agent"]["latest_run_id"] == "agent_live"
+    # The history endpoint still lists both runs; only the selection changed.
+    listed = client.get("/api/runs?limit=10").json()["runs"]
+    assert [row["run_id"] for row in listed] == ["engine_newer", "agent_live"]
+
+
 def test_runs_endpoint_reports_tick_counts(server):
     with request.urlopen(server + "/api/runs?limit=6") as response:
         payload = json.loads(response.read())
@@ -175,7 +205,12 @@ def test_paper_endpoint_reflects_accepted_fill(server, paper_trading):
     summary = payload["paper"]["summary"]
     assert summary["position"] == pytest.approx(0.5)
     assert summary["side"] == "long"
-    assert summary["trades_today"] == 1
+    # This fill is dated 26 days before the wall clock, so "today" is genuinely zero
+    # and the count belongs to the day it was marked. That split is the fix: a stopped
+    # account used to present its last active day's count as today's.
+    assert summary["trades_today"] == 0
+    assert summary["trades_on_last_marked_day"] == 1
+    assert summary["day"] == "2026-09-17"
     assert summary["equity"] == pytest.approx(100_000.0)
     assert len(summary["recent_fills"]) == 1
     assert summary["recent_fills"][0]["decision_id"] == "fill-test-1"
@@ -253,6 +288,63 @@ def test_health_surfaces_missing_research_progress(server, tmp_path, monkeypatch
     with request.urlopen(server + '/api/health') as response:
         data = json.load(response)
     assert any('3 cycles without updated research notes' in alert for alert in data['alerts'])
+
+
+def test_health_names_the_paths_a_retrieval_loop_keeps_reading(tmp_path, monkeypatch):
+    """The 2026-10-05 loop reported only its symptom.
+
+    19 cycles re-fetched one 7,271-byte preregistration and health said "19 cycles
+    without updated research notes", so 4.3 hours of stuck retrieval read as slow
+    research. The alert has to name the file and how often it was touched.
+    """
+    import xauusd.agent_view as view
+
+    store = InMemoryAgentTranscriptStore()
+    store.initialize()
+    store.start_run("agent_loop")
+    status_path = tmp_path / "agent_status.json"
+    write_status({"run_id": "agent_loop", "status": "completed", "market_open": True,
+                  "monitor": {"status": "ok",
+                              "recorded_at": datetime.now(timezone.utc).isoformat()},
+                  "monitor_thread_alive": True,
+                  "research_progress": {"needs_attention": True, "cycles_without_new_notes": 19},
+                  "repeated_paths": {"count": 1, "window": 5,
+                                     "paths": [{"path": "reports/research/prereg.json",
+                                                "cycles": 4}]}}, str(status_path))
+    monkeypatch.setenv("AGENT_STATUS_FILE", str(status_path))
+
+    body = TestClient(view.create_app(store, paper=PaperTrading(InMemoryPaperTradingStore()))
+                      ).get("/api/health").json()
+
+    assert body["status"] == "degraded"
+    assert any("Research retrieval loop" in alert
+               and "reports/research/prereg.json" in alert
+               and "4 of the last 5 cycles" in alert for alert in body["alerts"])
+    # The symptom alert stays: the loop evidence supplements it, never replaces it.
+    assert any("19 cycles without updated research notes" in alert for alert in body["alerts"])
+
+
+def test_health_stays_quiet_when_no_path_repeats(tmp_path, monkeypatch):
+    """No loop, and a heartbeat written by the previous release, are both silent."""
+    import xauusd.agent_view as view
+
+    store = InMemoryAgentTranscriptStore()
+    store.initialize()
+    status_path = tmp_path / "agent_status.json"
+    client = TestClient(view.create_app(store, paper=PaperTrading(InMemoryPaperTradingStore())))
+    for repeated in (None, {"count": 0, "window": 0, "paths": []}):
+        heartbeat = {"run_id": "agent_loop", "status": "completed", "market_open": True,
+                     "monitor": {"status": "ok",
+                                 "recorded_at": datetime.now(timezone.utc).isoformat()},
+                     "monitor_thread_alive": True}
+        if repeated is not None:
+            heartbeat["repeated_paths"] = repeated
+        write_status(heartbeat, str(status_path))
+        monkeypatch.setenv("AGENT_STATUS_FILE", str(status_path))
+
+        alerts = client.get("/api/health").json()["alerts"]
+
+        assert not [alert for alert in alerts if "retrieval loop" in alert]
 
 
 def test_steps_response_is_bounded_by_a_byte_budget(paper_trading, monkeypatch):
@@ -437,11 +529,11 @@ def test_job_endpoint_pages_a_shell_capture(tmp_path):
     assert beyond["error"]["code"] == "offset_out_of_range"
 
 
-def test_health_surfaces_the_live_feed_state_without_alerting(server, paper_trading, tmp_path,
-                                                               monkeypatch):
+def test_health_surfaces_the_live_feed_state_and_alerts_when_it_fails(server, paper_trading, tmp_path,
+                                                                     monkeypatch):
     # A Restart=always feed that cannot run exited 0 forever, wrote no status and
     # logged nothing, so nothing reported it. Health must show the feed's state.
-    # It is informational: an undeployed feed is not a degraded deployment.
+    # An *undeployed* feed is still not a degraded deployment; a failing one is.
     paper_trading.start("test")
     status = tmp_path / "feed_status.json"
     monkeypatch.setenv("DATA_FEED_STATUS_PATH", str(status))
@@ -450,14 +542,80 @@ def test_health_surfaces_the_live_feed_state_without_alerting(server, paper_trad
         absent = json.loads(response.read())
     assert absent["data_feed"]["state"] == "not_deployed"
     assert absent["status"] in {"ok", "degraded"}
+    assert not [a for a in absent["alerts"] if "feed" in a.lower()]
 
     status.write_text(json.dumps({"state": "unavailable", "error_code": "live_feed_not_implemented",
-                                  "last_bar_utc": None, "recorded_at": "2026-10-05T02:41:20+00:00"}))
+                                  "last_bar_utc": None,
+                                  "recorded_at": datetime.now(timezone.utc).isoformat()}))
     with request.urlopen(server + "/api/health") as response:
         failed = json.loads(response.read())
     assert failed["data_feed"]["state"] == "unavailable"
     assert failed["data_feed"]["error_code"] == "live_feed_not_implemented"
     assert isinstance(failed["data_feed"]["age_seconds"], float)
-    # Reporting a dead feed must not invent an alert and flip the verdict.
-    assert not [a for a in failed["alerts"] if "feed" in a.lower()]
-    assert failed["status"] == absent["status"]
+    assert any("data feed unavailable: live_feed_not_implemented" in a for a in failed["alerts"])
+    assert failed["status"] == "degraded"
+
+
+def _feed(server, paper_trading, tmp_path, monkeypatch, payload):
+    paper_trading.start("test")
+    path = tmp_path / "feed_status.json"
+    path.write_text(json.dumps(payload))
+    monkeypatch.setenv("DATA_FEED_STATUS_PATH", str(path))
+    with request.urlopen(server + "/api/health") as response:
+        return json.loads(response.read())
+
+
+def test_health_alerts_when_the_feed_cannot_write_bars(server, paper_trading, tmp_path, monkeypatch):
+    """The exact 2026-10-08 outage: bar_write_failed, session open, no alert.
+
+    The store was corrupted, every append failed for 14.85 hours of an open
+    session, and health reported only the agent and paper alerts -- because feed
+    state was "deliberately not an alert, because the feed is not deployed yet".
+    """
+    body = _feed(server, paper_trading, tmp_path, monkeypatch, {
+        "state": "bar_write_failed", "error_code": "OSError", "session": "open",
+        "age_seconds": 53460.7, "last_bar_utc": "2026-10-08T10:09:00+00:00",
+        "recorded_at": datetime.now(timezone.utc).isoformat()})
+
+    assert any("data feed bar_write_failed: OSError" in a for a in body["alerts"])
+    assert body["status"] == "degraded"
+    # The feed's own bar age must survive; health overwrote it with the status age.
+    assert body["data_feed"]["bar_age_seconds"] == 53460.7
+
+
+def test_health_alerts_when_bars_go_stale_during_an_open_session(server, paper_trading, tmp_path,
+                                                                monkeypatch):
+    """A feed that is alive and healthy but no longer persisting bars."""
+    body = _feed(server, paper_trading, tmp_path, monkeypatch, {
+        "state": "ok", "error_code": None, "session": "open", "age_seconds": 900.0,
+        "recorded_at": datetime.now(timezone.utc).isoformat()})
+
+    assert any("live M1 bar stale (900s) while the session is open" in a for a in body["alerts"])
+
+
+def test_health_does_not_alert_on_an_old_bar_while_the_market_is_closed(server, paper_trading,
+                                                                       tmp_path, monkeypatch):
+    """No bars over a weekend is idle, not broken; alerting on it trains operators
+    to ignore the alert that matters."""
+    body = _feed(server, paper_trading, tmp_path, monkeypatch, {
+        "state": "ok", "session": "closed", "age_seconds": 172800.0,
+        "recorded_at": datetime.now(timezone.utc).isoformat()})
+
+    assert not [a for a in body["alerts"] if "feed" in a.lower() or "M1 bar" in a]
+
+
+def test_health_alerts_when_the_feed_status_freezes(server, paper_trading, tmp_path, monkeypatch):
+    """A dead feed keeps reporting its last known state as healthy forever."""
+    frozen = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    body = _feed(server, paper_trading, tmp_path, monkeypatch, {
+        "state": "ok", "session": "open", "age_seconds": 5.0, "recorded_at": frozen})
+
+    assert any("data feed status stale" in a and "last state ok" in a for a in body["alerts"])
+
+
+def test_health_stays_quiet_for_a_healthy_feed(server, paper_trading, tmp_path, monkeypatch):
+    body = _feed(server, paper_trading, tmp_path, monkeypatch, {
+        "state": "ok", "session": "open", "age_seconds": 42.0, "bars_written": 12,
+        "recorded_at": datetime.now(timezone.utc).isoformat()})
+
+    assert not [a for a in body["alerts"] if "feed" in a.lower() or "M1 bar" in a]

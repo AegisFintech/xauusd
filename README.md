@@ -97,11 +97,24 @@ Historical and live M1 data is fetched through the cTrader Open API demo host (`
 .venv/bin/python -m xauusd.cli data download --start 2026-09-17   # backfill a window
 .venv/bin/python -m xauusd.cli data update                        # catch up to now
 .venv/bin/python -m xauusd.cli data validate                      # report rows/gaps
+.venv/bin/python -m xauusd.cli data rebuild --cutoff 2019-12-01   # recover from the raw archive
+.venv/bin/python -m xauusd.cli data raw-retention                 # report archive redundancy
+.venv/bin/python -m xauusd.cli data heal --days 7                 # fill interior gaps
 ```
 
 Credentials are an **OAuth2 token pair** (`CTRADER_ACCESS_TOKEN`, `CTRADER_REFRESH_TOKEN`) minted once through the cTrader ID granting-access flow (`xauusd.oauth.authorize_url` → `/apps/token`). With `CTRADER_CTID_TRADER_ACCOUNT_ID` left empty, both the data downloader and the demo execution adapter auto-discover the demo account and its XAUUSD symbol from the token (`ProtoOAGetAccountListByAccessTokenReq`); set the explicit id to pin a specific account (legacy leaf-token mode). On a `CH_ACCESS_TOKEN_INVALID`, `data update/download` refresh via `grant_type=refresh_token` once and atomically rewrite only the two token keys in `.env` (`0o600`) — nothing is ever logged. Both paths require `CTRADER_DEMO_ONLY=true`.
 
-Every `data update/download` run records `reports/data_update_status.json` (`state: ok | auth_error | failed`, `error_code`, `recorded_at`, `end`), surfaced by the live view at `/api/data-update`, so timer failures are loud instead of silent `exit-code` entries. The `xauusd-data-update.timer` re-enables scheduled 6-hourly refreshes.
+Every `data update/download` run records `reports/data_update_status.json` (`state: ok | auth_error | failed`, `error_code`, `recorded_at`, `end`), surfaced by the live view at `/api/data-update`, so timer failures are loud instead of silent `exit-code` entries. `error_code` is `store_corrupt` when the parquet exists but cannot be parsed and `disk_full` on `ENOSPC`; anything else stays `null` rather than guessing, and exception text is never persisted because it can carry a token inside a URL. The `xauusd-data-update.timer` re-enables scheduled 6-hourly refreshes.
+
+`data/raw/ctrader/XAUUSD/M1/` archives every page the downloader fetches, so `data rebuild` reconstructs the store offline with no broker access — the recovery path when the store is unreadable. It quarantines an unparseable file to `<name>.corrupt-<UTC stamp>` rather than overwriting the evidence of how it broke, streams pages in chunks because the archive is heavily redundant (34M bar records for 2.4M unique minutes), and requires `--cutoff` when the store cannot be read: the archive reaches back to 2014, years before the store's 2019-12-01 start, and growing the store backwards changes the dataset version. Rebuilding 2.4M bars from 6,806 pages measured 45 minutes. **Never purge `data/raw/`** — it is the only rebuild path.
+
+`data raw-retention` reports how much of that archive is redundant and deletes nothing. Measured on 2026-10-09: 7,155 pages / 4.67 GB, of which a minimal cover needs 826 pages / 530 MB — 8.66× redundancy and 4.14 GB reclaimable with the full bar range preserved (`cover_preserves_the_full_range: true`), computed in 1.7 s from the page filenames. Applying it is an operator decision, and it costs the overlap: a minimal cover keeps no second copy of any minute, so one corrupt surviving page would be unrecoverable. The cover is also computed from the ranges in the filenames, not from the bars themselves.
+
+`data update` computes its start from the newest bar, so it can only extend the tail — an interior hole is permanent. A feed restart on 2026-10-12 lost 16 minutes that four daily updates could not reach, and they stayed missing until `data heal` existed. Heal finds market-open minutes the store does not have, using the same New York session logic as every other freshness decision, and downloads only those windows, bounded by `--days` and `--max-minutes` so it is safe on a timer; windows that do not fit the budget are reported as deferred rather than dropped. It also reports `unfilled_minutes` per window, because the broker has no bar for a minute in which nothing quoted: measured live, every window that survived a heal sat on the 21:00–22:00 UTC daily-break boundary and was unfillable rather than lost.
+
+`xauusd-data-update.timer` runs `data update --heal`, bounded to 3 days back and 120 missing minutes per run, so a hole closes on the next scheduled refresh instead of waiting for someone to notice it. A heal failure is reported inside the result and never fails the refresh itself: the store is still current, and the status file drives the live view's data-update alert, so letting heal trouble mask a good download would cry wolf four times a day.
+
+The feed also keeps a bounded transition log at `reports/data_feed_events.json` — the last 200 state changes plus a `dropped` count. The status file holds only the latest state and these services write no journald logs, so a feed that crashed and was restarted by systemd previously left no trace at all: the 2026-10-12 outage was datable only by correlating a hole in the store against `ExecMainStartTimestamp`. Only transitions are recorded, not bars, and a failing event log is logged and ignored — losing the log must never cost the data it describes.
 
 ## Autonomous Agent
 
@@ -332,7 +345,12 @@ function:
 The manifest (`xauusd.capabilities/1`) lists the working directory, the absolute
 interpreter and CLI prefix, the resulting `PATH`, availability, path and version
 of `graphify`, `rg`, `git` and `grep` with documented fallbacks, supported CLI
-operations as complete commands, and the M1 data entry point. It includes no
+operations as complete commands, and the M1 data entry point. It also publishes the
+two measured bounds that keep a shell job inside the 1200-second ceiling:
+`data.window_lookup` (resolve a batch of bar timestamps in one pass) and
+`data.repository_search` (scope every recursive search to the directory that can
+hold the target; never walk `data/`, `graphify-out/cache`, `backups/`, `build/`,
+`.venv/` or `.git/` from the repository root). It includes no
 environment variable values other than `PATH`. The agent refreshes it at start-up,
 every 15 minutes, and when a job reports `command not found`. Observed missing
 executables persist across cycles and restarts, appear in `context.capabilities`,
@@ -396,3 +414,11 @@ python3 -m venv .venv
 ```
 
 Rebuilding the environment does not authorize starting paused services.
+
+## Required update workflow
+
+For every project update, refresh Graphify with `graphify update .`, update
+`README.md` and `AGENTS.md` to reflect the change, run the required checks,
+and commit and push the update. Keep credentials, runtime state, generated
+market data, and unrelated existing changes out of commits. Report any failed
+check or push explicitly.
