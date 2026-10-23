@@ -6,6 +6,7 @@ from pathlib import Path
 import json
 import os
 import subprocess
+import sys
 import uuid
 
 from .experiment_registry import ExperimentRegistry
@@ -84,7 +85,7 @@ class CodexImprovementWorkflow:
             subprocess.run(["git","clean","-fd","--","CODEX_OUTPUT.txt",".isolated-home"],cwd=worktree,capture_output=True)
             changed=subprocess.run(["git","diff","--name-only"],cwd=worktree,text=True,capture_output=True,check=True).stdout.splitlines()
             forbidden=[path for path in changed if any(path==item or path.startswith(item) for item in FORBIDDEN_PATHS)]
-            tests=subprocess.run([str(Path.cwd()/".venv/bin/python"),"-m","pytest","-q","tests/test_research.py"],
+            tests=subprocess.run([sys.executable,"-m","pytest","-q","tests/test_research.py"],
                                  cwd=worktree,text=True,capture_output=True,timeout=600)
             patch=subprocess.run(["git","diff","--binary"],cwd=worktree,text=True,capture_output=True,check=True).stdout
             (report_dir/"candidate.patch").write_text(patch); (report_dir/"validation.log").write_text(tests.stdout+tests.stderr)

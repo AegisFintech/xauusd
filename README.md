@@ -422,3 +422,13 @@ For every project update, refresh Graphify with `graphify update .`, update
 and commit and push the update. Keep credentials, runtime state, generated
 market data, and unrelated existing changes out of commits. Report any failed
 check or push explicitly.
+
+## Branch consolidation — 2026-10-23
+
+Committed history from `codex-harness-overhaul` and `master` is consolidated
+into `main`. Existing uncommitted deployment work remains in the original
+workspace and is not represented by this merge. Future updates target `main`.
+
+Merge validation also fixes clean-checkout readiness when the generated dataset
+is absent, isolates planner and demo-feed test configuration, and runs candidate
+tests with the current Python interpreter rather than a hard-coded `.venv` path.

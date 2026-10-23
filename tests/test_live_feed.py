@@ -9,6 +9,11 @@ from xauusd.ctrader_auth import DEMO_HOST as DEMO_HOST_SUFFIX
 from xauusd.live_feed import LiveBarFeed, LiveFeedConfig, closed_bar, run_feed
 
 
+@pytest.fixture(autouse=True)
+def demo_feed_environment(monkeypatch):
+    monkeypatch.setenv("CTRADER_DEMO_ONLY", "true")
+
+
 def unavailable_type():
     from xauusd.live_feed import LiveFeedUnavailable
     return LiveFeedUnavailable

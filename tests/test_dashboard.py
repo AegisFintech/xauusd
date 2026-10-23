@@ -30,6 +30,21 @@ def test_health_is_public_but_api_can_require_auth(tmp_path,monkeypatch):
     assert client.get("/api/status",auth=("user","secret")).status_code==200
 
 
+def test_status_remains_readable_without_generated_tournament_dataset(tmp_path,monkeypatch):
+    reports,data=setup_files(tmp_path)
+    monkeypatch.setattr(dashboard,'REPORTS',reports)
+    monkeypatch.setattr(dashboard,'DATA_FILE',data)
+    monkeypatch.setattr(dashboard,'registry',MemoryRegistry)
+    monkeypatch.delenv('DASHBOARD_USERNAME',raising=False)
+    monkeypatch.delenv('DASHBOARD_PASSWORD',raising=False)
+    def absent(self): raise FileNotFoundError('missing generated dataset')
+    monkeypatch.setattr(dashboard.ShadowTradingReadiness,'readiness',absent)
+    response=TestClient(dashboard.app).get('/api/status')
+    assert response.status_code==200
+    assert response.json()['shadow']['ready'] is False
+    assert response.json()['shadow']['error_code']=='dataset_unavailable'
+
+
 def test_dashboard_reads_latest_run_and_equity(tmp_path,monkeypatch):
     reports,data=setup_files(tmp_path); monkeypatch.setattr(dashboard,"REPORTS",reports); monkeypatch.setattr(dashboard,"DATA_FILE",data)
     monkeypatch.delenv("DASHBOARD_USERNAME",raising=False); monkeypatch.delenv("DASHBOARD_PASSWORD",raising=False); monkeypatch.setattr(dashboard,"registry",MemoryRegistry)

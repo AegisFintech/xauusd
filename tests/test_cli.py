@@ -167,6 +167,8 @@ def test_paper_start_overrides_operator_stop(tmp_path, monkeypatch, capsys):
 
 
 def test_agent_resume_refused_after_operator_stop_writes_status(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_PLANNER", "openai")
+    monkeypatch.setattr("xauusd.autonomous_harness.OpenAICompatiblePlanner.from_env", lambda: object())
     trading = PaperTrading(InMemoryPaperTradingStore(), PaperRiskConfig())
     trading.start("agent_continuous_paper_loop")
     trading.stop("operator")
@@ -186,6 +188,8 @@ def test_agent_resume_refused_after_operator_stop_writes_status(tmp_path, monkey
 
 
 def test_agent_controller_refuses_on_corrupt_state(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_PLANNER", "openai")
+    monkeypatch.setattr("xauusd.autonomous_harness.OpenAICompatiblePlanner.from_env", lambda: object())
     trading = PaperTrading(InMemoryPaperTradingStore(), PaperRiskConfig())
     trading.store.corrupt_state_for_test()
     monkeypatch.setattr(cli, "_paper_from_env", lambda: trading)

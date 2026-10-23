@@ -237,6 +237,12 @@ def api_status(_: str = Depends(authenticate)):
     data = data_status()
     manifest = latest_manifest()
     local_registry = registry()
+    shadow={"ready":False,"mode":"shadow_only","blocked_reason":"local registry unavailable"}
+    if local_registry:
+        try: shadow=ShadowTradingReadiness(registry=local_registry).readiness()
+        except (FileNotFoundError,json.JSONDecodeError):
+            shadow={"ready":False,"mode":"shadow_only","error_code":"dataset_unavailable",
+                    "blocked_reason":"Generated research dataset is unavailable."}
     return {"status": "ok" if data.get("fresh") else "degraded", "mode": "research-only",
             "data": data, "latest_run": manifest["run_id"] if manifest else None,
             "champion": tournament_champion() or read_json(REPORTS / "champion.json"), "scheduler": scheduler_status(),
@@ -248,8 +254,7 @@ def api_status(_: str = Depends(authenticate)):
             "system":system_metrics(),
             "portfolio":portfolio_status(),
             "weekly":weekly_report_status(),
-            "shadow":ShadowTradingReadiness(registry=local_registry).readiness() if local_registry else
-            {"ready":False,"mode":"shadow_only","blocked_reason":"local registry unavailable"},
+            "shadow":shadow,
             "operations":OperationsManager(local_registry).health(),
             "tournament": tournament_status(), "experiments": {**(local_registry.summary() if local_registry else
             {"total":0,"by_status":{},"strategy_families":0,"promoted":0}),"catalog_size":catalog_size()}}
