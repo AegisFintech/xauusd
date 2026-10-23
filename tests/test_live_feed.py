@@ -49,17 +49,47 @@ def test_state_transitions_are_logged_beyond_the_latest_status(tmp_path):
     events = tmp_path / "events.json"
     feed = LiveBarFeed(config(tmp_path, events_path=str(events)))
 
-    feed._write_status("connecting")
-    feed._write_status("ok", bar_utc="2026-10-13T02:38:00+00:00")
-    feed._write_status("ok", bar_utc="2026-10-13T02:39:00+00:00")   # same state: not an event
-    feed._write_status("bar_write_failed", error_code="OSError")
+    feed._write_status("connecting")                                # first event of the process
+    feed._write_status("ok", bar_utc="2026-10-13T02:38:00+00:00")   # routine -> routine: suppressed
+    feed._write_status("ok", bar_utc="2026-10-13T02:39:00+00:00")   # no change: suppressed
+    feed._write_status("bar_write_failed", error_code="OSError")     # into a failure: kept
+    feed._write_status("ok", bar_utc="2026-10-13T02:41:00+00:00")    # recovery: kept
 
     log = json.loads(events.read_text())
-    assert [row["state"] for row in log["events"]] == ["connecting", "ok", "bar_write_failed"]
-    assert log["events"][-1]["error_code"] == "OSError"
-    # The event records the transition moment, not the latest bar: the second "ok"
-    # was not a transition, so it produced no event and the first one keeps 02:38.
-    assert log["events"][-2]["last_bar_utc"] == "2026-10-13T02:38:00+00:00"
+    assert [row["state"] for row in log["events"]] == ["connecting", "bar_write_failed", "ok"]
+    assert log["events"][1]["error_code"] == "OSError"
+    # The failure event carries the bar it last saw; the recovery carries the new one.
+    assert log["events"][1]["last_bar_utc"] == "2026-10-13T02:39:00+00:00"
+    assert log["events"][-1]["last_bar_utc"] == "2026-10-13T02:41:00+00:00"
+    assert log["dropped"] == 0
+
+
+def test_routine_resubscribe_cycles_do_not_evict_real_events(tmp_path):
+    """The client resubscribes every 900s, walking three states each time.
+
+    Logging all of them filled the 200-event cap in about 16 hours -- measured
+    2026-10-15 at 200 kept and 449 dropped -- so a genuine outage was evicted before
+    anyone could look, which defeats the only reason the log exists. Routine to
+    routine is noise; the first event of a process is kept so a restart still shows.
+    """
+    import json
+    from xauusd.live_feed import FEED_EVENT_LIMIT, LiveBarFeed
+    events = tmp_path / "events.json"
+    feed = LiveBarFeed(config(tmp_path, events_path=str(events)))
+
+    for _ in range(FEED_EVENT_LIMIT):        # three times the cap in transitions
+        feed._write_status("subscribing_spots")
+        feed._write_status("subscribing")
+        feed._write_status("ok", bar_utc="2026-10-15T08:00:00+00:00")
+
+    log = json.loads(events.read_text())
+    assert [row["state"] for row in log["events"]] == ["subscribing_spots"]
+    assert log["dropped"] == 0
+
+    # And a failure in the middle of all that noise is still recorded.
+    feed._write_status("bar_write_failed", error_code="OSError")
+    log = json.loads(events.read_text())
+    assert [row["state"] for row in log["events"]] == ["subscribing_spots", "bar_write_failed"]
     assert log["dropped"] == 0
 
 
@@ -71,7 +101,11 @@ def test_the_event_log_is_capped_and_counts_what_it_dropped(tmp_path):
     feed = LiveBarFeed(config(tmp_path, events_path=str(events)))
 
     for index in range(FEED_EVENT_LIMIT + 25):
-        feed._write_status("ok" if index % 2 else "connecting")
+        # Alternate a failure with a routine state. Routine-to-routine transitions are
+        # suppressed by design, so filling the cap takes real events.
+        failed = index % 2 == 0
+        feed._write_status("bar_write_failed" if failed else "ok",
+                           error_code="OSError" if failed else None)
 
     log = json.loads(events.read_text())
     assert len(log["events"]) == FEED_EVENT_LIMIT

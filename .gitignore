@@ -27,6 +27,12 @@ reports/tournament/
 reports/champion.json
 backups/
 state/
+data/lab/
+data/quotes.sqlite*
+reports/quote_status.json
+reports/quote_status.json.lock
+reports/retention-status.json
+reports/retention-status.json.lock
 
 # Coverage and test output
 coverage/

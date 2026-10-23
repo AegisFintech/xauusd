@@ -1,32 +1,47 @@
-# XAUUSD Autonomous Research and Demo Harness
+# Aurum — Codex Autonomous Trading Lab
 
 An auditable XAUUSD research system being extended with an autonomous AI harness and cTrader **demo-account-only** automation. It uses reproducible historical research, deterministic risk controls, and persistent operational state. It makes no profitability claim.
 
 ## Current Status
 
-- Historical cTrader Open API acquisition, reproducible datasets, backtesting, validation, experiment registry, and read-only dashboard are implemented.
-- Shadow observation mode persists signals and an emergency stop without broker execution.
-- The autonomous AI harness, Firecrawl research ingestion, paper lifecycle, and a fail-closed demo execution adapter are implemented. Live execution is not.
-- No real-money execution is supported or approved.
+The primary local dashboard is an interactive, read-only trading command centre
+at `http://127.0.0.1:8100/`; the previous transcript view remains at `/legacy`.
+Codex is the core advisor of a persistent agent loop: it owns an evolving agenda,
+requests tools, receives actual results on the next turn, writes research and
+application code, searches for new sources/methods, and dispatches isolated
+experiments to `tc02`. The dashboard separates the **100% daily return aspiration**
+from measured account returns and separates new activity from archived context.
+
+Successful application changes can deploy automatically after isolated complete
+suite verification, optimistic source checks, and restart health checks with
+rollback. Original tests and the control kernel remain protected. Research
+packages install in scratch; production dependency migrations remain unavailable.
+Strategies still require independent cost-aware chronological validation and a
+fixed seven-day observed-forward test before **paper-only** promotion.
+
+The engine halt, paper kill switches, demo host pins and account restrictions
+remain authoritative. See [the open-agent runbook](docs/operator-runbook-agent.md)
+and [strategy qualification](docs/operator-runbook-codex.md).
 
 ## Architecture
 
 ```text
-market data + paper state -> Datadog workflow -> Bits xauusd/1 JSON
-           ^                                      |
-           |                                      v
-           +-------- persisted results <- arbitrary shell jobs
-                                                  |
-                                    existing gated trading CLI
-                                                  |
-                                     paper / cTrader demo adapter
+current market + account + memory + capabilities
+                      |
+                 Codex advisor <--------- actual tool results
+                      |                           ^
+               durable tool calls ----------------+
+                      |
+         sources / analysis / tc02 / engineering
+                      |
+           tested changes -> deploy / health / rollback
+
+strategy proposals -> independent validation + forward observation
+                   -> unchanged risk gates -> paper trading
 ```
 
-Bits selects arbitrary shell commands in the user-authorized container. The
-execution wrapper persists intent, bounds runtime/output, and suppresses detected
-secrets. It is not a security sandbox: arbitrary shell access can alter local
-code and controls. The agent is instructed to use the existing deterministic
-trade interface and never bypass demo-only restrictions or risk gates.
+The legacy Datadog Bits planner remains an alternative. Its operator-authorized
+arbitrary shell permission model is unchanged; it is not the active Codex path.
 
 ## Demo-Only Controls
 
@@ -423,12 +438,34 @@ and commit and push the update. Keep credentials, runtime state, generated
 market data, and unrelated existing changes out of commits. Report any failed
 check or push explicitly.
 
-## Branch consolidation — 2026-10-23
+## Codex efficiency — 2026-10-23
 
-Committed history from `codex-harness-overhaul` and `master` is consolidated
-into `main`. Existing uncommitted deployment work remains in the original
-workspace and is not represented by this merge. Future updates target `main`.
+The research/advisor child explicitly pins `gpt-6-luna` with low reasoning effort,
+including `exec resume` calls. It retains the same persisted Codex thread ID and
+80,000-token automatic compaction trigger. No account, risk, strategy validation,
+or execution privileges change with the model. Local user model defaults are ignored.
 
-Merge validation also fixes clean-checkout readiness when the generated dataset
-is absent, isolates planner and demo-feed test configuration, and runs candidate
-tests with the current Python interpreter rather than a hard-coded `.venv` path.
+Per-turn briefs project repeated account histories and result bodies into concise
+summaries. Current account, risk limits, constraints and unresolved-action records
+are preserved. Training bars remain in `train.parquet`; large retained tool results
+have evidence references. `evidence_read` accepts `call_id`, zero-based `offset`,
+and `limit` (1–4000 characters); follow `next_offset` until null. It never executes
+the original action. Preview text is not complete evidence. Existing tool-output
+retention limits still apply; an unavailable or previously truncated result must
+not be treated as fully observed.
+
+The `codex_usage` field of `/api/lab` and the dashboard's
+Codex efficiency block expose the observed model, latest input/cached/output token
+counts, brief size and native session compaction count/timestamps. Counters are
+read incrementally from the local session log with a persisted byte cursor; raw
+session content is never returned or copied into state. Missing telemetry displays
+unavailable rather than zero. Cumulative usage and compactions include the session's
+previous model, so they do not establish savings from Luna or identify a bill.
+The compaction threshold is a context trigger, not a time schedule. Keep the
+operating prompt focused on one measurable task, reusable commands, compact results
+and evidence references; evaluate retries and completed findings alongside tokens.
+
+Committed branch history was consolidated into `main` on 2026-10-23. Updates
+are published to `main`; unrelated local cleanup and runtime data remain outside
+this release. The previously deployed harness modules and their integration tests
+are included as prerequisites for the Luna efficiency update.

@@ -176,6 +176,7 @@ def test_invalid_backend_raises(monkeypatch):
 
 
 def test_paper_from_env_defaults_to_local_sqlite_store(tmp_path, monkeypatch):
+    monkeypatch.delenv("PAPER_INITIAL_CASH", raising=False)
     monkeypatch.delenv("XAUUSD_STATE_BACKEND", raising=False)
     monkeypatch.setenv("STATE_DB_PATH", str(tmp_path / "paper.db"))
     trading = paper_from_env()

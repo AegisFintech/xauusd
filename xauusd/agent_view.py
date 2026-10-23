@@ -366,7 +366,15 @@ def create_app(store: AgentTranscriptStore | None = None,
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
+        from .lab_dashboard import PAGE
+        return PAGE
+
+    @app.get("/legacy", response_class=HTMLResponse)
+    def legacy() -> str:
         return _PAGE
+
+    from .lab_dashboard import attach_routes
+    attach_routes(app, transcript, paper_or_default)
 
     @app.get("/api/status")
     def status() -> dict[str, Any]:
@@ -616,6 +624,14 @@ def create_app(store: AgentTranscriptStore | None = None,
         # `_feed_alerts` for the outage that the old informational-only exemption hid.
         data_feed = _feed_health()
         alerts.extend(_feed_alerts(data_feed))
+        lab = None
+        if (heartbeat or {}).get("planner") == "codex":
+            try:
+                from .lab_api import snapshot
+                lab = snapshot(transcript, pt)
+                alerts.extend(lab.get("alerts", []))
+            except Exception:
+                alerts.append("Codex lab state unavailable")
         return {"status": "ok" if not alerts else "degraded", "alerts": alerts,
                 "agent": {"heartbeat": heartbeat, "heartbeat_age_seconds": heartbeat_age,
                           "latest_run_id": latest["run_id"] if latest else None,
@@ -629,6 +645,7 @@ def create_app(store: AgentTranscriptStore | None = None,
                 "data_update": {**data, "age_seconds": _age_seconds(data.get("recorded_at"))},
                 "data_feed": data_feed,
                 "storage": storage,
+                "lab": {"status": lab.get("status"), "storage": lab.get("storage")} if lab else None,
                 "database": {"backend": state_backend(), "integrity": integrity}}
 
     return app
@@ -691,8 +708,13 @@ FEED_STATUS_STALE_SECONDS = 300.0
 FEED_BAR_STALE_SECONDS = 300.0
 # States that are healthy or transient. `not_deployed` stays quiet on purpose: an
 # absent feed is a deployment choice, and alerting on it was what made the whole
-# signal ignorable in the first place.
-FEED_QUIET_STATES = ("ok", "connecting")
+# signal ignorable in the first place. The subscribe states are transient too -- the
+# client re-authenticates and resubscribes every 900s and the whole cycle takes about
+# two seconds, so a health poll landing inside it would otherwise raise a spurious
+# alert. A feed *stuck* subscribing is still caught: it stops persisting bars, so the
+# bar-age rule fires during an open session, and a frozen status file trips the
+# staleness rule.
+FEED_QUIET_STATES = ("ok", "connecting", "subscribing", "subscribing_spots")
 
 
 def _feed_alerts(feed: dict[str, Any]) -> list[str]:

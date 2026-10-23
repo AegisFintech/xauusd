@@ -3,6 +3,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 import errno
+import gzip
 import io
 import json
 import logging
@@ -11,7 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -22,6 +23,14 @@ from .paper_trading import market_is_open
 
 log = logging.getLogger(__name__)
 REQUIRED = ("open", "high", "low", "close", "volume")
+
+
+def read_raw_page(path: Path) -> dict:
+    """The same wire page, whether plain or losslessly gzip-compressed."""
+    if path.name.endswith(".json.gz"):
+        with gzip.open(path, "rt", encoding="utf-8") as stream:
+            return json.load(stream)
+    return json.loads(path.read_text())
 # The store has three independent writers (the feed's per-minute append, the
 # data-update timer, the agent's in-loop refresh). They wait for each other
 # rather than racing, but a wedged writer must not hang a trading loop forever.
@@ -106,7 +115,7 @@ class HistoricalDataStore:
             if time_col is None:
                 raise ValueError("bars need a DatetimeIndex or timestamp/time/date column")
             x.index = x.pop(time_col)
-        x.index=pd.to_datetime(x.index, utc=True, errors="raise"); x.index.name="timestamp"; x=x.sort_index()
+        x.index=pd.to_datetime(x.index, utc=True, errors="raise"); x.index.name="timestamp"; x=x.sort_index(kind="stable")
         missing=[c for c in REQUIRED if c not in x.columns]
         if missing: raise ValueError(f"missing columns: {missing}")
         x=x[list(REQUIRED)].apply(pd.to_numeric, errors="coerce").dropna(); x=x[~x.index.duplicated(keep="last")]
@@ -192,7 +201,7 @@ class HistoricalDataStore:
         with file_lock(self.path, STORE_LOCK_TIMEOUT_SECONDS):
             x=self.normalize(bars)
             if merge and self.path.exists():
-                x=pd.concat([pd.read_parquet(self.path),x]).sort_index(); x=x[~x.index.duplicated(keep="last")]
+                x=pd.concat([pd.read_parquet(self.path),x]).sort_index(kind="stable"); x=x[~x.index.duplicated(keep="last")]
             buffer=io.BytesIO()
             x.to_parquet(buffer, engine="pyarrow")
             atomic_write_bytes(self.path, buffer.getvalue())
@@ -238,7 +247,7 @@ class HistoricalDataStore:
         """
         pages = []
         directory = self.raw_archive_dir
-        for path in directory.glob("*.json") if directory.is_dir() else []:
+        for path in sorted([*directory.glob("*.json"), *directory.glob("*.json.gz")]) if directory.is_dir() else []:
             parts = path.name.split("_")
             if len(parts) < 2:
                 continue
@@ -349,7 +358,7 @@ class HistoricalDataStore:
         for start in range(0, len(pages), chunk_pages):
             frames = []
             for _, _, path in pages[start:start + chunk_pages]:
-                payload = json.loads(path.read_text())
+                payload = read_raw_page(path)
                 frame = trendbars_to_frame([SimpleNamespace(**bar) for bar in payload["bars"]],
                                            digits=int(payload.get("digits", 2)))
                 frame = frame[frame.index >= cutoff]
@@ -357,9 +366,9 @@ class HistoricalDataStore:
                     frames.append(frame)
             if not frames:
                 continue
-            merged = pd.concat(frames).sort_index()
+            merged = pd.concat(frames).sort_index(kind="stable")
             merged = merged[~merged.index.duplicated(keep="last")]
-            total = merged if total is None else pd.concat([total, merged]).sort_index()
+            total = merged if total is None else pd.concat([total, merged]).sort_index(kind="stable")
             del frames, merged
             total = total[~total.index.duplicated(keep="last")]
             if progress:
@@ -749,7 +758,10 @@ class CTraderOpenApiDownloader:
             first = min(int(bar.utcTimestampInMinutes) for bar in bars) if bars else 0
             last = max(int(bar.utcTimestampInMinutes) for bar in bars) if bars else 0
             path = directory / f"{first}_{last}_page{number:04d}.json"
-            if not path.exists():
-                path.write_text(json.dumps(payload, separators=(",", ":")))
+            compressed = path.with_name(path.name + ".gz")
+            if compressed.exists() and not path.exists():
+                path = compressed
+            elif not path.exists():
+                atomic_write_bytes(path, json.dumps(payload, separators=(",", ":")).encode())
             paths.append(path)
         return paths

@@ -28,7 +28,7 @@ from .ctrader_demo import (CTraderDemoAdapter, CTraderDemoOpenApiConfig,
                            CTraderDemoOpenApiTransport, CockroachCTraderDemoStore)
 from .demo_execution import CTraderVolumeConversion, CTraderVolumePolicy, PaperToCTraderDemoCoordinator
 from .demo_runner import DemoAutomationRunner, DemoRunnerConfig
-from .paper_trading import CockroachPaperTradingStore, PaperRiskConfig, PaperTrading, paper_from_env
+from .paper_trading import PaperTrading, paper_from_env
 import subprocess
 def campaign(synthetic: bool=False):
  Path("reports").mkdir(exist_ok=True); bars=synthetic_bars() if synthetic else None
@@ -107,9 +107,6 @@ def _positive_env_float(name: str, default: float) -> float:
  value=float(os.getenv(name,str(default)))
  if value <= 0: raise ValueError(f"{name} must be positive")
  return value
-
-def _paper_risk_config_from_env() -> PaperRiskConfig:
- return PaperRiskConfig.from_env()
 
 def _demo_automation_status(config: DemoRunnerConfig) -> dict:
  return {"state":"disabled" if not config.enabled else "not_started","enabled":config.enabled,
@@ -301,6 +298,8 @@ def agent_controller(action: str) -> dict:
  if os.getenv("CTRADER_AUTOMATION_ENABLED")!="true":
   return {"state":"disabled","reason":"CTRADER_AUTOMATION_ENABLED must equal true",
           "enabled":os.getenv("CTRADER_AUTOMATION_ENABLED")=="true"}
+ if os.getenv("AGENT_PLANNER")=="codex":
+  return lab_controller(action)
  config=AgentConfig.from_env(); config.validate()
  paper=_paper_from_env()
  integrity=paper.integrity_check()
@@ -422,6 +421,54 @@ def _build_engine(paper=None, now_provider=None):
  signals=ConfirmedBreakoutCanarySource(store,config.quantity)
  return PaperTradingEngine(paper,coordinator,source,signals,BitsStore(transcript),transcript,
                             config,now_provider=now_provider)
+
+def lab_controller(action: str) -> dict:
+ """Codex research, automatic paper promotion, and bounded storage operations."""
+ from .agent_loop import agent_transcript_store_from_env
+ from .lab_store import LabStore
+ from .lab import ResearchHarness
+ from .lab_codex import CodexResearchClient
+ from .bits_jobs import AgentAlreadyRunning
+ transcript=agent_transcript_store_from_env(initialize=True)
+ store=LabStore(transcript)
+ if action=="status":
+  return {"status":store.meta("status"),"active":store.active(),"jobs":store.jobs(),
+          "candidates":store.candidates(),"memory":store.memory()}
+ if action in ("retention","prune","compact-raw","compact-raw-apply","compress-raw","compress-raw-apply"):
+  from .retention import retention_plan,apply_retention,compact_raw_archive,compress_raw_archive
+  if action=="retention": return retention_plan()
+  if action=="prune": return apply_retention()
+  if action in ("compress-raw","compress-raw-apply"):
+   return compress_raw_archive(HistoricalDataStore(),apply=action=="compress-raw-apply")
+  return compact_raw_archive(HistoricalDataStore(),apply=action=="compact-raw-apply")
+ paper=_paper_from_env()
+ from .agent_status import write_status
+ if action=="run" and os.getenv("CTRADER_AUTOMATION_ENABLED")!="true":
+  return {"state":"disabled","reason":"CTRADER_AUTOMATION_ENABLED must equal true"}
+ try:
+  client=CodexResearchClient(timeout=int(os.getenv("LAB_CODEX_TIMEOUT_SECONDS","600")))
+  client.verify()
+ except Exception:
+  paper.stop("missing_credentials")
+  write_status({"state":"stopped","reason":"missing_credentials","planner":"codex"})
+  return {"state":"stopped","reason":"missing_credentials"}
+ harness=ResearchHarness(transcript,paper,HistoricalDataStore(),client,
+                         research_seconds=float(os.getenv("LAB_RESEARCH_SECONDS","300")),
+                         quantity=float(os.getenv("ENGINE_QUANTITY","0.1")))
+ if action=="once":
+  from .bits_jobs import AgentLock
+  try:
+   with_lock=AgentLock(transcript)
+  except AgentAlreadyRunning: return {"state":"refused","reason":"agent_already_running"}
+  try: return harness.research_once()
+  finally: with_lock.close()
+ if action!="run": raise ValueError("unknown_lab_action")
+ import signal
+ signal.signal(signal.SIGTERM,lambda *_:harness.stop.set())
+ signal.signal(signal.SIGINT,lambda *_:harness.stop.set())
+ try: harness.run()
+ except AgentAlreadyRunning: return {"state":"refused","reason":"agent_already_running"}
+ return {"state":"stopped"}
 
 def data_heal(store,args) -> dict:
  """Fill interior gaps that the tail-only update can never reach.
@@ -681,6 +728,8 @@ def build_parser() -> argparse.ArgumentParser:
  cftc=sub.add_parser("cftc-point-in-time"); cftc.add_argument("--no-write",action="store_true")
  sub.add_parser("daily-run"); sub.add_parser("weekly-report")
  sub.add_parser("automated-run")
+ lab=sub.add_parser("lab",help="Codex research harness and storage retention")
+ lab.add_argument("action",choices=["run","once","status","retention","prune","compact-raw","compact-raw-apply","compress-raw","compress-raw-apply"])
  td=sub.add_parser("tournament-data"); td.add_argument("action",choices=["create","status","verify"]); td.add_argument("--partition",choices=["train","validation","test"])
  er=sub.add_parser("experiments"); er.add_argument("action",choices=["seed","seed-catalog","catalog","summary","list"]); er.add_argument("--status",choices=["queued","running","completed","failed","cancelled"]); er.add_argument("--limit",type=int,default=100)
  worker=sub.add_parser("tournament-worker"); worker.add_argument("--count",type=int,default=1); worker.add_argument("--continuous",action="store_true"); worker.add_argument("--idle-seconds",type=float,default=30)
@@ -768,6 +817,7 @@ def main():
  if a.cmd=="ml-walk-forward": ml_walk_forward(a.start,a.end,a.threshold)
  if a.cmd=="cftc-point-in-time": cftc_point_in_time(a.no_write)
  if a.cmd=="daily-run": daily_run()
+ if a.cmd=="lab": print(json.dumps(lab_controller(a.action),indent=2,allow_nan=False,default=str))
  if a.cmd=="weekly-report": print(json.dumps(weekly_comparison(),indent=2,allow_nan=False))
  if a.cmd=="automated-run":
   attempt=automated_attempt(); print(json.dumps(attempt,indent=2,allow_nan=False))

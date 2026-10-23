@@ -1,5 +1,5 @@
 [Unit]
-Description=XAUUSD Datadog Bits agent (demo-only harness)
+Description=XAUUSD Codex autonomous research and paper harness
 After=network-online.target
 Wants=network-online.target
 
@@ -7,7 +7,9 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=/root/xauusd
 EnvironmentFile=/root/xauusd/.env
+ExecStartPre=/root/xauusd/.venv/bin/python -m xauusd.agent_release_worker --recover-only
 ExecStart=/root/xauusd/.venv/bin/python -m xauusd.cli agent run
+ExecStartPost=/usr/bin/systemctl start --no-block xauusd-release-verify.service
 Restart=on-failure
 RestartSec=30
 # The operator authorizes arbitrary shell execution in this container.

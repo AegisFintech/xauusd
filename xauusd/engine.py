@@ -271,7 +271,7 @@ def _profit_factor(profits: float, losses: float) -> float | None:
     """
     if losses > 0:
         return float(profits / losses)
-    return None if profits > 0 else 0.0
+    return None
 
 
 def _cagr(final_equity: float, initial_cash: float, years: float) -> float | None:

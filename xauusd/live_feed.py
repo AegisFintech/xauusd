@@ -52,6 +52,15 @@ NEW_YORK = ZoneInfo("America/New_York")
 # not one per bar. Capped because an unbounded file under reports/ is how a disk fills.
 FEED_EVENT_LIMIT = 200
 FEED_EVENT_LOCK_SECONDS = 10.0
+# States that are part of normal operation. The client re-authenticates and
+# resubscribes every RESUBSCRIBE_SECONDS, and each cycle walks
+# subscribing_spots -> subscribing -> ok, so logging every transition filled the
+# 200-event cap in about 16 hours and evicted the failures the log exists to keep
+# (measured 2026-10-15: 200 kept, 449 dropped, 16 hours of history). A transition
+# between two routine states is noise; a transition into or out of anything else is
+# not, and the first event of a process is always kept so a restart stays visible.
+ROUTINE_FEED_STATES = frozenset({"starting", "connecting", "subscribing_spots",
+                                 "subscribing", "ok"})
 # A live M1 bar is stamped at its open; it is only complete one interval later.
 BAR_INTERVAL_SECONDS = 60
 # Re-authenticate and resubscribe on this cadence so a silently dropped socket
@@ -220,6 +229,9 @@ class LiveBarFeed:
         self._pending: dict[str, Any] | None = None
         self.status = {"state": "starting", "recorded_at": None, "error_code": None,
                        "bars_written": 0, "last_bar_utc": None, "session": None}
+        # Whether this process has recorded its first event, so a start-up is always
+        # visible even though start-up states are otherwise routine.
+        self._event_recorded = False
 
     # -- persistence ------------------------------------------------------
     def on_bar(self, bar: dict[str, Any]) -> None:
@@ -300,8 +312,11 @@ class LiveBarFeed:
             atomic_write_json(Path(self.config.status_path), self.status)
         except OSError as exc:
             log.warning("data feed status write failed: %s", type(exc).__name__)
-        if previous != (state, error_code):
+        changed = previous != (state, error_code)
+        routine = previous[0] in ROUTINE_FEED_STATES and state in ROUTINE_FEED_STATES
+        if changed and (not routine or not self._event_recorded):
             self._record_event(now, state, error_code)
+            self._event_recorded = True
 
     def _record_event(self, when: datetime, state: str, error_code: str | None) -> None:
         """Append a state transition to a bounded event log.
@@ -537,13 +552,13 @@ class LiveBarFeed:
                 guard("live trendbar subscription", confirmed), self._subscribe_failed)
 
         def send_spots() -> None:
-            # subscribeToSpotTimestamp=0 asks for no spot backfill: this feed only
+            # subscribeToSpotTimestamp=True asks for no spot backfill: this feed only
             # wants bars, and a backfill would be a burst of stale ticks.
             self._note("subscribing_spots")
             client.send(ProtoOASubscribeSpotsReq(
                 ctidTraderAccountId=int(self._discovered["account_id"]),
                 # symbolId is repeated on this request, unlike the trendbar one.
-                symbolId=[int(self._discovered["symbol_id"])], subscribeToSpotTimestamp=0),
+                symbolId=[int(self._discovered["symbol_id"])], subscribeToSpotTimestamp=True),
                 responseTimeoutInSeconds=30).addCallbacks(
                 guard("spot subscription", send_trendbars), self._subscribe_failed)
 
@@ -578,7 +593,7 @@ class LiveBarFeed:
             # The spot subscription has to be dropped too, or a restart leaves two.
             self._client.send(ProtoOASubscribeSpotsReq(
                 ctidTraderAccountId=int(self._discovered["account_id"]),
-                symbolId=[int(self._discovered["symbol_id"])], subscribeToSpotTimestamp=0),
+                symbolId=[int(self._discovered["symbol_id"])], subscribeToSpotTimestamp=True),
                 responseTimeoutInSeconds=10)
             self._client.send(ProtoOAUnsubscribeLiveTrendbarReq(
                 ctidTraderAccountId=int(self._discovered["account_id"]),
@@ -621,7 +636,9 @@ class LiveBarFeed:
 
         def on_message(_client: Any, message: Any) -> None:
             try:
-                bars = self._bars_from(Protobuf.extract(message))
+                payload = Protobuf.extract(message)
+                self._record_quote(payload)
+                bars = self._bars_from(payload)
             except Exception as exc:  # a bad frame must not kill the feed
                 self._note("bar_rejected", type(exc).__name__)
                 return
@@ -677,6 +694,23 @@ class LiveBarFeed:
             reactor.callLater(bound_seconds, self._stop.set)
         reactor.run()
         return dict(self.status)
+
+    def _record_quote(self, payload: Any) -> None:
+        """Record only the discovered demo account/symbol's complete spot frame."""
+        from .quotes import record_spot
+
+        account = self._discovered.get("account_id")
+        symbol = self._discovered.get("symbol_id")
+        if account is None or symbol is None:
+            return
+        if (getattr(payload, "ctidTraderAccountId", None) != account
+                or getattr(payload, "symbolId", None) != symbol):
+            return
+        try:
+            record_spot(payload, symbol, self.now())
+        except Exception:
+            # Quotes must fail visibly without preventing closed-bar delivery.
+            self._note("quote_write_failed", "quote_persistence_failed")
 
     def _schedule_resubscribe(self, reactor: Any) -> None:
         """Re-subscribe on a cadence so a silently dropped stream recovers.

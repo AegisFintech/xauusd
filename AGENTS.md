@@ -115,7 +115,20 @@ resumption of the existing Datadog paper deployment. That authorizes the agent,
 live view, demo-host data refresh and backup timers; cTrader order execution remains
 disabled by paper-only mode. Historical pause notes describe the earlier audit.
 
-## Current deployment state — verified 2026-10-05
+## Open-agent extension — 2026-10-21
+
+Codex now owns a persistent agenda and multi-turn server tool loop. Research sources, new live-market observation, scratch dependencies, isolated tc02 jobs and tested application releases are registered capabilities. The goal is a 100% daily net-return aspiration, never a privilege to change risk. Automatic release verification runs independently as xauusd-release-verify.service; agent pre-start recovers interrupted installs. Original tests and the gate/auth/state/control dependency closure remain protected from automatic changes. Research dependency installation is supported; production dependency migrations explicitly refuse until a matching environment rollout exists. See docs/operator-runbook-agent.md. These additions do not authorize account recovery/start/reset or broker execution.
+
+## Codex deployment — verified 2026-10-21
+
+- `xauusd-agent.service` now runs `AGENT_PLANNER=codex`: bounded sandboxed research jobs, reusable tested research tools, and an independent five-second paper monitor.
+- The first production Codex research job completed on actual training OHLCV; nine baseline rules were investigated and zero candidates were proposed. No profitable strategy is implied.
+- `/` and `/lab` serve the Aurum interactive read-only dashboard; `/legacy` preserves the previous transcript view. See `docs/operator-runbook-codex.md`.
+- Automatic deployment applies only to paper strategies passing chronological cost-aware validation and a fixed seven-day prospective test. No cTrader execution adapter is constructed. All existing risk gates and persistent stops remain authoritative.
+- The existing deterministic engine stays running but halted; the lab does not clear its halt. Feed, view, refresh and backup units remain deployed.
+- Preserve the historical deployment findings below; current runtime status and `/api/health` are authoritative.
+
+## Historical deployment state — verified 2026-10-05
 
 Recorded so a later agent does not re-derive it. Trust `engine status`,
 `paper status` and `/api/health` over this paragraph, and update it when they diverge.
@@ -178,12 +191,34 @@ and commit and push the update. Keep credentials, runtime state, generated
 market data, and unrelated existing changes out of commits. Report any failed
 check or push explicitly.
 
-## Branch consolidation — 2026-10-23
+## Codex efficiency — 2026-10-23
 
-Committed history from `codex-harness-overhaul` and `master` is consolidated
-into `main`. Existing uncommitted deployment work remains in the original
-workspace and is not represented by this merge. Future updates target `main`.
+The research/advisor child explicitly pins `gpt-6-luna` with low reasoning effort,
+including `exec resume` calls. It retains the same persisted Codex thread ID and
+80,000-token automatic compaction trigger. No account, risk, strategy validation,
+or execution privileges change with the model. Local user model defaults are ignored.
 
-Merge validation also fixes clean-checkout readiness when the generated dataset
-is absent, isolates planner and demo-feed test configuration, and runs candidate
-tests with the current Python interpreter rather than a hard-coded `.venv` path.
+Per-turn briefs project repeated account histories and result bodies into concise
+summaries. Current account, risk limits, constraints and unresolved-action records
+are preserved. Training bars remain in `train.parquet`; large retained tool results
+have evidence references. `evidence_read` accepts `call_id`, zero-based `offset`,
+and `limit` (1–4000 characters); follow `next_offset` until null. It never executes
+the original action. Preview text is not complete evidence. Existing tool-output
+retention limits still apply; an unavailable or previously truncated result must
+not be treated as fully observed.
+
+The `codex_usage` field of `/api/lab` and the dashboard's
+Codex efficiency block expose the observed model, latest input/cached/output token
+counts, brief size and native session compaction count/timestamps. Counters are
+read incrementally from the local session log with a persisted byte cursor; raw
+session content is never returned or copied into state. Missing telemetry displays
+unavailable rather than zero. Cumulative usage and compactions include the session's
+previous model, so they do not establish savings from Luna or identify a bill.
+The compaction threshold is a context trigger, not a time schedule. Keep the
+operating prompt focused on one measurable task, reusable commands, compact results
+and evidence references; evaluate retries and completed findings alongside tokens.
+
+Committed branch history was consolidated into `main` on 2026-10-23. Updates
+are published to `main`; unrelated local cleanup and runtime data remain outside
+this release. The previously deployed harness modules and their integration tests
+are included as prerequisites for the Luna efficiency update.

@@ -560,3 +560,24 @@ def test_positions_resolves_an_anchor_sweep_in_one_pass(monkeypatch):
         assert (positions >= 0).all() and len(positions) == anchors * 60
         # Two passes over the batch regardless of how many anchors it covers.
         assert len(calls) == 2 and sum(calls) == 2 * len(batch)
+
+
+def test_large_overlapping_update_keeps_the_newest_values(tmp_path):
+    store=_store(tmp_path)
+    index=pd.date_range('2026-01-01',periods=100,freq='min',tz='UTC')
+    def frame(value):
+        return pd.DataFrame({'open':value,'high':value+1,'low':value-1,'close':value,'volume':1},index=index)
+    store.write(frame(100))
+    store.write(frame(200))
+    assert store.read()['close'].eq(200).all()
+
+
+def test_rebuild_reads_losslessly_compressed_raw_pages(tmp_path):
+    import gzip
+    store=_store(tmp_path)
+    page=_raw_page(tmp_path,28000000,3)
+    compressed=page.with_name(page.name+'.gz')
+    compressed.write_bytes(gzip.compress(page.read_bytes(),mtime=0));page.unlink()
+    assert len(store.raw_archive_pages())==1
+    store.rebuild_from_raw(cutoff=pd.Timestamp(28000000*60,unit='s',tz='UTC'))
+    assert len(store.read())==3 and store.read().iloc[0]['open']==1200.01

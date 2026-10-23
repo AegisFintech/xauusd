@@ -1,0 +1,12 @@
+[Unit]
+Description=XAUUSD autonomous engineering release verification and rollback
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/xauusd
+EnvironmentFile=/root/xauusd/.env
+ExecStart=/root/xauusd/.venv/bin/python -m xauusd.agent_release_worker
+TimeoutStartSec=240
+StandardOutput=null
+StandardError=null

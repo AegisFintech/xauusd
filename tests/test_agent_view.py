@@ -45,7 +45,7 @@ def server(paper_trading):
 
 
 def test_index_html_renders_live_view(server):
-    with request.urlopen(server + "/") as response:
+    with request.urlopen(server + "/legacy") as response:
         body = response.read().decode()
     assert "live thinking" in body
     assert "newest first" in body
@@ -57,7 +57,7 @@ def test_index_html_renders_live_view(server):
 
 
 def test_index_html_renders_times_in_gmt_plus_eight(server):
-    with request.urlopen(server + "/") as response:
+    with request.urlopen(server + "/legacy") as response:
         body = response.read().decode()
 
     # Display-only conversion: a fixed +08:00 offset, not the browser's own zone.
@@ -619,3 +619,20 @@ def test_health_stays_quiet_for_a_healthy_feed(server, paper_trading, tmp_path, 
         "recorded_at": datetime.now(timezone.utc).isoformat()})
 
     assert not [a for a in body["alerts"] if "feed" in a.lower() or "M1 bar" in a]
+
+
+@pytest.mark.parametrize("state", ["subscribing_spots", "subscribing"])
+def test_health_stays_quiet_during_a_routine_resubscribe(server, paper_trading, tmp_path,
+                                                         monkeypatch, state):
+    """The resubscribe cycle takes about two seconds and repeats every 900s.
+
+    A health poll landing inside it is not a fault, and alerting on it would add a
+    spurious `degraded` roughly every quarter hour. A feed *stuck* subscribing is
+    still caught by the bar-age rule, which the stale-bar test covers.
+    """
+    body = _feed(server, paper_trading, tmp_path, monkeypatch, {
+        "state": state, "session": "open", "age_seconds": 40.0, "bars_written": 12,
+        "recorded_at": datetime.now(timezone.utc).isoformat()})
+
+    assert not [a for a in body["alerts"] if "feed" in a.lower() or "M1 bar" in a]
+    assert body["data_feed"]["state"] == state   # surfaced, just not an alert
