@@ -297,3 +297,20 @@ The read-only Statistics tab refreshes with the dashboard and consolidates retai
 - Preserve complete bounded evidence_read/research_program pages and source_fetch
   excerpts in compact_context. Re-previewing requested evidence caused a retrieval
   loop. Keep the encoded-page ceiling and previews for unsolicited large results.
+
+## Database retention — 2026-10-24
+
+- `database_retention` is the seven-day UTC operational-log policy. Its hourly
+  systemd service is independent of research cycles and uses bounded transactions.
+- Never rotate learning/knowledge, pending drafts, active/unknown jobs, referenced
+  evidence, account/stop state, broker data or trade idempotency keys. Monitor-only
+  records may expire; a monitor-prefixed trade result is still a trade result.
+- Preserve event IDs/cursors and cumulative metrics when log bodies expire. Terminal
+  shell outputs become explicit expired-output tombstones retaining request/job IDs;
+  undated legacy jobs get a first-observed grace period. Unknown jobs are excluded
+  from the legacy row-count pruner too.
+- Native active Codex sessions remain intact. Quote-history's existing seven-day
+  observation window and prospective qualification evidence are not shortened.
+- Scheduled maintenance uses optimize/passive checkpoint/incremental vacuum only.
+  Full compaction requires stopped agent/engine/view units and integrity checks;
+  it never clears controls or starts accounts. See docs/operator-runbook-database.md.

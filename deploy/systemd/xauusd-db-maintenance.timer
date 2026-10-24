@@ -1,0 +1,12 @@
+[Unit]
+Description=Expire operational database logs older than seven days hourly
+
+[Timer]
+OnBootSec=15min
+OnCalendar=hourly
+RandomizedDelaySec=120
+Persistent=true
+Unit=xauusd-db-maintenance.service
+
+[Install]
+WantedBy=timers.target

@@ -117,6 +117,9 @@ def snapshot(transcript, paper) -> dict:
     storage.update(errors=retained_status.get("errors", []),
                    bytes_reclaimable=retained_status.get("bytes_reclaimable", 0),
                    recorded_at=retained_status.get("recorded_at"))
+    from .database_retention import read_status as maintenance_status
+    storage['database_maintenance']=maintenance_status()
+    storage['database_optimization']=store.meta('db_optimization') if hasattr(transcript,'connect') else None
     if status.get("heartbeat_at"):
         try:
             age = (datetime.now(timezone.utc) - datetime.fromisoformat(status["heartbeat_at"])).total_seconds()
@@ -125,6 +128,9 @@ def snapshot(transcript, paper) -> dict:
             status = dict(status, stale=True)
     alerts = []
     research_alerts = []
+    maintenance=storage.get('database_maintenance') or {}
+    if maintenance.get('state')=='failed':
+        alerts.append('Database log retention failed; review storage maintenance.')
     unresolved = [r for r in (store.meta('agent_calls') or []) if r.get('state') == 'unknown'] if hasattr(transcript, 'connect') else []
     if unresolved:
         message=str(len(unresolved)) + ' unresolved research actions need status investigation; they will not be replayed.'

@@ -124,11 +124,8 @@ class LabStore:
         freshness gate. Their replay rows confer no broker/trade authority.
         SQLite reuses freed pages; no blocking VACUUM is run on the live store.
         """
-        cutoff = (now - timedelta(days=7)).isoformat()
-        with self.state.db() as db:
-            count = db.execute("DELETE FROM paper_trading_decisions WHERE decision_id LIKE 'monitor:%' AND created_at < ?",
-                               (cutoff,)).rowcount
-        return max(0, count)
+        from .database_retention import prune_monitor_records
+        return prune_monitor_records(self,now)
 
     @serialized
     def prune_research_evidence(self, lab_root="data/lab") -> dict:

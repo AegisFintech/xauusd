@@ -322,3 +322,21 @@ and [implementation plan](docs/research-program-plan-2026-10-24.md).
 Explicit bounded evidence pages and fetched source excerpts reach the advisor
 intact; context compaction does not turn a requested page into another preview.
 Large unsolicited results still use previews and durable retrieval references.
+
+## Database retention — 2026-10-24
+
+Operational database logs use a rolling **seven-day UTC retention** window,
+checked hourly by `xauusd-db-maintenance.timer`. Expire old transcript/event/job
+log bodies and monitor marks; preserve learning, referenced evidence, active and
+unknown work, account state, stops and trade idempotency. Expired terminal shell
+output becomes an explicit digest-marked tombstone; job/request identity remains.
+Older undated jobs get a seven-day first-observed grace period, never an invented
+creation date. Existing shorter row/byte caps still apply.
+
+Maintenance uses bounded transactions, indexes, passive WAL checkpoints and
+incremental vacuum after initial conversion. The scheduled service never runs a
+blocking full VACUUM. One-time `python -m xauusd.database_retention --compact`
+requires the agent, engine and view to be stopped, checks integrity before/after,
+and never starts accounts or clears the engine halt. The read-only Storage view
+shows maintenance and compaction results. See
+[database maintenance](docs/operator-runbook-database.md).

@@ -14,6 +14,7 @@ import subprocess
 import fcntl
 from threading import Event, Thread
 import time
+from datetime import datetime, timezone
 from uuid import uuid4
 
 from .bits import BitsError, error_details, validate_shell_action
@@ -178,7 +179,7 @@ class BitsStore:
         job_id = uuid4().hex
         result = {"action_id": action["id"], "job_id": job_id, "status": "running",
                   "exit_code": None, "stdout": "", "stderr": "", "truncated": False,
-                  "total_bytes": 0}
+                  "total_bytes": 0, "created_at": datetime.now(timezone.utc).isoformat()}
         with self.db() as db:
             cur = db.execute("INSERT INTO bits_jobs(action_key,job_id,request_json,result_json,status) VALUES(?,?,?,?,?) ON CONFLICT(action_key) DO NOTHING",
                              (key, job_id, payload, canonical_json(result), "running"))
@@ -189,6 +190,9 @@ class BitsStore:
         return json.loads(row["result_json"]), created
 
     def finish(self, result):
+        result=dict(result)
+        if result.get('status') in ('succeeded','failed','cancelled','timed_out'):
+            result.setdefault('finished_at',datetime.now(timezone.utc).isoformat())
         with self.db() as db:
             db.execute("UPDATE bits_jobs SET result_json=?,status=? WHERE job_id=?",
                        (canonical_json(result), result["status"], result["job_id"]))
@@ -222,7 +226,7 @@ class BitsStore:
         pending-draft references survive.
         """
         with self.db() as db:
-            terminal = ("succeeded", "failed", "cancelled", "timed_out", "unknown")
+            terminal = ("succeeded", "failed", "cancelled", "timed_out")
             marks = ",".join("?" for _ in terminal)
             total = int(db.execute(f"SELECT COUNT(*) c FROM bits_jobs WHERE status IN ({marks})",
                                    terminal).fetchone()["c"])

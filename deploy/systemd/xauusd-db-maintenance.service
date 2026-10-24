@@ -1,0 +1,17 @@
+[Unit]
+Description=XAUUSD seven-day database log retention and bounded optimization
+After=xauusd-agent.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/xauusd
+EnvironmentFile=/root/xauusd/.env
+ExecStart=/root/xauusd/.venv/bin/python -m xauusd.database_retention
+TimeoutStartSec=180
+StandardOutput=null
+StandardError=null
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/root/xauusd/state /root/xauusd/reports
