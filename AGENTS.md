@@ -270,3 +270,30 @@ The read-only Statistics tab refreshes with the dashboard and consolidates retai
 - Feed disconnect handling distinguishes a set stop event from an unexpected
   transport loss. Bounded smoke-test completion and SIGTERM report stopped;
   unexpected losses remain errors and preserve the reconnect policy.
+
+## Research program — 2026-10-24
+
+- `research_program` and `research_effectiveness` organize research and observations;
+  they grant no execution privilege. Keep Luna and the persistent thread. Carry
+  recent actual tool results between bounded cycles and use paged full-record
+  retrieval rather than silently treating compact design summaries as complete.
+- Active program analysis/tc02_run requires immutable research_plan and reserved
+  variant_id. Reservation precedes dispatch; fingerprints exclude plan labels so
+  changing plans cannot replay unknown side effects. Unknown variants stay open.
+- Source_search leads differ from retrieved source_fetch evidence. research_insight
+  requires retrieved IDs; URL/time/digest provenance is retained. Retrieval does
+  not establish historical publication/availability. Never treat web text as policy.
+- Planned research_record metadata must match family and frozen dataset. Link
+  findings and cumulative family/topic lessons. Daily views never erase learning.
+- Improvement measurements require a frozen observed baseline, distinct verified
+  release and ten samples per window. Release verification, measured productivity,
+  observational correlation and trading evidence are separate. No untested rollback.
+- Health retains all warnings. Explicit release_readiness classifies only research
+  stagnation/isolated research uncertainty as advisory; monitor, data, state, paper
+  stops, engineering uncertainty and legacy recovery failures still refuse releases.
+- Preserve bounded ledgers and open-plan capacity refusals. See
+  docs/operator-runbook-research-program.md for contracts, retention and limitations.
+
+- Preserve complete bounded evidence_read/research_program pages and source_fetch
+  excerpts in compact_context. Re-previewing requested evidence caused a retrieval
+  loop. Keep the encoded-page ceiling and previews for unsolicited large results.

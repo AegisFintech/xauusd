@@ -302,3 +302,23 @@ See the [cleanup checklist and findings](docs/cleanup-plan-2026-10-24.md).
 A planned feed shutdown (including the bounded demo-host smoke test) records
 `stopped` without a transport error. Unexpected disconnects retain their failure
 status and the existing continuous reconnect behavior.
+
+## Research and measured self-improvement — 2026-10-24
+
+The Luna advisor now receives a six-topic research program, source-backed insights,
+compact failure lessons and measured bottlenecks. New research compute requires an
+immutable plan and a durably reserved variant; results and plans survive cycle
+boundaries. Search leads, retrieved evidence and advisor interpretations remain
+separate, with source provenance and no assumption of historical availability.
+
+Observed overhead can seed an improvement task and measured baseline. A later
+verified release is compared using at least ten samples per window; deployment,
+measured productivity and profitable trading are distinct milestones. Research
+warnings stay visible while software release readiness separately checks operational
+health. All trading controls, the engine halt and the persistent Luna session remain
+unchanged. See the [research program runbook](docs/operator-runbook-research-program.md)
+and [implementation plan](docs/research-program-plan-2026-10-24.md).
+
+Explicit bounded evidence pages and fetched source excerpts reach the advisor
+intact; context compaction does not turn a requested page into another preview.
+Large unsolicited results still use previews and durable retrieval references.

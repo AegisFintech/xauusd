@@ -625,14 +625,18 @@ def create_app(store: AgentTranscriptStore | None = None,
         data_feed = _feed_health()
         alerts.extend(_feed_alerts(data_feed))
         lab = None
+        release_alerts = list(alerts)
         if (heartbeat or {}).get("planner") == "codex":
             try:
                 from .lab_api import snapshot
                 lab = snapshot(transcript, pt)
                 alerts.extend(lab.get("alerts", []))
+                release_alerts.extend(lab.get("operational_alerts", lab.get("alerts", [])))
             except Exception:
                 alerts.append("Codex lab state unavailable")
+                release_alerts.append("Codex lab state unavailable")
         return {"status": "ok" if not alerts else "degraded", "alerts": alerts,
+                "release_readiness": {"status": "ok" if not release_alerts else "degraded", "alerts": release_alerts},
                 "agent": {"heartbeat": heartbeat, "heartbeat_age_seconds": heartbeat_age,
                           "latest_run_id": latest["run_id"] if latest else None,
                           "latest_run_status": latest["status"] if latest else None},

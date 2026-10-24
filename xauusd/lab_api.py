@@ -124,9 +124,13 @@ def snapshot(transcript, paper) -> dict:
         except (ValueError, TypeError):
             status = dict(status, stale=True)
     alerts = []
+    research_alerts = []
     unresolved = [r for r in (store.meta('agent_calls') or []) if r.get('state') == 'unknown'] if hasattr(transcript, 'connect') else []
     if unresolved:
-        alerts.append(str(len(unresolved)) + ' unresolved research actions need status investigation; they will not be replayed.')
+        message=str(len(unresolved)) + ' unresolved research actions need status investigation; they will not be replayed.'
+        alerts.append(message)
+        if all(r.get('name') in ('tc02_run','analysis','dependency_install') for r in unresolved):
+            research_alerts.append(message)
     if storage["errors"] or storage["state"] == "partial":
         alerts.append("Artifact retention needs attention; some generated files were retained.")
     if usage.free < max(2_000_000_000, usage.total * .05):
@@ -143,9 +147,15 @@ def snapshot(transcript, paper) -> dict:
         alerts.append("Autonomous research is failing: " + str(agent.get("last_error","research_cycle_failed")))
     if agent.get("stagnation_cycles",0)>=3:
         alerts.append("Research has no changed experimental evidence in three sessions; review the evolving plan.")
+        research_alerts.append(alerts[-1])
     if engineering.get("state") in ("recovery_required","installing"):
         alerts.append("Engineering release recovery needs attention.")
-    return {"statistics": retained_statistics(store) if hasattr(transcript, "connect") else {}, "status": status, "alerts": alerts, "account": account, "active": active, "candidates": candidates[:40],
+    from .research_program import context as program_context
+    from .research_effectiveness import diagnostics
+    return {"research_program": program_context(store) if hasattr(transcript, "connect") else {},
+            "research_diagnostics": diagnostics(store) if hasattr(transcript, "connect") else {},
+            "research_alerts": research_alerts, "operational_alerts": [a for a in alerts if a not in research_alerts],
+            "statistics": retained_statistics(store) if hasattr(transcript, "connect") else {}, "status": status, "alerts": alerts, "account": account, "active": active, "candidates": candidates[:40],
             "jobs": jobs[:30], "equity": [r for r in equity if r.get('time','')>=daily['started_at']][-2000:], "activity": activity[-100:], "data": data,
             "storage": storage, "dataset": dataset, "memory": memory,
             "experiments": (store.meta("experiments") or []) if hasattr(transcript,"connect") else [],

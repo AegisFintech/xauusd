@@ -8,7 +8,8 @@ import time
 def release_healthy(health, previous_run):
     heartbeat=(health.get('agent') or {}).get('heartbeat') or {}
     monitor=health.get('monitor') or {}
-    return (health.get('status')=='ok' and not health.get('alerts') and
+    readiness=health.get('release_readiness',health)
+    return (health.get('status') in ('ok','degraded') and readiness.get('status')=='ok' and not readiness.get('alerts') and
             heartbeat.get('planner')=='codex' and heartbeat.get('state')=='running' and
             heartbeat.get('run_id') and heartbeat.get('run_id')!=previous_run and
             (health.get('agent') or {}).get('heartbeat_age_seconds',999)<30 and

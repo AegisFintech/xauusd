@@ -18,6 +18,10 @@ def record(store, arguments):
         return {'ok': False, 'error_code': 'completed_evidence_required'}
     rows = store.meta('research_outcomes') or []
     experiment = arguments.get('experiment')
+    if call.get('plan_id'):
+        plan=next((p for p in store.meta('research_plans') or [] if p['id']==call['plan_id']),None)
+        if not plan or not isinstance(experiment,dict) or experiment.get('family')!=plan['family'] or experiment.get('dataset_version')!=plan['dataset_version']:
+            return {'ok':False,'error_code':'planned_experiment_metadata_required'}
     identity = None
     if experiment is not None:
         expected = {'family', 'dataset_version', 'code_sha256', 'parameters', 'costs', 'metrics', 'failure_reason', 'parent_id'}
@@ -52,6 +56,8 @@ def record(store, arguments):
            'evidence_sha256': hashlib.sha256(json.dumps(evidence, sort_keys=True, allow_nan=False).encode()).hexdigest(),
            'evidence': evidence, 'experiment_identity': identity}
     store.update('research_outcomes', lambda current: ((current or []) + [row])[-100:], [], observation=('findings', row))
+    from .research_program import learn
+    learn(store,row)
     store.event('research_outcome', arguments['hypothesis'], {k: row[k] for k in ('id', 'verdict', 'conclusion', 'call_id')})
     return {'ok': True, 'id': row['id']}
 
@@ -59,13 +65,17 @@ def record(store, arguments):
 @serialized
 def improvement(store, arguments):
     required = {'id', 'problem', 'change', 'acceptance', 'state'}
-    if set(arguments) != required or any(not isinstance(v, str) or not 1 <= len(v) <= 2000 for v in arguments.values()) or arguments['state'] not in ('planned', 'working', 'blocked', 'verified'):
+    if not required <= set(arguments) or set(arguments)-required-{'metric'} or any(not isinstance(arguments[k], str) or not 1 <= len(arguments[k]) <= 2000 for k in required) or arguments['state'] not in ('planned', 'working', 'blocked', 'verified'):
         return {'ok': False, 'error_code': 'invalid_improvement'}
     release = store.meta('engineering') or {}
     rows = store.meta('improvements') or []
     prior = next((r for r in rows if r['id'] == arguments['id']), None)
     if arguments['state'] == 'verified' and (release.get('state') != 'verified' or not prior or not release.get('release_id') or release['release_id'] == prior.get('baseline_release_id')):
         return {'ok': False, 'error_code': 'verified_release_required'}
+    if 'metric' in arguments:
+        from .research_effectiveness import start_measurement,METRICS
+        if arguments['metric'] not in METRICS:return {'ok':False,'error_code':'unknown_measurement_metric'}
+        start_measurement(store,arguments['id'],arguments['metric'])
     row = {**arguments, 'updated_at': timestamp(), 'baseline_release_id': prior.get('baseline_release_id') if prior else release.get('release_id'), 'release_id': release.get('release_id') if arguments['state'] == 'verified' else None}
     rows = [r for r in rows if r['id'] != row['id']]
     store.meta('improvements', (rows + [row])[-60:])
@@ -73,9 +83,10 @@ def improvement(store, arguments):
 
 
 def progress_signature(store):
-    # Discovery, changing prose, arbitrary scripts and job IDs are not outcomes.
+    # Retrieved-source interpretations are learning, never strategy qualification.
+    # Bare searches, changing prose and arbitrary job IDs are not outcomes.
     release = store.meta('engineering') or {}
-    data = {'outcomes': [r['id'] for r in store.meta('research_outcomes') or []],
+    data = {'insights':[r['id'] for r in store.meta('research_insights') or []], 'outcomes': [r['id'] for r in store.meta('research_outcomes') or []],
             'retired': [r['id'] for r in store.meta('experiment_archive') or []],
             'release': release.get('release_id') if release.get('state') == 'verified' else None}
     return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
@@ -87,5 +98,5 @@ def lookup(store, arguments):
     rows = store.meta('research_outcomes') or []
     matches = [r for r in rows if (not arguments.get('id') or r['id'] == arguments['id'])
                and (not arguments.get('family') or (r.get('experiment') or {}).get('family') == arguments['family'])]
-    return {'ok': True, 'scope': 'retained_findings', 'findings':
+    return {'ok': True, 'scope': 'retained_findings', 'lessons':[{k:v for k,v in r.items() if k!='recent_ids'} for r in (store.meta('research_lessons') or []) if not arguments.get('family') or r['family']==arguments['family']][-10:], 'findings':
             [{k:v for k,v in r.items() if k != 'evidence'} for r in matches[-10:]]}

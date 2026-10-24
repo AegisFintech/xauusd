@@ -140,3 +140,13 @@ def test_compact_context_preserves_account_controls_and_retrievable_evidence(tmp
     evidence=advisor.execute(call,tmp_path/'work')['result']
     assert evidence['ok'] and evidence['total_chars']>1000 and evidence['next_offset']==1000
     assert evidence['content']==json.dumps(result,allow_nan=False,sort_keys=True)[:1000]
+
+
+def test_explicit_evidence_pages_and_source_excerpts_survive_context_compaction():
+    from xauusd.agent_advisor import compact_context
+    page='requested evidence '*200
+    rows=[{'id':'page','name':'evidence_read','state':'completed','result':{'ok':True,'content':page,'next_offset':4000}},
+          {'id':'source','name':'source_fetch','state':'completed','result':{'ok':True,'excerpt':page,'digest':'a'*64}},
+          {'id':'plan','name':'research_program','state':'completed','result':{'ok':True,'content':page,'next_offset':4000}}]
+    context=compact_context({'tool_results':rows})
+    assert context['tool_results']==rows

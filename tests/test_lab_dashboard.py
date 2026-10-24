@@ -301,3 +301,24 @@ assert(JSON.stringify(root).includes('Unavailable'));
 """
     result = subprocess.run(['node', '-e', harness], capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
+
+
+def test_research_program_renderer_preserves_untrusted_source_interpretation_as_text():
+    import subprocess
+    from xauusd.lab_dashboard import PAGE
+    script=PAGE.split('<script>',1)[1].split('</script>',1)[0]
+    script=script[:script.index("$('timeframes').addEventListener")]
+    harness=r'''
+const assert=require('node:assert/strict');
+function element(tag){return {tag,children:[],textContent:'',append(...nodes){this.children.push(...nodes)},replaceChildren(){this.children=[]}};}
+const nodes={'research-program-content':element('div')};
+global.document={getElementById:id=>nodes[id],createElement:element};
+'''+script+r'''
+renderResearchProgram({research_program:{plan_required:true,recommendation:{question_area:'Macro'},topics:{macro:{plans:1,findings:0,rejected:0}},plans:[],insights:[{question:'<img onerror=bad>',finding:'Untrusted source interpretation',next_test:'Check publication timing',sources:[{url:'https://example.com'}]}]},research_diagnostics:{bottlenecks:[],measurements:[]}});
+const root=nodes['research-program-content'];
+assert(root.children.some(n=>n.tag==='article'&&n.children[0].textContent.includes('<img onerror=bad>')));
+assert(!root.children.some(n=>n.tag==='img'));
+assert(root.children.at(-1).textContent.includes('does not establish trading returns'));
+'''
+    result=subprocess.run(['node','-e',harness],capture_output=True,text=True,timeout=10)
+    assert result.returncode==0,result.stderr
