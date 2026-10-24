@@ -3,21 +3,19 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-import hashlib
 import html
 import json
 import math
 import os
 import shutil
 import subprocess
-import time
 
 import pandas as pd
 
 from .atomic import atomic_write_json
 from .data import HistoricalDataStore
 from .engine import ExecutionConfig
-from .research import DEFAULT_STRATEGIES, ResearchCampaign, StrategySpec
+from .research import DEFAULT_STRATEGIES, ResearchCampaign
 from .validation import StrategyValidator, ValidationConfig
 
 
@@ -158,17 +156,6 @@ def weekly_comparison(reports_dir: Path = Path("reports/automation"), limit: int
     report = {"runs": len(manifests), "strategies": strategies}
     atomic_json(reports_dir / "weekly.json", report)
     return report
-
-
-def run_history(reports_dir: Path = Path("reports/automation"), limit: int = 100) -> list[dict]:
-    history = []
-    for path in sorted(reports_dir.glob("*/manifest.json"))[-limit:]:
-        manifest = json.loads(path.read_text())
-        best = manifest["candidates"][0] if manifest["candidates"] else None
-        history.append({"run_id": manifest["run_id"], "created_at": manifest["created_at"],
-                        "data_end": manifest["data"]["end"], "best": best,
-                        "promoted": manifest["promotion"]["promoted"]})
-    return history
 
 
 def automated_attempt(config: AutomationConfig | None = None) -> dict:

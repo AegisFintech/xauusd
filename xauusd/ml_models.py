@@ -5,7 +5,6 @@ from importlib import import_module
 from typing import Protocol
 
 import numpy as np
-from sklearn.base import ClassifierMixin
 from sklearn.ensemble import ExtraTreesClassifier, HistGradientBoostingClassifier, RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans

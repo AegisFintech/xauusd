@@ -97,3 +97,31 @@ before execution. Results report one-ounce price P/L, costs, chronological third
 best-two sensitivity and excluded gaps; they are not account returns or final
 qualification. Unknown remote outcomes still require reconciliation, never replay.
 The dashboard leads with completed evidence and shows lifecycle states/backlog.
+
+## Research continuity and maintenance — 2026-10-24
+
+Use research_lookup (optional family/id) before repeating a hypothesis. Supply
+research_record experiment metadata with family, dataset_version, actual
+code_sha256, parameters, costs, finite-or-null metrics, failure_reason and a
+parent finding ID or null. Results remain unvalidated claims. Equivalent retained
+identities deduplicate even under a new call ID. evidence_read can retrieve
+finding-backed output after the original tool detail expires.
+
+Statistics have separate retained-detail and since-installation scopes. Daily
+aggregates retain 90 days; cumulative counters persist independently of logs.
+CPU seconds measure remote child processes; wall seconds measure job duration.
+Neither establishes full-server utilization or historical backtest totals.
+
+At the unresolved-action ceiling, status/reconciliation/evidence/lookup stay
+available. A not_found job remains unknown and cannot replay. The October 24
+inspection found all twelve older unknown remote IDs missing; their outcomes
+remain unproven. New worker retention expires payloads while keeping compact
+status and idempotency metadata. This does not authorize Bits recovery or any
+account start/reset.
+
+Feed heartbeat updates every 60 seconds even on weekends. It preserves errors
+and last-bar time; it cannot make stale prices tradable. Dashboard market reads
+use metadata and bounded batch aggregation, with file-identity cache invalidation.
+Generated Graphify snapshots retain three newest and seven days; pins, unknown
+files and symlinks preserve a directory. Completed workspaces retain the existing
+seven-day policy; active/uncertain work and recovery artifacts are preserved.

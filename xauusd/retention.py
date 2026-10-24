@@ -15,6 +15,7 @@ from .atomic import atomic_write_json, atomic_write_bytes, file_lock, _fsync_dir
 POLICY = {'completed_log_days': 7, 'tournament_backup_days': 30,
           'verified_tournament_backups_preserved': 2,
           'verified_local_state_backups_preserved': 14,
+          'graph_snapshots_preserved': 3, 'graph_snapshot_days': 7,
           'raw_archives': 'exact canonical bar content in later retained rebuild pages only'}
 
 
@@ -236,6 +237,8 @@ def retention_plan(root=Path('.'), now=None):
             for path in sorted(generated):
                 if path.is_file() and path != marker:
                     files.append(_record(path, 'expired_completed_workspace_artifact'))
+    from .generated_retention import graph_snapshot_files
+    files.extend(graph_snapshot_files(root, clock))
     usage = os.statvfs(root)
     return {'files': files, 'bytes_reclaimable': sum(f['bytes'] for f in files),
             'recorded_at': clock.isoformat(), 'policy': POLICY,

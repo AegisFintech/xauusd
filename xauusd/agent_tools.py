@@ -77,7 +77,19 @@ if root.is_symlink(): raise RuntimeError('unsafe_root')
 # Only directories created and marked by this worker are cleanup candidates.
 old=sorted([d for d in root.iterdir() if d.is_dir() and not d.is_symlink() and (d/'.complete').is_file()],key=lambda d:d.stat().st_mtime,reverse=True)
 for i,d in enumerate(old):
- if i>=10 or time.time()-d.stat().st_mtime>604800: shutil.rmtree(d)
+ if i>=10 or time.time()-d.stat().st_mtime>604800:
+  if (d/'work').is_dir() and not (d/'work').is_symlink(): shutil.rmtree(d/'work')
+  if (d/'.output').is_file() and not (d/'.output').is_symlink(): (d/'.output').unlink()
+  status=d/'status.json'
+  if status.is_file() and not status.is_symlink():
+   old_status=json.loads(status.read_text())
+   if 'output' in old_status:
+    old_status['output_sha256']=hashlib.sha256(old_status.pop('output').encode()).hexdigest()
+    old_status['output_expired']=True
+    # This metadata survives payload retention so status never implies not-found.
+    temp=d/('.tmp-'+uuid.uuid4().hex)
+    with temp.open('xb') as f: f.write(json.dumps(old_status).encode()); f.flush(); os.fsync(f.fileno())
+    os.replace(temp,status); fd=os.open(str(d),os.O_RDONLY); os.fsync(fd); os.close(fd)
 job_id=p['job_id']
 if not re.fullmatch('[a-f0-9]{32}',job_id): raise RuntimeError('invalid_job_id')
 job=root/job_id
@@ -99,9 +111,12 @@ sandbox=['bwrap','--die-with-parent','--unshare-all','--share-net','--ro-bind','
 if pathlib.Path('/lib64').exists(): sandbox+=['--ro-bind','/lib64','/lib64']
 for system_file in ['/etc/resolv.conf','/etc/hosts','/etc/ld.so.cache','/etc/ssl/certs']:
  if pathlib.Path(system_file).exists(): sandbox+=['--ro-bind',system_file,system_file]
+# Measure inside the PID namespace: Bubblewrap's outer supervisor does not
+# propagate the workload's CPU rusage to its parent on this worker.
+usage_runner = "import json,subprocess,resource,sys; r=subprocess.run(['/bin/bash','-c',sys.argv[1]]); u=resource.getrusage(resource.RUSAGE_CHILDREN); print('\\nXAUUSD_JOB_USAGE='+json.dumps({'cpu_seconds':u.ru_utime+u.ru_stime}),flush=True); sys.exit(r.returncode)"
 out=job/'.output'
 with out.open('wb') as f:
- child=subprocess.Popen([*sandbox,'--','/bin/bash','-c',p['command']],cwd=w,env=env,stdout=f,stderr=subprocess.STDOUT,start_new_session=True)
+ child=subprocess.Popen([*sandbox,'--','python3','-c',usage_runner,p['command']],cwd=w,env=env,stdout=f,stderr=subprocess.STDOUT,start_new_session=True)
  start=time.monotonic(); reason=None
  while child.poll() is None:
   if time.monotonic()-start>p['timeout']: reason='timeout'
@@ -113,7 +128,15 @@ with out.open('wb') as f:
  # Kill descendants that outlive a successful shell too.
  try: os.killpg(child.pid,signal.SIGKILL)
  except ProcessLookupError: pass
-result={'returncode':child.returncode,'error_code':reason,'output':out.open('rb').read(12000).decode('utf-8','replace'),'files':{},'workspace':str(w),'job_id':job_id}
+output=out.open('rb').read(262144).decode('utf-8','replace')
+cpu_seconds=None
+text,marker,usage=output.rpartition('\nXAUUSD_JOB_USAGE=')
+if marker:
+ try:
+  measured=json.loads(usage)['cpu_seconds']
+  if type(measured) in (int,float) and 0<=measured<1000000: cpu_seconds=measured; output=text
+ except (ValueError,KeyError,TypeError): pass
+result={'cpu_seconds':cpu_seconds,'wall_seconds':time.monotonic()-start,'returncode':child.returncode,'error_code':reason,'output':output[:12000],'files':{},'workspace':str(w),'job_id':job_id}
 retrieved_bytes=0
 for name in p.get('retrieve',[]):
  src=w/name

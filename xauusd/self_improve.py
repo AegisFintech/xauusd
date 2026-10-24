@@ -21,8 +21,6 @@ Consistent with the repo operating rules:
 from __future__ import annotations
 
 import base64
-import json
-import os
 import subprocess
 import sys
 import tempfile
@@ -239,7 +237,3 @@ def apply_proposal(ledger: ImprovementLedger, proposal_id: str,
 def _repo_root() -> Path:
     marker = Path(__file__).resolve().parent.parent
     return marker
-
-
-def independent_check(anything_failed: bool = False) -> str:
-    return "ok" if not anything_failed else "failed"

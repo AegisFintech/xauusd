@@ -25,8 +25,9 @@ but no browser surface starts, stops or places trades.
    not change the legacy Bits arbitrary-shell permission model.
 3. Codex can write research tools and behavioral tests. Sandbox pytest must pass,
    with network disabled, before immutable hash-addressed tools are reused. Such
-   tests demonstrate software behavior, not profitability. Application code and
-   risk controls are not automatically patched.
+   tests demonstrate software behavior, not profitability. Application changes may use the tested release path described in
+   operator-runbook-agent.md; protected controls and their dependency closure
+   cannot be automatically patched.
 4. Candidates are bounded causal Python expressions, interpreted without eval or
    imports. Available OHLCV Series and rolling/lag/where arithmetic are documented
    in each workspace. EMA is a finite exponentially weighted rolling window;

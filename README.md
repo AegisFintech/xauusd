@@ -82,7 +82,7 @@ is considered.
 
 Credentials belong in `.env` with mode `0600`; never commit them. Current historical-data settings and the demo-only assertion are documented in `.env.example`.
 
-`.env.sample` links to `.env.example`. Set `AGENT_PLANNER=datadog` and the `DD_*` settings to use the Bits workflow. See
+`.env.sample` links to `.env.example`. For the current harness select `AGENT_PLANNER=codex`; the sample also documents optional legacy settings. Set `AGENT_PLANNER=datadog` and the `DD_*` settings to use the Bits workflow. See
 [Datadog connection status](docs/datadog-connection.md) for the verified invocation
 path, protocol, recovery, and deployment checks. The ready-to-paste
 [Bits system prompt](docs/bits-system-prompt.md) defines the server-executed JSON contract.
@@ -131,93 +131,27 @@ Every `data update/download` run records `reports/data_update_status.json` (`sta
 
 The feed also keeps a bounded transition log at `reports/data_feed_events.json` — the last 200 state changes plus a `dropped` count. The status file holds only the latest state and these services write no journald logs, so a feed that crashed and was restarted by systemd previously left no trace at all: the 2026-10-12 outage was datable only by correlating a hole in the store against `ExecMainStartTimestamp`. Only transitions are recorded, not bars, and a failing event log is logged and ignored — losing the log must never cost the data it describes.
 
-## Autonomous Agent
+## Active Codex agent
 
-`agent` runs one continuously trading AI plan-tool loop whose thinking is visible in a live web view. It is paper-first and reads `DD_*` and `AGENT_*` settings. The workflow returns one correlated `xauusd/1` envelope per invocation.
-
-```bash
-.venv/bin/python -m xauusd.cli agent status   # paper + recent transcript runs, no network
-.venv/bin/python -m xauusd.cli agent once     # a single tick, then exit
-.venv/bin/python -m xauusd.cli agent run      # continuous loop (view is a separate service)
-.venv/bin/python -m xauusd.cli agent view     # live view only
-```
-
-The paper lifecycle and local state store have their own explicit commands:
+The deployed planner is `AGENT_PLANNER=codex`. It uses a persistent Codex thread,
+structured server tools, isolated tc02 research, an independent paper monitor,
+and tested application releases. See [the active agent runbook](docs/operator-runbook-agent.md)
+and [qualification and paper operation](docs/operator-runbook-codex.md).
 
 ```bash
-.venv/bin/python -m xauusd.cli paper status   # kill-switch state, position, equity, recent fills
-.venv/bin/python -m xauusd.cli paper stop     # persistent kill switch (reason defaults to operator)
-.venv/bin/python -m xauusd.cli paper start    # explicit override (requires a reason)
-.venv/bin/python -m xauusd.cli state integrity  # quick_check on paper + transcript DB
-.venv/bin/python -m xauusd.cli state backup --root backups/local-state   # gzip + sha256 snapshot
-.venv/bin/python -m xauusd.cli state restore --backup <dir|state.db.gz>  # verified restore
+.venv/bin/python -m xauusd.cli agent status
+.venv/bin/python -m xauusd.cli paper status
+.venv/bin/python -m xauusd.cli state integrity
 ```
 
-`paper stop` persists a kill switch across restarts, whatever `--reason` it is given, and neither the agent nor `demo-automation` auto-resumes it; `paper start` is the explicit override. `state backup` snapshots the live SQLite file (verifies it with `quick_check`, gzips it, records a sha256 in a manifest), and `state restore` refuses any archive whose checksum or database integrity does not verify. A daily `xauusd-state-backup.timer` (midnight + randomized delay) keeps one verified snapshot per day under `backups/local-state`.
+Do not run another `agent run` or `agent once` beside the service. `/` and `/lab`
+serve the current read-only dashboard; `/legacy` serves the older transcript view.
+The feed, view, agent and halted deterministic engine are separate processes.
+A closed market does not stop research. No strategy currently has an established
+profitable edge, and visible activity does not establish one.
 
-The Bits loop persists its workflow instance, cycle IDs, shell jobs, and results
-in the selected state database. It polls an outstanding workflow after restart
-instead of submitting it again. Shell commands can invoke the deterministic tools:
-
-```bash
-.venv/bin/python -m xauusd.cli agent-tool read_market
-.venv/bin/python -m xauusd.cli agent-tool paper_state
-# propose_trade accepts side, quantity, and reason in --input JSON.
-```
-
-The `propose_trade` tool preserves the existing risk gates. The agent transcript
-records sanitized decisions and command results. An independent monitor marks
-fresh paper prices every five seconds and persists a `risk_limit` stop if daily
-loss or drawdown is breached; it does not liquidate positions or place orders.
-Uncertain, timed-out or interrupted commands require operator reconciliation:
-
-```bash
-.venv/bin/python -m xauusd.cli paper stop
-# Reconcile external side effects first and ensure the agent service has exited.
-.venv/bin/python -m xauusd.cli bits-recover --reason 'effects checked and reconciled'
-.venv/bin/python -m xauusd.cli paper start --reason operator_reconciled
-systemctl restart xauusd-agent.service
-```
-
-`agent once` advances one state-machine step and exits; use the service for complete
-cycles. Do not run it concurrently with the service. Shell timeouts are 1–3600s,
-output limits 1–1048576 bytes, and truncation is explicit. Keep large results in
-files and request smaller selections. Completed cycles wait at least 60 seconds;
-open positions cap requested review delays at 60 seconds, otherwise at one hour.
-
-
-Paper account and transcript state live in a **local SQLite file** (`STATE_DB_PATH`, default `state/xauusd_local.db`) by default, so the running agent needs no external database or `DATABASE_URL`. Set `XAUUSD_STATE_BACKEND=cockroach` to return to the Cockroach-backed stores. The view serves the same transcript and paper endpoints from this store.
-
-The view listens on `AGENT_VIEW_PORT` (default `8100`). It shows the transcript newest-first with the AI's plain-English reasons, a paper-account strip (equity, position, day/realized P&L, drawdown, recent fills from `/api/paper`), and a recent-runs line with per-run tick counts and duration. Times render in GMT+8, labelled `+08:00`; that is display-only — persisted timestamps and bar indices stay UTC, and the market-hours gate compares instants against the New York session. Each `agent_<uuid12>` is one process start: a graceful SIGTERM marks the old run stopped, so a restart cadence legitimately produces many short "runs" — this is one process, not many agents.
-
-`agent run` and `agent once` are inert unless `CTRADER_AUTOMATION_ENABLED=true`. On every launch the agent verifies database integrity and then consults the paper kill switch. It continues a running account and starts a fresh one, but any persisted stop stays stopped (fail closed) until `paper start`. That covers `paper stop` with any reason, corrupt state, missing credentials, an unknown account type, a failed recovery, a risk limit, and a broker failure. Each tick also writes a heartbeat to `AGENT_STATUS_FILE` (default `reports/agent_status.json`); the live view's `/api/health` turns that heartbeat, stall/error counts, consecutive ticks that never reached the planner, paper-stop state, and data-update failures into a healthy/degraded status with `alerts`.
-
-Each tick records market `fresh`/`age_seconds`/`market_open` on `tick_start`, so a stale or closed-market feed is always visible in the transcript as "no trade". `age_seconds` counts from when the newest M1 bar **closed**, not from its open timestamp: persisted bars are stamped at bar open, so an open-based age is intrinsically 60-120s and any gate tighter than that can never pass — the loop would report `stale_data` forever while the feed looked healthy. `AGENT_MAX_MARKET_DATA_AGE_SECONDS`, `PAPER_MAX_MARKET_DATA_AGE_SECONDS`, and `CTRADER_AUTOMATION_MAX_MARKET_DATA_AGE_SECONDS` share that close-based semantic (default 180s, three bars); keep them consistent or proposals are refused as `STALE_MARKET_DATA`. **When XAUUSD is not trading (weekends, and the daily 17:00-18:00 New York break), the deterministic paper gate refuses every proposal with `MARKET_CLOSED` — the agent never trades a closed market.** The session follows New York time, so in UTC the break is 21:00-22:00 during US daylight time and 22:00-23:00 in winter (first Sunday of November to second Sunday of March), and the weekly close and open move by the same hour. Exchange holidays are not modelled; the freshness gates refuse trading when no new bars arrive. Optionally set `AGENT_DATA_REFRESH_ENABLED=true` to let a stale tick refresh the local M1 parquet in-loop before the planner reasons (bounded by `AGENT_DATA_REFRESH_*`; still gated by the paper freshness and market-hours checks).
-
-To run the agent as a persistent background service (paper-only, live view on `http://127.0.0.1:8100/`):
-
-```bash
-sudo cp deploy/systemd/xauusd-agent.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now xauusd-agent.service
-```
-
-The view runs in its own `xauusd-agent-view.service`. Use `/api/paper`, `/api/runs`,
-the transcript, and `/api/health` to confirm activity.
-
-The agent reads `.env` through `EnvironmentFile`. Configure `AGENT_PLANNER=datadog`,
-`DD_REGION`, `DD_API_KEY`, `DD_APP_KEY`, `DD_AGENT_ID`, `DD_BITS_WORKFLOW_ID`,
-`CTRADER_AUTOMATION_ENABLED=true`, and the selected paper/state settings.
-`CTRADER_PAPER_ONLY=true` keeps broker orders disabled. Data refresh uses the
-cTrader demo OAuth credentials and downloads an initial seven days if no local
-file exists. Restart the service after configuration changes. Graceful termination
-cancels shell process groups and leaves pending workflow IDs available for restart.
-
-The former OpenAI endpoint and credentials have been removed from the deployment
-and template. Legacy `AGENT_PLANNER=openai` code remains for compatibility tests;
-using it requires independently configuring its `OPENAI_*` settings.
-
-The service writes no console or journald logs; the transcript, state store, and the live view (including `/api/health` at `http://127.0.0.1:8100/api/health`) are the only observability.
+Datadog settings and recovery procedures belong to the [optional legacy planner](docs/legacy-datadog-planner.md).
+Account start/reset/recovery and risk changes remain operator-only.
 
 ## Live history and session reset
 
@@ -258,164 +192,13 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now xauusd-demo-automation.service
 ```
 
-## Delivery Stages
+## Historical implementations
 
-1. Autonomous planning harness with persistent runs, tool controls, and audit records.
-2. Firecrawl source ingestion with provenance and prompt-injection isolation.
-3. Deterministic paper trading, risk gates, notifications, and restart recovery.
-4. cTrader demo-only adapter, persistent idempotency, and sandbox integration tests.
-5. Limited demo canary followed by continuous demo operation only after all gates pass.
-
-See `AGENTS.md` for repository operating rules and `docs/ARCHITECTURE.md` for the existing research platform.
-
-
-### Research continuity and output retrieval
-
-Bits receives repository rules once per revision (delivery is acknowledged by a
-successful correlated response), persistent research guidance, and descriptive
-15/60/240-bar close summaries with actual window timestamps. These observations
-are not trade signals or evidence of profitability. The agent should run concrete
-cost-aware experiments and save source-linked notes before waiting on measurable
-conditions. Arbitrary shell access and deterministic trading gates are unchanged.
-
-Weekly research aggregates M1 bars with `xauusd.session_calendar.weekly_bars`,
-which uses New York session weeks (Sunday 18:00 to Friday 17:00, so UTC
-boundaries move with daylight time) and marks each week `complete`,
-`in_progress`, `incomplete_data` or `partial_start`. It refuses bars after the
-information cutoff. A pandas weekly label does not prove a week completed, and
-holidays are not modelled, so early closes appear as incomplete weeks.
-
-Stored-output pages are unwrapped before prompt compression, retaining the original
-job ID and correct next offset. Follow that cursor instead of paging retrieval jobs.
-The health dashboard flags three completed cycles without changed research notes.
-This is a transparent progress proxy: no trade or unchanged notes alone does not
-prove analytical failure. Updating only a note timestamp does not clear the count.
-
-Use `bits-memory show --notes-only` to retrieve research notes without duplicating conversation history.
-
-### Research notes (`bits-memory`, schema `xauusd.notes/1`)
-
-There is no standalone `bits-memory` executable; always run it through the CLI:
-
-```bash
-.venv/bin/python -m xauusd.cli bits-memory schema             # published schema, limits, source rules
-.venv/bin/python -m xauusd.cli bits-memory validate --input-file - <<'JSON'   # check only; no state is read or written
-{"notes": {"findings": [], "hypotheses": [], "rejected_approaches": [], "open_questions": [], "next_steps": []}}
-JSON
-.venv/bin/python -m xauusd.cli bits-memory write --input-file notes.json      # or --input JSON
-.venv/bin/python -m xauusd.cli bits-memory show --notes-only   # readback, with version and digest
-.venv/bin/python -m xauusd.cli bits-memory pending [--draft ID] # rejected writes kept as drafts
-.venv/bin/python -m xauusd.cli bits-memory write --resolves ID --base-version 3 --input-file notes.json
-.venv/bin/python -m xauusd.cli bits-memory supersede --draft ID --reason 'replaced by a later reproduction'
-```
-
-Accepted inputs are the canonical object with exactly the five categories, the
-versioned wrapper `{"schema":"xauusd.notes/1","notes":{...}}`, and the observed
-`{"notes":{...}}` wrapper as a compatibility form. Mixed shapes, extra fields and
-unknown schema versions are rejected. Each category holds at most 12
-`{"text","sources"}` entries, and the canonical JSON is at most 4,000 characters;
-nothing is truncated. A successful write returns `version` and a `sha256` digest
-(identical content keeps its version). A rejection exits 2 and prints
-`status: rejected` with a stable `code`, JSON `path`, `expected` shape, sizes and
-`retryable`/`retry` guidance, never the payload or exception text; operational
-failures exit 1 with a classified code. The stored notes stay unchanged.
-
-A rejected write that supplied a payload becomes a pending draft (`xauusd.drafts/1`)
-with a durable ID (`draft_` plus 12 hex characters), the base notes version and
-digest, the latest error, the payload when it is safe and at most 12,000
-characters, and its evidence references (anything under `sources`, up to 40).
-Retrying the identical payload or naming the draft updates it; a replaced payload
-keeps earlier unresolved references. Only `write --resolves ID` (in the same
-transaction as the notes) or `supersede --draft ID --reason TEXT` closes a draft;
-unrelated or unchanged writes never clear one, and the result lists drafts that
-remain open. `--base-version` makes a write fail with `stale_base` when the notes
-changed in between; resolving a draft whose base is older than the stored notes
-requires it, so a resolution cannot overwrite notes saved meanwhile. At most five
-drafts stay open: opening a sixth closes the oldest as `evicted_overflow`,
-keeping its ID, last error and references but not its payload. The newest 20
-closed records are kept. Sensitive payloads, references and reasons are never
-retained. Drafts rejected twice, skipped by a later write, based on older notes,
-unresolved for 30 minutes or migrated from the previous single pending record
-give Bits a `repair_task` and raise a `memory drafts need repair` health alert;
-none of this stops trading. Writes lock a sentinel row with `FOR UPDATE` on the
-Postgres/Cockroach path and use `BEGIN IMMEDIATE` on SQLite; the Postgres path is
-contract-tested offline, and `XAUUSD_TEST_DATABASE_URL` enables an opt-in test
-against a disposable database. Tick errors record a classified `error_code`, a
-safe summary and the cycle phase rather than only an exception class name.
-
-### Bits shell environment (`bits-capabilities`)
-
-Shell jobs run `/bin/bash -c` without a login profile, so interactive `PATH`
-additions (pipx, cargo, rc files) do not apply. The harness builds one explicit
-job environment: the service virtualenv's `bin` first (so `python` is the service
-interpreter), then absolute directories declared in `BITS_SHELL_EXTRA_PATH`, then
-the inherited service `PATH`. The capability manifest is computed from the same
-function:
-
-```bash
-.venv/bin/python -m xauusd.cli bits-capabilities            # what a job started by this process would see
-.venv/bin/python -m xauusd.cli bits-capabilities --stored   # the manifest recorded by the running agent
-```
-
-The manifest (`xauusd.capabilities/1`) lists the working directory, the absolute
-interpreter and CLI prefix, the resulting `PATH`, availability, path and version
-of `graphify`, `rg`, `git` and `grep` with documented fallbacks, supported CLI
-operations as complete commands, and the M1 data entry point. It also publishes the
-two measured bounds that keep a shell job inside the 1200-second ceiling:
-`data.window_lookup` (resolve a batch of bar timestamps in one pass) and
-`data.repository_search` (scope every recursive search to the directory that can
-hold the target; never walk `data/`, `graphify-out/cache`, `backups/`, `build/`,
-`.venv/` or `.git/` from the repository root). It includes no
-environment variable values other than `PATH`. The agent refreshes it at start-up,
-every 15 minutes, and when a job reports `command not found`. Observed missing
-executables persist across cycles and restarts, appear in `context.capabilities`,
-and raise a health alert until they resolve. An optional tool that is simply
-absent is reported with its fallback, not alerted.
-
-Every manifest states its discovery `status`: `ok`, `partial` (named sections
-such as `cli_commands` or `data` failed, each with a safe `error_code`) or
-`failed` (the whole probe raised; the agent stores a fallback manifest and keeps
-researching and monitoring). Tools are `available`, `missing` or `unknown`;
-unprobed tools are never implied healthy, and `version_state` distinguishes
-`probed`, `probe_failed` and `not_probed`. Invalid `BITS_SHELL_EXTRA_PATH`
-entries are reported as `configuration_errors`, separately from missing tools.
-The same status, error codes and unknown tools appear in `context.capabilities`,
-the heartbeat and `/api/health` alerts. The agent re-probes at least every 15
-minutes while it runs. Output includes a `check` verdict: `--check` exits 1
-unless the status is `ok`, no required executable is missing and no declared
-configuration is invalid; with `--stored` the recorded manifest must also be at
-most 45 minutes old (probe time and age are shown). A discovery exception exits 1.
-None of these conditions stops trading.
-
-Deployment validation is an operator step and restarts nothing. Run the check
-under the unit's working directory and environment file, because an interactive
-shell is not the service environment:
-
-```bash
-sudo systemd-run --pipe --wait --quiet -p WorkingDirectory=/root/xauusd \
-  -p EnvironmentFile=/root/xauusd/.env \
-  /root/xauusd/.venv/bin/python -m xauusd.cli bits-capabilities --check
-```
-
-`--check` exits 1 when a required executable (`/bin/bash` or the interpreter) is
-missing. Declare extra tool directories with `BITS_SHELL_EXTRA_PATH` in `.env`;
-the systemd unit files are unchanged.
-
-Bits shell jobs use a server-enforced 1200-second (20-minute) execution timeout.
-The tool-call audit and stored job request record the effective timeout. This is
-separate from the Datadog workflow HTTP timeout. Existing recovery-stop behaviour
-is unchanged; changing this limit does not clear a persistent stop.
-
-### Operator pause for overhaul — 2026-09-24
-
-The operator paused this deployment for work with another harness. Paper is
-persistently stopped (`operator`); the agent, live view, data-update timer and
-state-backup timer are stopped and disabled. No XAUUSD cron entries were found.
-Credentials, datasets, existing backups and the unresolved timed-out job are
-preserved. Resumption requires explicit operator action and reconciliation of
-that job; changing the shell timeout does not replay it.
-
-The [2026-09-24 handoff audit](docs/local-handoff-audit-2026-09-24.md) records local validation and the subsequent broker fixes (#14–#16). Full-fill confirmation and position reconciliation are tested offline. Uncertain orders without terminal history remain blocked; no automatic replay is allowed. The operator authorized resuming the existing Datadog paper deployment on 2026-09-24; cTrader order execution remains disabled by paper-only mode.
+Earlier delivery stages and deployment findings are preserved in
+[project history](docs/legacy-project-history.md). Optional tournament/ML tools,
+Datadog planning and older dashboard entry points remain available; they are not
+started by the Codex deployment. Their import, CLI and service references must be
+audited before removal.
 
 ## Local Python environment
 
@@ -492,3 +275,26 @@ Research opens with the read-only live agent activity chat. Messages run oldest 
 ## Dashboard statistics — 2026-10-23
 
 The read-only Statistics tab refreshes with the dashboard and consolidates retained research verdicts, research sessions, qualification outcomes, experiments, improvement states, tool calls and tc02 request outcomes. Completed remote calls count as successful only with an explicit successful result. It also shows cumulative persistent-thread Codex usage and cached share, latest-call usage, compactions, current paper/UTC daily metrics, data freshness, storage, release status and risk limits. Retained counts are not lifetime totals; remote CPU-hours, utilization and lifetime backtest totals remain unavailable. No execution or risk controls change.
+
+## Harness maintenance — 2026-10-24
+
+Research outcomes optionally carry family, dataset/code identity, parameters,
+costs, finite metrics, failure reason and parent finding. `research_lookup`
+retrieves retained summaries; equivalent experiment identities deduplicate.
+These are advisor claims backed by tool output, not strategy qualification.
+
+Statistics now include atomic cumulative counters since installation and 90 UTC
+daily aggregates. They survive detailed-log pruning; earlier lifetime counts are
+unknown. tc02 reports measured child CPU seconds and wall seconds for new jobs,
+not whole-server utilization. Unknown outcomes retain IDs, ages and inspection
+blockers. Inspection and reconciliation remain available at the action limit.
+Remote output retention keeps compact job status/idempotency metadata.
+
+The feed persists a 60-second process heartbeat even when the market is closed,
+without clearing failures or refreshing the last market bar. Dashboard coverage
+uses Parquet metadata; charts stream bounded batches and cache compact aggregates.
+Regenerable Graphify caches and dated snapshots are ignored by Git; retention
+keeps the latest three snapshots and any from the last seven days, and preserves
+pins, unknown files, active research and recovery archives.
+
+See the [cleanup checklist and findings](docs/cleanup-plan-2026-10-24.md).

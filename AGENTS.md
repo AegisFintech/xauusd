@@ -245,3 +245,24 @@ Research opens with the read-only live agent activity chat. Messages run oldest 
 ## Dashboard statistics — 2026-10-23
 
 The read-only Statistics tab refreshes with the dashboard and consolidates retained research verdicts, research sessions, qualification outcomes, experiments, improvement states, tool calls and tc02 request outcomes. Completed remote calls count as successful only with an explicit successful result. It also shows cumulative persistent-thread Codex usage and cached share, latest-call usage, compactions, current paper/UTC daily metrics, data freshness, storage, release status and risk limits. Retained counts are not lifetime totals; remote CPU-hours, utilization and lifetime backtest totals remain unavailable. No execution or risk controls change.
+
+## Harness maintenance — 2026-10-24
+
+- At the unresolved-action ceiling, keep `action_reconcile`, `tc02_job_status`,
+  `evidence_read` and `research_lookup` available. Unknown side effects never replay.
+  A remote `not_found` is missing evidence, not proof that work never executed.
+- Research metadata uses optional `experiment` with family, dataset_version,
+  code_sha256, parameters, costs, metrics (finite numbers or None), failure_reason,
+  parent_id. Equivalent identities deduplicate; metadata remains unvalidated claims.
+- `lab_statistics` records transitions in the owning row transaction. Counters
+  begin at installation, keep 90 daily summaries and cumulative totals, and do not
+  invent earlier counts or CPU measurements. `lab_market` owns bounded read-only
+  dashboard projections, not trading inputs or protected dataset partitioning.
+- Feed process heartbeat runs every 60 seconds and preserves state/error/last-bar
+  timestamps. Market freshness gates remain unchanged.
+- tc02 keeps compact status and idempotency metadata when bulky output expires.
+  Generated Graphify snapshots retain three newest and seven days; unknown files,
+  pins, symlinks, active work and recovery artifacts are never cleanup candidates.
+- Current setup is in README and active runbooks. Optional Datadog operation and
+  earlier project stages are archived under docs/legacy-*.md; preserve historical
+  findings without treating them as current configuration.

@@ -15,7 +15,6 @@ from uuid import uuid4
 
 from .autonomous_harness import (
     OpenAICompatiblePlanner,
-    ToolExecutionError,
     ToolRegistry,
     ToolSpec,
     _now,

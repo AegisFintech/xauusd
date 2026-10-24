@@ -6,9 +6,7 @@ from pathlib import Path
 import hashlib
 import json
 import os
-import shutil
 import subprocess
-import tarfile
 import time
 import base64
 import threading
@@ -188,12 +186,6 @@ class RemoteComputeBridge:
         if check and not capture: return self._retry(command)
         return subprocess.run(command,check=check,text=True,capture_output=capture,timeout=7200)
 
-    def _scp(self,source: str,target: str,recursive=False):
-        command=["scp","-i",self.key,"-P",self.port,"-q","-o","ControlMaster=auto",
-                 "-o","ControlPersist=300","-o",f"ControlPath={self.control_path}"]
-        if recursive: command.append("-r")
-        command.extend([source,target]); self._retry(command)
-
     def _upload_job(self,source: Path,remote: str) -> None:
         command=["ssh",*self._ssh_options(),f"{self.user}@{self.host}",f"cat > {remote}"]
         last=None
@@ -204,19 +196,6 @@ class RemoteComputeBridge:
             except subprocess.CalledProcessError as error:
                 last=error; time.sleep(2**attempt)
         raise last
-
-    def _download_result(self,remote: str,local: Path) -> None:
-        archive=local.parent/f".{local.name}.tar.gz"
-        command=["ssh",*self._ssh_options(),f"{self.user}@{self.host}",f"tar -C {remote} -czf - ."]
-        with archive.open("wb") as output:
-            subprocess.run(command,stdout=output,check=True,timeout=300)
-        local.mkdir(parents=True,exist_ok=True)
-        with tarfile.open(archive,"r:gz") as bundle:
-            for member in bundle.getmembers():
-                if member.islnk() or member.issym() or ".." in Path(member.name).parts:
-                    raise ValueError("unsafe remote result archive")
-            bundle.extractall(local,filter="data")
-        archive.unlink()
 
     def status(self,**extra) -> dict:
         path=self.root/"status.json"; previous={}

@@ -3,26 +3,21 @@ from datetime import datetime, timezone
 from dataclasses import asdict
 from pathlib import Path
 import shutil
-import threading
-import time
 
 import pandas as pd
 
 from .lab_store import LabStore
 
-_cache = {}
-_lock = threading.Lock()
+def _data(timeframe="M1", limit=1000):
+    from .lab_market import chart_bars
+    return chart_bars(timeframe, limit)
 
 
-def _data():
-    from .data import HistoricalDataStore
-    store = HistoricalDataStore()
-    stat = store.path.stat()
-    key = (str(store.path.resolve()), stat.st_mtime_ns, stat.st_size)
-    with _lock:
-        if _cache.get("key") != key:
-            _cache.update(key=key, bars=store.read())
-        return _cache["bars"]
+def _age(value):
+    try:
+        return max(0, (datetime.now(timezone.utc)-datetime.fromisoformat(value)).total_seconds())
+    except (TypeError, ValueError):
+        return None
 
 
 def retained_statistics(store) -> dict:
@@ -32,9 +27,11 @@ def retained_statistics(store) -> dict:
         return store.meta(key) or []
     def states(items, field='state'):
         return dict(Counter(row.get(field, 'unknown') for row in items))
+    from .lab_statistics import snapshot as counter_snapshot
     calls = rows('agent_calls')
     remote = [row for row in calls if row.get('name') == 'tc02_run']
     return {
+        'durable': counter_snapshot(store),
         'scope': 'retained_records',
         'recorded_at': datetime.now(timezone.utc).isoformat(),
         'research': {'total': len(rows('research_outcomes')),
@@ -48,6 +45,11 @@ def retained_statistics(store) -> dict:
                  'successful_results': sum(row.get('state') == 'completed' and
                      isinstance(row.get('result'), dict) and row['result'].get('ok') is True for row in remote),
                  'inspections': sum(row.get('name') == 'tc02_inspect' for row in calls),
+                 'unresolved': [{'call_id':r.get('id'),'job_id':r.get('remote_job_id'),
+                    'started_at':r.get('started_at'),'last_checked_at':r.get('last_checked_at'),
+                    'last_remote_state':r.get('last_remote_state'),
+                    'blocker':r.get('blocker') or (r.get('result') or {}).get('error_code'),
+                    'age_seconds':_age(r.get('started_at'))} for r in remote if r.get('state')=='unknown'],
                  'cpu_hours': None, 'utilization_pct': None, 'lifetime_backtests': None},
     }
 
@@ -89,13 +91,13 @@ def snapshot(transcript, paper) -> dict:
     current_jobs = [job for job in jobs if current_job(job)]
     archived_jobs = [job for job in jobs if not current_job(job)]
     try:
-        bars = _data()
+        from .lab_market import coverage
+        coverage_info = coverage()
         now = datetime.now(timezone.utc)
         from .paper_trading import market_data_age_seconds, market_is_open, observation_is_future
-        bar = bars.index[-1].to_pydatetime()
+        bar = datetime.fromisoformat(coverage_info["end"])
         age = market_data_age_seconds(bar, now)
-        data = {"rows": len(bars), "start": bars.index[0].isoformat(), "end": bars.index[-1].isoformat(),
-                "columns": list(bars.columns), "volume_type": "tick count", "market_open": market_is_open(now),
+        data = {**coverage_info, "volume_type": "tick count", "market_open": market_is_open(now),
                 "age_seconds": age, "fresh": not observation_is_future(bar, now) and age <= paper.config.max_market_data_age_seconds,
                 "quality": "Closed M1 OHLCV plus bounded live bid/ask observations; historical tick paths unavailable",
                 "needs": ["longer bid/ask observation history", "broker-measured slippage and commissions", "point-in-time economic releases"]}
@@ -122,6 +124,9 @@ def snapshot(transcript, paper) -> dict:
         except (ValueError, TypeError):
             status = dict(status, stale=True)
     alerts = []
+    unresolved = [r for r in (store.meta('agent_calls') or []) if r.get('state') == 'unknown'] if hasattr(transcript, 'connect') else []
+    if unresolved:
+        alerts.append(str(len(unresolved)) + ' unresolved research actions need status investigation; they will not be replayed.')
     if storage["errors"] or storage["state"] == "partial":
         alerts.append("Artifact retention needs attention; some generated files were retained.")
     if usage.free < max(2_000_000_000, usage.total * .05):
@@ -162,11 +167,11 @@ def chart(timeframe="M1", limit=300):
     if timeframe not in rules or type(limit) is not int or not 10 <= limit <= 1000:
         raise ValueError("invalid_chart_request")
     try:
-        bars = _data()
+        bars = _data(timeframe, limit)
         now = pd.Timestamp.now(tz="UTC")
         closed = bars.loc[:now - pd.Timedelta(minutes=1)]
         interval = pd.Timedelta(rules[timeframe])
-        view = closed.resample(rules[timeframe]).agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}).dropna()
+        view = closed
         view = view.loc[view.index + interval <= now].tail(limit)
         return {"timeframe": timeframe, "bars": [{"time": t.isoformat(), **row} for t, row in view.to_dict("index").items()],
                 "count": len(view), "source": "cTrader demo closed bars"}

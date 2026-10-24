@@ -351,19 +351,3 @@ class BitsClient:
             kind = state.lower() if isinstance(state, str) and re.fullmatch(r"[A-Z_]{1,32}", state) else "unknown"
             raise BitsError("workflow did not succeed", "workflow_" + kind)
         return validate_envelope(attrs.get("outputs", {}).get("output"), cycle_id, message_id), messages
-
-    def instance_messages(self, instance):
-        """Intermediate agent turns for an instance, as ``{role, content}`` records.
-
-        Returns an empty list when the workflow does not publish a message stream,
-        which is a supported configuration: the reasoning panel degrades to the
-        terminal summary rather than failing the cycle.
-        """
-        if not re.fullmatch(r"[A-Za-z0-9-]{1,128}", instance or ""):
-            return []
-        try:
-            data = self._request("/instances/" + instance)
-        except BitsError:
-            return []
-        attrs = data.get("data", {}).get("attributes")
-        return agent_messages(attrs) if isinstance(attrs, dict) else []

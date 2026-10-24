@@ -299,7 +299,7 @@ class LiveBarFeed:
                       bar_utc: str | None = None) -> None:
         from .atomic import atomic_write_json
         from pathlib import Path
-        now = datetime.now(timezone.utc)
+        now = self.now()
         previous = (self.status.get("state"), self.status.get("error_code"))
         self.status.update(state=state, recorded_at=now.isoformat(), error_code=error_code,
                            bars_written=self.bars_written,
@@ -317,6 +317,11 @@ class LiveBarFeed:
         if changed and (not routine or not self._event_recorded):
             self._record_event(now, state, error_code)
             self._event_recorded = True
+
+    def heartbeat(self) -> None:
+        """Refresh process liveness without clearing errors or refreshing a bar."""
+        self._write_status(self.status.get("state", "connecting"),
+                           error_code=self.status.get("error_code"))
 
     def _record_event(self, when: datetime, state: str, error_code: str | None) -> None:
         """Append a state transition to a bounded event log.
@@ -687,6 +692,13 @@ class LiveBarFeed:
                 return
             reactor.callLater(STOP_POLL_SECONDS, watch_stop)
 
+        def heartbeat() -> None:
+            if self._stop.is_set():
+                return
+            self.heartbeat()
+            reactor.callLater(60, heartbeat)
+
+        reactor.callLater(60, heartbeat)
         reactor.callLater(STOP_POLL_SECONDS, watch_stop)
         if bound_seconds is not None:
             # The supervised smoke test: bound the wall clock so `data-feed once`
@@ -757,8 +769,6 @@ class LiveBarFeed:
                    "volume": int(record["volume"])}
             if _bar_is_usable(row):
                 rows.append(row)
-        return rows
-
         return rows
 
 

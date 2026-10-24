@@ -162,7 +162,11 @@ def test_read_only_lab_api_reports_actual_data_and_events(tmp_path,monkeypatch):
     from xauusd import lab_api
     from tests.test_lab_strategy import bars
     store,paper=setup(tmp_path);store.event('research','Known activity',{'value':5})
-    monkeypatch.setattr(lab_api,'_data',lambda:bars(500))
+    from xauusd import lab_market
+    from xauusd.data import HistoricalDataStore, DataConfig
+    market_store=HistoricalDataStore(DataConfig(processed_dir=tmp_path/'market'))
+    market_store.write(bars(500))
+    monkeypatch.setattr(lab_market,'market_store',lambda:market_store)
     result=lab_api.snapshot(store.transcript,paper)
     assert result['data']['rows']==500 and result['limits']['paper_only'] is True
     assert result['activity'][0]['summary']=='Known activity'

@@ -162,3 +162,20 @@ def test_remote_job_identity_is_action_derived(tmp_path,monkeypatch):
 def test_remote_status_rejects_bad_identifier_without_transport(tmp_path):
     result=AgentTools(Store(),tmp_path).execute('tc02_job_status',{'job_id':'../oops'})
     assert result['error_code']=='invalid_remote_job_id'
+
+
+def test_remote_cpu_meter_runs_inside_the_sandboxed_workload():
+    import ast
+    import json
+    import subprocess
+    import sys
+    from xauusd.agent_tools import REMOTE
+    assignments = [n for n in ast.parse(REMOTE).body if isinstance(n, ast.Assign)]
+    runner = next(ast.literal_eval(n.value) for n in assignments
+                  if any(isinstance(t, ast.Name) and t.id == 'usage_runner' for t in n.targets))
+    value = subprocess.run([sys.executable, '-c', runner, "python3 -c 'print(sum(range(1000000)))'"],
+                           capture_output=True, text=True, timeout=10)
+    output, marker, usage = value.stdout.rpartition('\nXAUUSD_JOB_USAGE=')
+    assert value.returncode == 0 and marker
+    assert '499999500000' in output
+    assert json.loads(usage)['cpu_seconds'] > 0

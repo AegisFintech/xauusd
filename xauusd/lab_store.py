@@ -29,10 +29,16 @@ class LabStore:
         self.filter = SecretFilter()
         self.execution_lock = threading.RLock()
 
-    def update(self, key: str, transform: Callable, default=None):
+    def update(self, key: str, transform: Callable, default=None, observation=None):
         with self.state.transaction() as tx:
             tx.lock("lab:" + key)
-            value = transform(tx.get("lab:" + key, default))
+            before = tx.get("lab:" + key, default)
+            value = transform(before)
+            if observation is not None:
+                from .lab_statistics import transition
+                kind, row = observation
+                previous = next((r for r in before or [] if r['id'] == row['id']), None)
+                transition(tx, kind, previous, row)
             tx.put("lab:" + key, value)
             return value
 
@@ -67,7 +73,7 @@ class LabStore:
                 result.insert(0, row)
             # Never evict unfinished work.
             return [r for i, r in enumerate(result) if i < 30 or r["state"] == "running"]
-        self.update("jobs", save, [])
+        self.update("jobs", save, [], observation=("sessions", row))
 
     def jobs(self):
         return self.meta("jobs") or []
@@ -96,7 +102,7 @@ class LabStore:
             if not any(item["id"] == row["id"] for item in current):
                 result.insert(0, row)
             return [r for i, r in enumerate(result) if i < 100 or r.get("state") in ("active", "probation", "qualified")]
-        self.update("candidates", save, [])
+        self.update("candidates", save, [], observation=("qualification", row))
 
     def candidates(self):
         return self.meta("candidates") or []

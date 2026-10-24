@@ -584,3 +584,18 @@ def test_the_default_store_is_built_with_a_path_not_a_string(tmp_path, monkeypat
     feed.store.write(frame, merge=True)
     reread = feed.store.normalize(feed.store.read())
     assert len(reread) == 1 and reread["close"].iloc[0] == 1.5
+
+
+def test_idle_heartbeat_preserves_failure_and_bar_freshness(tmp_path):
+    from datetime import datetime, timezone, timedelta
+    clock = [datetime(2026, 10, 24, 1, tzinfo=timezone.utc)]
+    feed = LiveBarFeed(config(tmp_path), now_provider=lambda: clock[0])
+    feed._write_status('bar_write_failed', error_code='OSError', bar_utc='2026-10-23T20:59:00+00:00')
+    clock[0] += timedelta(minutes=2)
+    feed.heartbeat()
+    value = json.loads(Path(feed.config.status_path).read_text())
+    assert value['recorded_at'] == clock[0].isoformat()
+    assert value['state'] == 'bar_write_failed'
+    assert value['error_code'] == 'OSError'
+    assert value['last_bar_utc'] == '2026-10-23T20:59:00+00:00'
+    assert value['session'] == 'weekend_closed'

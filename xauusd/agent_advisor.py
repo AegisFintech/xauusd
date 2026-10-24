@@ -95,6 +95,10 @@ tools can live in tools/ with tests/; broader code goes in project/.
 Use experiment_start to test plausible distinct hypotheses prospectively without waiting
 for qualified deployment. Experimental accounts do not establish validated performance.
 Each completed experiment must end with research_record referencing its actual server call_id.
+Use research_lookup before repeating a hypothesis. Supply experiment metadata: family,
+dataset_version, actual code_sha256, parameters, costs, numeric metrics (undefined=null),
+failure_reason, parent_id (prior finding or null). Describe what changed from the parent.
+These are advisor-reported measurements, not independent validation or permission to trade.
 Use experiment_review each cycle; retire weak or sparse accounts with a reason and replace
 freed slots with distinct hypotheses. Retiring exposure waits for normal gates; never force it.
 Use improvement_record for defects with concrete acceptance criteria; deploy tested fixes.
@@ -210,7 +214,7 @@ class AgentAdvisor:
             # Unknown outcomes remain durable until explicitly investigated.
             bounded=[r for r in rows if r['state'] not in ('running','unknown')][-100:]
             return bounded+[r for r in rows if r['state'] in ('running','unknown')]
-        self.store.update('agent_calls',update,[])
+        self.store.update('agent_calls',update,[], observation=('tools.' + row.get('name', 'unknown'), row))
 
     def execute(self,call,workspace):
         arguments=json.loads(call['arguments_json'])
@@ -222,7 +226,7 @@ class AgentAdvisor:
         if prior: return {**prior,'replayed':True}
         if self.filter.unsafe(json.dumps(payload)):
             return {'id':cid,'name':call['name'],'state':'refused','result':{'ok':False,'error_code':'sensitive_arguments_withheld'}}
-        if sum(r['state'] in ('running','unknown') for r in calls)>=20 and call['name'] not in ('source_search','source_fetch','tc02_inspect'):
+        if sum(r['state'] in ('running','unknown') for r in calls)>=20 and call['name'] not in ('source_search','source_fetch','tc02_inspect','tc02_job_status','action_reconcile','evidence_read','research_lookup'):
             return {'id':cid,'name':call['name'],'state':'refused','result':{'ok':False,'error_code':'unresolved_action_limit'}}
         row={'id':cid,'name':call['name'],'fingerprint':fingerprint,'state':'running','started_at':timestamp()}
         if call['name']=='tc02_run': row['remote_job_id']=hashlib.sha256(cid.encode()).hexdigest()[:32]
@@ -236,6 +240,9 @@ class AgentAdvisor:
                     result={'ok':False,'error_code':'invalid_evidence_range'}
                 else:
                     source=next((r for r in calls if r['id']==arguments.get('call_id')),None)
+                    if source is None:
+                        finding=next((r for r in self.store.meta('research_outcomes') or [] if r['call_id']==arguments.get('call_id')),None)
+                        if finding: source={'id':finding['call_id'],'state':'completed','result':finding['evidence']}
                     if source is None: result={'ok':False,'error_code':'evidence_not_retained'}
                     else:
                         content=json.dumps(source.get('result', {}),allow_nan=False,sort_keys=True)
@@ -245,11 +252,17 @@ class AgentAdvisor:
                                 'content':content[offset:end],
                                 'next_offset':end if end<len(content) else None,
                                 'sha256':hashlib.sha256(content.encode()).hexdigest()}
+            elif call['name']=='research_lookup':
+                from .agent_outcomes import lookup
+                result=lookup(self.store,arguments)
             elif call['name']=='action_reconcile':
                 original=next((r for r in calls if r['id']==arguments.get('call_id') and r.get('remote_job_id')),None)
                 if not original: result={'ok':False,'error_code':'remote_action_not_found'}
                 else:
                     result=self.tools.execute('tc02_job_status',{'job_id':original['remote_job_id']})
+                    original.update(last_checked_at=timestamp(), last_remote_state=result.get('state'),
+                        blocker='remote_evidence_missing_outcome_unknown' if result.get('state')=='not_found' else result.get('error_code'))
+                    self._calls(original)
                     if result.get('ok') and result.get('state')=='completed':
                         observed={**result,'ok':result.get('returncode')==0}
                         original.update(state='completed',result=self.filter.clean(observed),finished_at=timestamp(),reconciled=True)
@@ -293,7 +306,8 @@ class AgentAdvisor:
             {'name':'evidence_read','description':'Read retained tool result without re-execution: call_id, offset (default 0), limit (1..4000). Follow next_offset until null; evidence_not_retained means unavailable, never invent it.'},
             {'name':'experiment_retire','description':'Retire by id and reason. Flat accounts archive immediately; open accounts wait for normal gated flattening. Never bypasses stops or limits.'},
             {'name':'experiment_review','description':'Read all active and retired account outcomes. No arguments.'},
-            {'name':'research_record','description':'Record one completed finding: hypothesis, verdict (reject/investigate/retain), conclusion, call_id of successful analysis/tc02_run. Evidence is retained; does not qualify a strategy.'},
+            {'name':'research_lookup','description':'Read up to ten retained finding summaries by optional family or id. Use before repeating an experiment.'},
+            {'name':'research_record','description':'Record one completed finding: hypothesis, verdict (reject/investigate/retain), conclusion, call_id of successful analysis/tc02_run. Evidence is retained; does not qualify a strategy. Optional experiment object: family, dataset_version, code_sha256, parameters, costs, metrics (finite numbers or null), failure_reason, parent_id (finding ID or null). Equivalent family/dataset/code/parameters/costs deduplicates.'},
             {'name':'improvement_record','description':'Maintain backlog: id, problem, change, acceptance, state (planned/working/blocked/verified). Verified requires verified engineering release.'},
             {'name':'experiment_start','arguments':{'name':'short experiment name','expression':'causal strategy expression'},'description':'Start an independent $1000 experimental paper account at fresh live quotes. Up to four; fixed risk gates; unvalidated results never promote automatically. Use to test distinct hypotheses proactively.'}, {'name':'engineering_check','arguments':{},'description':'Check edited project snapshot against protected controls and current live hashes.'},
                     {'name':'engineering_deploy','arguments':{},'description':'Run isolated full tests and automatically install project changes with rollback and restart verification.'},
