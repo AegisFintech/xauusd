@@ -599,3 +599,17 @@ def test_idle_heartbeat_preserves_failure_and_bar_freshness(tmp_path):
     assert value['error_code'] == 'OSError'
     assert value['last_bar_utc'] == '2026-10-23T20:59:00+00:00'
     assert value['session'] == 'weekend_closed'
+
+
+def test_planned_disconnect_is_stopped_but_unexpected_loss_stays_an_error(tmp_path):
+    feed = LiveBarFeed(config(tmp_path))
+    class Reactor:
+        def callLater(self, *args):
+            raise AssertionError('bounded or stopped feed must not reconnect')
+    feed._connection_lost(Reactor(), object(), bounded=True)
+    assert feed.status['state'] == 'disconnected'
+    assert feed.status['error_code'] == 'transport_error'
+    feed.stop()
+    feed._connection_lost(Reactor(), object(), bounded=True)
+    assert feed.status['state'] == 'stopped'
+    assert feed.status['error_code'] is None

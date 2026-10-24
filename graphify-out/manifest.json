@@ -522,15 +522,15 @@
     "semantic_hash": ""
   },
   "AGENTS.md": {
-    "mtime": 1792806055.3453987,
-    "seen": 1792806105.3787842,
-    "ast_hash": "0edd86024c88c1e7213b2e55fea2ea03",
+    "mtime": 1792806738.334186,
+    "seen": 1792806764.5668728,
+    "ast_hash": "721cdc60c09e5f9b897f12fc92f066e6",
     "semantic_hash": ""
   },
   "README.md": {
-    "mtime": 1792806055.3453987,
-    "seen": 1792806105.3787851,
-    "ast_hash": "704ffcbda725d6c7997403b111d438e0",
+    "mtime": 1792806738.334186,
+    "seen": 1792806764.566874,
+    "ast_hash": "6d2c33003957eaf65db64ecaba0df6ca",
     "semantic_hash": ""
   },
   "docker-compose.yml": {
@@ -774,9 +774,9 @@
     "semantic_hash": ""
   },
   "tests/test_live_feed.py": {
-    "mtime": 1792805682.5051181,
-    "seen": 1792806105.3786645,
-    "ast_hash": "110fcb0d88c5872ef40fe1b316a675ca",
+    "mtime": 1792806724.1661549,
+    "seen": 1792806764.5667408,
+    "ast_hash": "7a7b9d1cc95ed935d9b815cd2b7f6692",
     "semantic_hash": ""
   },
   "tests/test_session_calendar.py": {
@@ -816,9 +816,9 @@
     "semantic_hash": ""
   },
   "xauusd/live_feed.py": {
-    "mtime": 1792805708.1011534,
-    "seen": 1792806105.3787472,
-    "ast_hash": "ba9180c1d11a3374ff103894b1335e62",
+    "mtime": 1792806738.334186,
+    "seen": 1792806764.5668335,
+    "ast_hash": "754e1d817e91e6b245cd47cfa295c80f",
     "semantic_hash": ""
   },
   "xauusd/session_calendar.py": {
@@ -1146,9 +1146,9 @@
     "semantic_hash": ""
   },
   "docs/cleanup-plan-2026-10-24.md": {
-    "mtime": 1792806628.413995,
-    "seen": 1792806632.4053519,
-    "ast_hash": "cd94b75dd376524bee25ef18f30583db",
+    "mtime": 1792806806.038388,
+    "seen": 1792806810.9887874,
+    "ast_hash": "89b7e216f2c72351d260c0cd3a09070d",
     "semantic_hash": ""
   },
   "docs/legacy-datadog-planner.md": {

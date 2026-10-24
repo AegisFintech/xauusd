@@ -68,3 +68,17 @@ No account start/reset/recovery, broker execution, engine resumption or risk cha
 - Current and archived README links were checked. Graphify updated with local AST
   extraction; no semantic-label API call was required. Unrelated pre-existing
   OpenCode deletions, research reports and untracked design notes remain untouched.
+
+### Broker smoke shutdown follow-up
+
+The initial 180-second real-demo smoke subscribed successfully and retained healthy
+heartbeats through the closed session. At exactly its scheduled end, the disconnect
+callback incorrectly recorded transport_error. A regression test now distinguishes
+planned shutdown from actual loss; the callback reports stopped only when the stop
+event is set. Unexpected disconnect errors/reconnect behavior remain intact.
+
+Follow-up verification: **892 passed, 1 skipped** in the complete suite and
+31 focused feed tests passed. A fresh real-demo `data-feed once` invocation
+with a 15-second verification bound subscribed successfully and returned
+`stopped`, no error, zero bars (weekend closed). The production smoke bound
+remains 180 seconds. No gate, account, or reconnect semantics changed.

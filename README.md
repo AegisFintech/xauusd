@@ -298,3 +298,7 @@ keeps the latest three snapshots and any from the last seven days, and preserves
 pins, unknown files, active research and recovery archives.
 
 See the [cleanup checklist and findings](docs/cleanup-plan-2026-10-24.md).
+
+A planned feed shutdown (including the bounded demo-host smoke test) records
+`stopped` without a transport error. Unexpected disconnects retain their failure
+status and the existing continuous reconnect behavior.

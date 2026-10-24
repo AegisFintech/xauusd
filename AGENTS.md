@@ -266,3 +266,7 @@ The read-only Statistics tab refreshes with the dashboard and consolidates retai
 - Current setup is in README and active runbooks. Optional Datadog operation and
   earlier project stages are archived under docs/legacy-*.md; preserve historical
   findings without treating them as current configuration.
+
+- Feed disconnect handling distinguishes a set stop event from an unexpected
+  transport loss. Bounded smoke-test completion and SIGTERM report stopped;
+  unexpected losses remain errors and preserve the reconnect policy.

@@ -665,11 +665,7 @@ class LiveBarFeed:
             self._schedule_resubscribe(reactor)
 
         def on_disconnected(_client: Any, reason: Any = None) -> None:
-            self.subscribed_at = None
-            self._note("disconnected", "transport_error")
-            if bound_seconds is None and not self._stop.is_set():
-                self._note("reconnecting")
-                reactor.callLater(RECONNECT_SECONDS, client.startService)
+            self._connection_lost(reactor, client, bounded=bound_seconds is not None)
 
         client.setConnectedCallback(on_connected)
         client.setMessageReceivedCallback(on_message)
@@ -706,6 +702,16 @@ class LiveBarFeed:
             reactor.callLater(bound_seconds, self._stop.set)
         reactor.run()
         return dict(self.status)
+
+    def _connection_lost(self, reactor: Any, client: Any, *, bounded: bool) -> None:
+        self.subscribed_at = None
+        if self._stop.is_set():
+            self._note("stopped")
+            return
+        self._note("disconnected", "transport_error")
+        if not bounded:
+            self._note("reconnecting")
+            reactor.callLater(RECONNECT_SECONDS, client.startService)
 
     def _record_quote(self, payload: Any) -> None:
         """Record only the discovered demo account/symbol's complete spot frame."""
