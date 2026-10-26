@@ -124,14 +124,27 @@ samples remain pending. Regressions need a normal tested corrective release, nev
 an unverified rollback, protected-control edit or risk change. Keep Luna; improve tools,
 batching, retrieval and research selection before spending more inference.
 Progress counts recorded evidence conclusions, retired experiments and verified releases only.
-A dependency-free research_runner.py is supplied in each workspace. Export only train.parquet
-to timestamp/open/close CSV, upload the runner and CSV using tc02_run, and run
+A dependency-free research_runner.py and ready-to-use train.csv are supplied in each workspace.
+train.csv has verified UTC timestamps and OHLCV; training_schema.json reports gaps and the data hash.
+The parquet timestamp is its DatetimeIndex, not a missing column: never export index=False
+without first resetting/renaming that index. Upload the supplied runner and CSV using tc02_run, and run
 python3 research_runner.py train.csv LOOKBACK HOLD momentum|reversal. It reports
 chronological thirds, cost stress, best-two sensitivity and gap exclusions. It is
 a reusable baseline, not a substitute for custom hypotheses or final qualification.
 Do not repeatedly inspect capabilities or rewrite runners. Reuse completed scripts and the
 existing tc02_run/job_status/action_reconcile protocol; recover results before moving on.
-Research pace: execute a measurable strategy experiment each cycle when data permits.
+Completion takes priority over activity. At most two research plans may run and one improvement
+may be working. Read workflow blockers before new plans. Repair a shared input/tool failure
+before another hypothesis with the same requirement. Failed execution is not hypothesis rejection.
+Use result_summary with the EXACT returned server call_id, including its original workspace prefix;
+old workspaces are valid durable IDs, never prepend the new workspace ID. Code/artifact hashes
+are captured before dispatch and retained with plan evidence. Do not claim provenance is missing
+without checking this tool. Preserve immutable blocked plans; use parent_id for corrected replacements.
+For a repair: reproduce, write a regression that fails before the fix, implement, check, deploy,
+link its verified release, and measure. Protected changes require one concrete escalation with a
+reproduction and proposed patch; never repeatedly generate the same blocked request.
+Search the internet to answer a specific missing-data or method question; record its test or rejection.
+Research pace: complete a supported finding or one repair before another variation.
 Do not let blocked optional sources prevent experiments on available training data.
 After two failed approaches to the same blocker, park it with evidence and test a
 materially different hypothesis. Never manufacture positive results or force
@@ -160,7 +173,7 @@ def compact_context(context):
     value['agent'] = {k: agent[k] for k in ('session_id', 'goal', 'agenda', 'assessment',
         'next_action', 'turn', 'phase', 'stagnation_cycles', 'last_error') if k in agent}
     value.pop('recent_training_bars', None)
-    value['training_access'] = 'Use train.parquet and research_runner.py; request compact numeric results, not raw bars.'
+    value['training_access'] = 'Prepared train.csv includes verified UTC timestamp/open/high/low/close/volume; inspect training_schema.json. train.parquet retains its DatetimeIndex. Use research_runner.py without dependencies on tc02.'
     def summary(row):
         return {k: v for k, v in (row or {}).items() if not isinstance(v, (dict, list))}
     def experiment(row):
@@ -183,13 +196,13 @@ def compact_context(context):
         explicit_page = row.get('name') in ('evidence_read','research_program','source_fetch') and (
             isinstance((row.get('result') or {}).get('content'),str) or
             isinstance((row.get('result') or {}).get('excerpt'),str))
-        if len(encoded) <= 1600 or explicit_page and len(encoded) <= 12000:
+        if len(encoded) <= 1600 or explicit_page and len(encoded) <= 12000 or row.get('name')=='result_summary' and len(encoded)<=12000:
             results.append(row)
         else:
             result = row.get('result') or {}
             results.append({**{k: v for k, v in row.items() if k != 'result'},
                 'result': {**summary({k: result[k] for k in ('ok', 'state', 'error_code', 'returncode', 'job_id', 'uncertain') if k in result}),
-                           'preview': encoded[:500], 'preview_only': True},
+                           'preview': encoded[:500], 'preview_only': True, **({'evidence_summary':row['evidence_summary']} if row.get('evidence_summary') else {})},
                 'evidence_ref': row['id'], 'evidence_chars': len(encoded),
                 'retrieval': 'evidence_read with call_id, offset and limit; do not rerun the action.'})
     value['tool_results'] = results
@@ -253,7 +266,7 @@ class AgentAdvisor:
         if prior: return {**prior,'replayed':True}
         if self.filter.unsafe(json.dumps({'name':call['name'],'arguments':arguments})):
             return {'id':cid,'name':call['name'],'state':'refused','result':{'ok':False,'error_code':'sensitive_arguments_withheld'}}
-        if sum(r['state'] in ('running','unknown') for r in calls)>=20 and call['name'] not in ('source_search','source_fetch','tc02_inspect','tc02_job_status','action_reconcile','evidence_read','research_lookup','research_program','research_plan_close','improvement_review'):
+        if sum(r['state'] in ('running','unknown') for r in calls)>=20 and call['name'] not in ('source_search','source_fetch','tc02_inspect','tc02_job_status','action_reconcile','evidence_read','research_lookup','research_program','research_plan_close','improvement_review','result_summary'):
             return {'id':cid,'name':call['name'],'state':'refused','result':{'ok':False,'error_code':'unresolved_action_limit'}}
         from . import research_program as program
         from .research_effectiveness import release_id
@@ -268,11 +281,17 @@ class AgentAdvisor:
         row={'id':cid,'name':call['name'],'fingerprint':fingerprint,'state':'running','started_at':timestamp(),
              'release_id':release_id(self.store), **{k:reservation[k] for k in ('plan_id','variant_id') if k in reservation}}
         if call['name']=='tc02_run': row['remote_job_id']=hashlib.sha256(cid.encode()).hexdigest()[:32]
+        if call['name'] in ('analysis','tc02_run'):
+            from .research_workflow import provenance
+            row['provenance']=provenance(workspace,arguments)
         self._calls(row)
         self.store.event('tool_call','Agent requested '+call['name'],{'call_id':cid,'arguments':arguments})
         started=time.monotonic()
         try:
-            if call['name']=='research_program':
+            if call['name']=='result_summary':
+                from .research_workflow import result_summary
+                result=result_summary(self.store,arguments.get('call_id')) if set(arguments)=={'call_id'} else {'ok':False,'error_code':'invalid_summary_request'}
+            elif call['name']=='research_program':
                 result=program.read(self.store,arguments)
             elif call['name']=='research_plan':
                 result=program.create_plan(self.store,arguments)
@@ -295,10 +314,8 @@ class AgentAdvisor:
                         or type(limit) is not int or offset < 0 or not 1 <= limit <= 4000):
                     result={'ok':False,'error_code':'invalid_evidence_range'}
                 else:
-                    source=next((r for r in calls if r['id']==arguments.get('call_id')),None)
-                    if source is None:
-                        finding=next((r for r in self.store.meta('research_outcomes') or [] if r['call_id']==arguments.get('call_id')),None)
-                        if finding: source={'id':finding['call_id'],'state':'completed','result':finding['evidence']}
+                    from .research_workflow import resolve_call
+                    source=resolve_call(self.store,arguments.get('call_id'))
                     if source is None: result={'ok':False,'error_code':'evidence_not_retained'}
                     else:
                         content=json.dumps(source.get('result', {}),allow_nan=False,sort_keys=True)
@@ -353,6 +370,9 @@ class AgentAdvisor:
             row.update(state='unknown' if side_effect else 'completed',result={'ok':False,'error_code':'tool_outcome_unknown_do_not_retry' if side_effect else 'tool_failed'},finished_at=timestamp())
         row['duration_seconds']=round(time.monotonic()-started,6)
         self._calls(row)
+        if call['name'] in ('analysis','tc02_run'):
+            from .research_workflow import result_summary
+            row['evidence_summary']=result_summary(self.store,cid)
         self.store.event('tool_result',call['name']+' '+row['state'],{'call_id':cid,'result':row['result']})
         if call['name']=='tc02_inspect':
             state=self.state();state['compute']=row['result'];state['compute_observed_at']=row.get('finished_at');self.store.meta('agent',state)
@@ -367,6 +387,7 @@ class AgentAdvisor:
             {'name':'research_plan_close','description':'Close plan: id, state (completed/blocked/abandoned), reason. Completion needs a recorded finding; unresolved variants cannot close.'},
             {'name':'research_insight','description':'Record source-based interpretation: topic, question, finding, next_test, source_ids (1..5 actual retrieved source IDs). Search leads alone cannot support an insight. Historical availability remains unverified.'},
             {'name':'improvement_review','description':'Read measured bottlenecks and before/after release measurements. No arguments. A release is not a measured improvement; fewer than 10 samples per window stays pending/insufficient.'},
+            {'name':'result_summary','description':'Compact deterministic numeric result and artifact/code hashes: exact call_id from any workspace. Read this before paging raw evidence. Does not run work or validate claims.'},
             {'name':'evidence_read','description':'Read retained tool result without re-execution: call_id, offset (default 0), limit (1..4000). Follow next_offset until null; evidence_not_retained means unavailable, never invent it.'},
             {'name':'experiment_retire','description':'Retire by id and reason. Flat accounts archive immediately; open accounts wait for normal gated flattening. Never bypasses stops or limits.'},
             {'name':'experiment_review','description':'Read all active and retired account outcomes. No arguments.'},
@@ -393,7 +414,7 @@ class AgentAdvisor:
                      'tools':catalog,'tool_results':results[-8:],'experiments':self.store.meta('experiments') or [],
                      'research_outcomes':(self.store.meta('research_outcomes') or [])[-10:],'improvements':self.store.meta('improvements') or [],
                      'experiment_review':__import__('xauusd.agent_experiments',fromlist=['review']).review(self.store),
-                     'engineering_release':{k:v for k,v in (self.store.meta('engineering') or {}).items() if k in ('state','release_id','changes')},
+                     'engineering_release':{'release_id':__import__('xauusd.research_effectiveness',fromlist=['release_id']).release_id(self.store),'state':'verified' if __import__('xauusd.research_effectiveness',fromlist=['release_id']).release_id(self.store) else 'unverified'},
                      'engineering_snapshot':snapshot,'current_runtime':self.store.meta('status'),
                      'instructions':'Choose your own evolving agenda. Ask tools for missing evidence; improve methods and the platform.'}
             context['research_diagnostics']['measurements']=context['research_diagnostics']['measurements'][-5:]

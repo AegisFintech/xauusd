@@ -340,3 +340,15 @@ requires the agent, engine and view to be stopped, checks integrity before/after
 and never starts accounts or clears the engine halt. The read-only Storage view
 shows maintenance and compaction results. See
 [database maintenance](docs/operator-runbook-database.md).
+
+### Research completion and repair — 2026-10-26
+
+The harness now prioritizes completed evidence over activity: two running plans,
+one working repair, and recorded findings before further computation. Workspaces
+include an audited UTC-timestamped training CSV; multi-bar return features exclude
+entire gap-straddling lookbacks. Exact cross-workspace evidence and research-file
+hashes survive call-log rotation in bounded plan records. `result_summary` supplies
+compact structured metrics before raw paging. Overview and Research lead with
+outcomes, shared blocker categories, repair escalations and measured-benefit state;
+the live chat follows. Productivity still needs real post-release samples.
+See [implementation and verification](docs/research-completion-2026-10-26.md).

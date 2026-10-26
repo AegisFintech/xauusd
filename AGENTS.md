@@ -314,3 +314,26 @@ The read-only Statistics tab refreshes with the dashboard and consolidates retai
 - Scheduled maintenance uses optimize/passive checkpoint/incremental vacuum only.
   Full compaction requires stopped agent/engine/view units and integrity checks;
   it never clears controls or starts accounts. See docs/operator-runbook-database.md.
+
+## Research completion — 2026-10-26
+
+- Preserve the two-running-plan and one-working-improvement limits. Successful
+  open-plan computations need findings before another compute reservation.
+  Retrieval/reconciliation/repair stay available; unknown outcomes never replay.
+- Use prepared `train.csv` and `training_schema.json`. Parquet timestamps are its
+  DatetimeIndex; never discard them with an index-free export. Export training
+  only and remove bulky CSV/parquet copies on cycle completion. Preserve gaps.
+- A return feature must exclude every irregular interval in its full lookback,
+  including all post-gap rows until the full horizon is contiguous.
+- Retain exact call evidence and pre-dispatch file hashes in bounded plan variants.
+  `result_summary` reads exact original IDs across workspaces without executing;
+  operational-log expiry does not erase retained plan evidence. Unknown/missing
+  historical provenance stays unknown. Compact views must not embed raw evidence.
+- Reproduce repairs, prove regressions fail, test/deploy, link the specific release,
+  then measure. Protected changes become concrete escalations, never bypasses.
+  Keep immutable blocked plans; corrected studies reference a parent and new variant.
+- Operator-verified research release bookkeeping is separate from automatic
+  deployment/rollback journals and yields to the next autonomous release. Count
+  real post-release samples only; tests/smokes do not prove live productivity.
+- Overview/Research show outcomes and blockers before activity. Preserve chat
+  auto-follow and browser GET-only boundaries. See docs/research-completion-2026-10-26.md.

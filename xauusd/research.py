@@ -77,8 +77,11 @@ def build_features(bars: pd.DataFrame) -> pd.DataFrame:
     # Null the short-horizon returns that straddle a session gap. Without this a
     # "15-minute" return measured across Friday's close is really a three-day
     # return, and it enters a signal as if it were a short one.
-    for horizon in ("return_1", "return_5", "return_15"):
-        x.loc[x["session_break"], horizon] = np.nan
+    for periods in (1, 5, 15):
+        irregular = gaps.ne(pd.Timedelta(minutes=1))
+        irregular.iloc[0:1] = False
+        crosses_gap = irregular.rolling(periods, min_periods=1).max().astype(bool)
+        x.loc[crosses_gap.to_numpy(), f"return_{periods}"] = np.nan
     return x.replace([np.inf, -np.inf], np.nan).dropna()
 
 

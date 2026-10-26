@@ -38,6 +38,12 @@ def ensure(store):
 
 def begin_cycle(store):
     ensure(store)
+    # Upgrade only still-retained exact evidence; never reconstruct missing results.
+    for row in store.meta('agent_calls') or []:
+        if row.get('plan_id') and any(p['id']==row['plan_id'] and
+                row.get('variant_id') in p['variants'] and
+                'evidence' not in p['variants'][row['variant_id']] for p in store.meta('research_plans') or []):
+            finish_call(store,row)
     def advance(program):
         program['cycles']=program.get('cycles',0)+1
         return program
@@ -157,6 +163,11 @@ def reserve(store, name, arguments, call_id):
         if variant in plan['variants']:
             return {'ok':False,'error_code':'plan_variant_already_reserved','call_id':plan['variants'][variant]['call_id']}
         if len(plan['variants'])>=plan['max_variants']:return {'ok':False,'error_code':'plan_variant_budget_exhausted'}
+        if any(p['state'] not in TERMINAL and not p.get('finding_ids') and
+               any(v.get('state')=='completed' and v.get('ok') is True for v in p['variants'].values()) for p in plans):
+            return {'ok':False,'error_code':'record_completed_result_first'}
+        if plan['state']!='running' and sum(p['state']=='running' for p in plans)>=2:
+            return {'ok':False,'error_code':'active_experiment_limit'}
         plan['variants'][variant]={'call_id':call_id,'reserved_at':timestamp(),'state':'reserved',
                                    'command_sha256':digest(args),'remote_job_id':hashlib.sha256(call_id.encode()).hexdigest()[:32] if name=='tc02_run' else None}
         plan['state']='running';tx.put('lab:research_plans',plans)
@@ -175,6 +186,10 @@ def finish_call(store, row):
             v.update(state=row['state'],ok=result.get('ok') is True,
                      error_code=result.get('error_code'),remote_job_id=row.get('remote_job_id'),
                      finished_at=row.get('finished_at'))
+            if row.get('provenance'):v['provenance']=row['provenance']
+            v['tool_name']=row.get('name','analysis')
+            if row['state'] in ('completed','unknown'):
+                v['evidence']=result
         return plans
     store.update('research_plans',update,[])
 
@@ -255,16 +270,20 @@ def context(store, compact=False):
             'recommendation':{'topic':topic,'question_area':TOPICS[topic],'action':action,'plan_id':target,
                               'reason':'Investigate a less explored explanation; repeated rejected families need new evidence.',
                               'kind':'recommendation_not_permission'},
-            'plans':[{k:v for k,v in p.items() if k not in ('identity','sources')} for p in plans[-12:]],
+            'plans':[{k:v for k,v in p.items() if k not in ('identity','sources','variants')} |
+                     {'variants':{key:{k:v for k,v in variant.items() if k not in ('evidence','provenance')}
+                                  for key,variant in p['variants'].items()}} for p in plans[-12:]],
             'lessons':[{k:v for k,v in r.items() if k!='recent_ids'} for r in lessons[-12:]],
             'insights':(store.meta('research_insights') or [])[-5:],
             'sources':[_summary_source(r) for r in sources[-10:]],
+            'workflow':__import__('xauusd.research_workflow',fromlist=['workflow_status']).workflow_status(store),
             'counts':{'open_plans':sum(p['state'] not in TERMINAL for p in plans),
                       'completed_plans':sum(p['state']=='completed' for p in plans),
                       'blocked_plans':sum(p['state']=='blocked' for p in plans),
                       'retained_sources':len(sources),'retained_insights':len(store.meta('research_insights') or [])}}
 
     if compact:
+        result['workflow']['blockers']=result['workflow']['blockers'][-5:]
         result['plans']=[{k:(v[:350] if isinstance(v,str) else v) for k,v in p.items()
                           if k in ('id','topic','family','question','hypothesis','state','dataset_version','max_variants','finding_ids')}
                          | {'variants':{k:{field:value for field,value in v.items() if field in ('call_id','state','ok','remote_job_id')}

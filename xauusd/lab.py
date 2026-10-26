@@ -272,10 +272,13 @@ class ResearchHarness:
         buffer = io.BytesIO()
         train.to_parquet(buffer)
         atomic_write_bytes(workspace / "train.parquet", buffer.getvalue())
+        from .research_workflow import prepare_training
+        training_schema = prepare_training(workspace, train, manifest["version"])
+        self.store.meta("training_schema", training_schema)
         atomic_write_bytes(workspace / "research_runner.py", Path(__file__).with_name("research_runner.py").read_bytes())
         started = self.now().isoformat()
         brief = {"task": "Own an evolving research and engineering agenda toward the 100% daily net-return aspiration, supported by evidence.", "dataset": manifest,
-                 "train": {"rows": len(train), "start": train.index[0].isoformat(), "end": train.index[-1].isoformat()},
+                 "training_schema": training_schema, "train": {"rows": len(train), "start": train.index[0].isoformat(), "end": train.index[-1].isoformat()},
                  "recent_training_bars": [{"time": t.isoformat(), **r} for t, r in train.tail(120).to_dict("index").items()],
                  "memory": self.store.memory(), "prior_candidates": [
                      {k: r.get(k) for k in ("id", "name", "expression", "hypothesis", "state")}
@@ -364,9 +367,10 @@ class ResearchHarness:
             atomic_write_json(workspace / "completion.json", {"status": completed, "completed_at": timestamp()})
             # Keep compact evidence in the state store, not a training copy for
             # every job. Research scripts remain for a short retention window.
-            train_path = workspace / "train.parquet"
-            if train_path.is_file() and not train_path.is_symlink():
-                train_path.unlink()
+            for training_name in ("train.parquet", "train.csv"):
+                train_path = workspace / training_name
+                if train_path.is_file() and not train_path.is_symlink():
+                    train_path.unlink()
             if advisor and advisor.engineering:
                 from .agent_release_worker import schedule_verification
                 schedule_verification(self.store, advisor.engineering)

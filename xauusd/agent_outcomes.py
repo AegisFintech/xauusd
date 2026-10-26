@@ -13,7 +13,8 @@ def record(store, arguments):
         return {'ok': False, 'error_code': 'invalid_outcome'}
     if any(not isinstance(v, str) or not 1 <= len(v) <= 2000 for v in (arguments[k] for k in required)) or arguments['verdict'] not in ('reject', 'investigate', 'retain'):
         return {'ok': False, 'error_code': 'invalid_outcome'}
-    call = next((r for r in store.meta('agent_calls') or [] if r['id'] == arguments['call_id']), None)
+    from .research_workflow import resolve_call
+    call = resolve_call(store, arguments['call_id'])
     if not call or call['state'] != 'completed' or call['name'] not in ('tc02_run', 'analysis', 'action_reconcile') or call.get('result', {}).get('ok') is not True:
         return {'ok': False, 'error_code': 'completed_evidence_required'}
     rows = store.meta('research_outcomes') or []
@@ -67,16 +68,19 @@ def improvement(store, arguments):
     required = {'id', 'problem', 'change', 'acceptance', 'state'}
     if not required <= set(arguments) or set(arguments)-required-{'metric'} or any(not isinstance(arguments[k], str) or not 1 <= len(arguments[k]) <= 2000 for k in required) or arguments['state'] not in ('planned', 'working', 'blocked', 'verified'):
         return {'ok': False, 'error_code': 'invalid_improvement'}
-    release = store.meta('engineering') or {}
+    from .research_effectiveness import release_id
+    current_release = release_id(store)
     rows = store.meta('improvements') or []
     prior = next((r for r in rows if r['id'] == arguments['id']), None)
-    if arguments['state'] == 'verified' and (release.get('state') != 'verified' or not prior or not release.get('release_id') or release['release_id'] == prior.get('baseline_release_id')):
+    if arguments['state']=='working' and any(r['id']!=arguments['id'] and r['state']=='working' for r in rows):
+        return {'ok':False,'error_code':'active_improvement_limit'}
+    if arguments['state'] == 'verified' and (not current_release or not prior or current_release == prior.get('baseline_release_id')):
         return {'ok': False, 'error_code': 'verified_release_required'}
     if 'metric' in arguments:
         from .research_effectiveness import start_measurement,METRICS
         if arguments['metric'] not in METRICS:return {'ok':False,'error_code':'unknown_measurement_metric'}
         start_measurement(store,arguments['id'],arguments['metric'])
-    row = {**arguments, 'updated_at': timestamp(), 'baseline_release_id': prior.get('baseline_release_id') if prior else release.get('release_id'), 'release_id': release.get('release_id') if arguments['state'] == 'verified' else None}
+    row = {**arguments, 'updated_at': timestamp(), 'baseline_release_id': prior.get('baseline_release_id') if prior else current_release, 'release_id': current_release if arguments['state'] == 'verified' else None}
     rows = [r for r in rows if r['id'] != row['id']]
     store.meta('improvements', (rows + [row])[-60:])
     return {'ok': True, 'id': row['id'], 'state': row['state']}

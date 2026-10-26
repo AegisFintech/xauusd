@@ -8,6 +8,9 @@ METRICS={'tool_failure_rate':'down','evidence_read_share':'down','tool_seconds':
 
 def release_id(store):
     row=store.meta('engineering') or {}
+    operator=store.meta('research_operator_release') or {}
+    if operator.get('state')=='verified' and operator.get('engineering_base')==row.get('release_id'):
+        return operator.get('release_id')
     return row.get('release_id') if row.get('state')=='verified' else None
 
 
