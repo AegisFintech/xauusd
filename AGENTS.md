@@ -359,3 +359,15 @@ The read-only Statistics tab refreshes with the dashboard and consolidates retai
 - Historic full prompts were not captured; do not fabricate them or claim that
   additional permissions have resolved unknown actions or research stagnation.
   See docs/agent-conversation.md.
+
+## Bounded research recovery — 2026-10-26
+
+`research_recovery` preserves unknown execution identities and parks investigation
+after two recorded missing-job responses. Parked uncertainty is not successful or
+failed execution, cannot replay, and blocks dependent work only. A matching newly
+retained completed job-status evidence reference can resolve it; repeated polling
+cannot. Dependent plans preserve variants/evidence/budgets while becoming blocked.
+At stagnation, identical read-only research requests are limited to two per evidence
+revision. Dashboard recovery counts distinguish pending investigations and historical
+unknowns; stagnation shows actual completed cycles. Never reset evidence counters or
+clear trading controls to hide a warning.

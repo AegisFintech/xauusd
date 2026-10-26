@@ -104,7 +104,9 @@ def diagnostics(store):
     if len(calls)>=10 and counts['tc02_inspect']/len(calls)>=.2:
         warnings.append({'id':'repeated_inspection','problem':'Worker inspection is at least 20% of retained calls.',
                          'next':'Reuse recent capability evidence and measure tool_seconds.'})
-    unknown=sum(r.get('state')=='unknown' for r in calls)
+    from .research_recovery import parked
+    historical=sum(parked(r) for r in calls)
+    unknown=sum(r.get('state')=='unknown' and not parked(r) for r in calls)
     if unknown:warnings.append({'id':'unknown_results','problem':str(unknown)+' unresolved outcomes remain.',
                                'next':'Retrieve known job status once; absent remote evidence stays unknown and must not replay.'})
     plans=store.meta('research_plans') or []
@@ -112,7 +114,7 @@ def diagnostics(store):
     if missing:warnings.append({'id':'unrecorded_results','problem':str(missing)+' running plans have results but no finding.',
                                'next':'Read results and record a supported conclusion before launching another variation.'})
     return {'scope':'bounded_retained_samples','recorded_at':timestamp(),
-            'calls':len(calls),'findings':len(findings),'unresolved':unknown,
+            'calls':len(calls),'findings':len(findings),'unresolved':unknown,'historical_unknown':historical,
             'inference':{k:v for k,v in recent_inference.items() if k!='samples'},
             'metrics':{name:metric(store,name) for name in METRICS},'bottlenecks':warnings,
             'measurements':store.meta('improvement_measurements') or []}

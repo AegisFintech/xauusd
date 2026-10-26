@@ -132,8 +132,11 @@ def snapshot(transcript, paper) -> dict:
     if maintenance.get('state')=='failed':
         alerts.append('Database log retention failed; review storage maintenance.')
     unresolved = [r for r in (store.meta('agent_calls') or []) if r.get('state') == 'unknown'] if hasattr(transcript, 'connect') else []
-    if unresolved:
-        message=str(len(unresolved)) + ' unresolved research actions need status investigation; they will not be replayed.'
+    from .research_recovery import status as recovery_status
+    recovery=recovery_status(store) if hasattr(transcript,'connect') else {}
+    pending=recovery.get('pending',len(unresolved))
+    if pending:
+        message=str(pending) + ' unresolved research actions need status investigation; they will not be replayed.'
         alerts.append(message)
         if all(r.get('name') in ('tc02_run','analysis','dependency_install') for r in unresolved):
             research_alerts.append(message)
@@ -152,13 +155,13 @@ def snapshot(transcript, paper) -> dict:
     if agent.get("phase")=="error":
         alerts.append("Autonomous research is failing: " + str(agent.get("last_error","research_cycle_failed")))
     if agent.get("stagnation_cycles",0)>=3:
-        alerts.append("Research has no changed experimental evidence in three sessions; review the evolving plan.")
+        alerts.append("Research has no changed experimental evidence in " + str(agent.get("stagnation_cycles",0)) + " cycles; change the experiment or repair its blocker.")
         research_alerts.append(alerts[-1])
     if engineering.get("state") in ("recovery_required","installing"):
         alerts.append("Engineering release recovery needs attention.")
     from .research_program import context as program_context
     from .research_effectiveness import diagnostics
-    return {"research_program": program_context(store) if hasattr(transcript, "connect") else {},
+    return {"research_recovery": recovery, "research_program": program_context(store) if hasattr(transcript, "connect") else {},
             "research_diagnostics": diagnostics(store) if hasattr(transcript, "connect") else {},
             "research_alerts": research_alerts, "operational_alerts": [a for a in alerts if a not in research_alerts],
             "statistics": retained_statistics(store) if hasattr(transcript, "connect") else {}, "status": status, "alerts": alerts, "account": account, "active": active, "candidates": candidates[:40],

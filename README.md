@@ -359,3 +359,8 @@ compact structured metrics before raw paging. Overview and Research lead with
 outcomes, shared blocker categories, repair escalations and measured-benefit state;
 the live chat follows. Productivity still needs real post-release samples.
 See [implementation and verification](docs/research-completion-2026-10-26.md).
+
+Research recovery now bounds missing remote-job investigations to two recorded
+`not_found` checks. Investigated outcomes remain unknown and non-replayable;
+only dependent plans are parked, freeing independent research slots. Research
+shows actual stagnation cycles, pending checks and historical unknown counts.

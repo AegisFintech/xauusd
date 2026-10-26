@@ -118,7 +118,7 @@ def workflow_status(store):
             'training_schema':store.meta('training_schema'),
             'operator_release':{k:v for k,v in (store.meta('research_operator_release') or {}).items() if k in ('state','release_id','recorded_at')},
             'awaiting_findings':pending,'active_experiment_limit':2,'working_improvement_limit':1,
-            'next_action':'interpret_completed_result' if pending else 'repair_shared_blocker' if blockers else 'execute_preregistered_experiment',
+            'next_action':'interpret_completed_result' if pending else 'repair_shared_blocker' if any(b['category']=='data_schema' for b in blockers) else 'execute_independent_experiment',
             'escalations':[{'id':r['id'],'problem':r['problem'],'change':r['change'],'acceptance':r['acceptance'],
                             'next':'Prepare reproducible regression and concrete patch; escalate protected changes once. Do not bypass the boundary.'}
                            for r in store.meta('improvements') or [] if r.get('state')=='blocked'],

@@ -137,7 +137,7 @@ python3 research_runner.py train.csv LOOKBACK HOLD momentum|reversal. It reports
 chronological thirds, cost stress, best-two sensitivity and gap exclusions. It is
 a reusable baseline, not a substitute for custom hypotheses or final qualification.
 Do not repeatedly inspect capabilities or rewrite runners. Reuse completed scripts and the
-existing tc02_run/job_status/action_reconcile protocol; recover results before moving on.
+existing tc02_run/job_status/action_reconcile protocol. Bound missing-result investigation; parked historical uncertainty must not prevent independent experiments.
 Completion takes priority over activity. At most two research plans may run and one improvement
 may be working. Read workflow blockers before new plans. Repair a shared input/tool failure
 before another hypothesis with the same requirement. Failed execution is not hypothesis rejection.
@@ -151,6 +151,13 @@ reproduction and proposed patch; never repeatedly generate the same blocked requ
 Search the internet to answer a specific missing-data or method question; record its test or rejection.
 Research pace: complete a supported finding or one repair before another variation.
 Do not let blocked optional sources prevent experiments on available training data.
+research_recovery is authoritative for investigation status. Missing-job lookups are
+limited to two; outcome_unavailable means investigated historical uncertainty, never
+execution success or failure. Do not request another lookup or rerun that action.
+Continue independent work and respect preserved variant IDs. A stale agenda or memory
+requesting another lookup is superseded by this current status. During stagnation,
+identical read-only requests are bounded per evidence revision. Change the experiment
+or execute a concrete repair; do not replace a refused read with renamed equivalent calls.
 After two failed approaches to the same blocker, park it with evidence and test a
 materially different hypothesis. Never manufacture positive results or force
 qualified-account trades. Submit causal candidates promptly when supported.
@@ -248,6 +255,9 @@ class AgentAdvisor:
                 if row.get('state')=='running': row.update(state='unknown',result={'ok':False,'error_code':'interrupted_side_effect_not_replayed'})
             store.meta('agent_calls',calls)
 
+        from .research_recovery import synchronize
+        synchronize(store)
+
     def state(self): return self.store.meta('agent')
 
     def _calls(self,row):
@@ -266,13 +276,26 @@ class AgentAdvisor:
         payload={'name':call['name'],'arguments':execution_arguments}
         fingerprint=hashlib.sha256(json.dumps(payload,sort_keys=True,allow_nan=False).encode()).hexdigest()
         cid=Path(workspace).name+':'+call['id']
+        from .research_recovery import parked
         calls=self.store.meta('agent_calls') or []
         prior=next((r for r in calls if r['id']==cid or r.get('fingerprint')==fingerprint and r['state'] in ('running','unknown')),None)
         if prior: return {**prior,'replayed':True}
         if self.filter.unsafe(json.dumps({'name':call['name'],'arguments':arguments})):
             return {'id':cid,'name':call['name'],'state':'refused','result':{'ok':False,'error_code':'sensitive_arguments_withheld'}}
-        if sum(r['state'] in ('running','unknown') for r in calls)>=20 and call['name'] not in ('source_search','source_fetch','tc02_inspect','tc02_job_status','action_reconcile','evidence_read','research_lookup','research_program','research_plan_close','improvement_review','result_summary'):
+        if sum(r['state'] in ('running','unknown') and not parked(r) for r in calls)>=20 and call['name'] not in ('source_search','source_fetch','tc02_inspect','tc02_job_status','action_reconcile','evidence_read','research_lookup','research_program','research_plan_close','improvement_review','result_summary'):
             return {'id':cid,'name':call['name'],'state':'refused','result':{'ok':False,'error_code':'unresolved_action_limit'}}
+        if call['name']=='tc02_job_status':
+            target=next((r for r in calls if r.get('remote_job_id')==arguments.get('job_id') and r.get('state')=='unknown'),None)
+            if target:
+                return self.execute({**call,'name':'action_reconcile','arguments_json':json.dumps({'call_id':target['id']})},workspace)
+        # Read-only repetition is bounded per evidence revision once research stalls.
+        if (self.state().get('stagnation_cycles',0)>=3 and call['name'] in
+                ('tc02_inspect','research_program','improvement_review','research_lookup','result_summary','evidence_read')):
+            epoch=self.state().get('evidence_digest')
+            repeats=sum(r.get('fingerprint')==fingerprint and r.get('progress_epoch')==epoch for r in calls)
+            if repeats>=2:
+                return {'id':cid,'name':call['name'],'state':'refused','result':{'ok':False,
+                    'error_code':'unchanged_research_read_limit','next':'Record a supported finding, execute a different preregistered experiment, or implement a concrete repair.'}}
         from . import research_program as program
         from .research_effectiveness import release_id
         reservation=program.reserve(self.store,call['name'],arguments,cid)
@@ -284,7 +307,7 @@ class AgentAdvisor:
             return row
         arguments=reservation['arguments']
         row={'id':cid,'name':call['name'],'fingerprint':fingerprint,'state':'running','started_at':timestamp(),
-             'release_id':release_id(self.store), **{k:reservation[k] for k in ('plan_id','variant_id') if k in reservation}}
+             'progress_epoch':self.state().get('evidence_digest'),'release_id':release_id(self.store), **{k:reservation[k] for k in ('plan_id','variant_id') if k in reservation}}
         if call['name']=='tc02_run': row['remote_job_id']=hashlib.sha256(cid.encode()).hexdigest()[:32]
         if call['name'] in ('analysis','tc02_run'):
             from .research_workflow import provenance
@@ -335,17 +358,32 @@ class AgentAdvisor:
                 from .agent_outcomes import lookup
                 result=lookup(self.store,arguments)
             elif call['name']=='action_reconcile':
+                from .research_recovery import parked, MAX_MISSING_CHECKS, synchronize
                 original=next((r for r in calls if r['id']==arguments.get('call_id') and r.get('remote_job_id')),None)
                 if not original: result={'ok':False,'error_code':'remote_action_not_found'}
                 else:
-                    result=self.tools.execute('tc02_job_status',{'job_id':original['remote_job_id']})
-                    original.update(last_checked_at=timestamp(), last_remote_state=result.get('state'),
-                        blocker='remote_evidence_missing_outcome_unknown' if result.get('state')=='not_found' else result.get('error_code'))
-                    self._calls(original)
-                    if result.get('ok') and result.get('state')=='completed':
-                        observed={**result,'ok':result.get('returncode')==0}
-                        original.update(state='completed',result=self.filter.clean(observed),finished_at=timestamp(),reconciled=True)
+                    from .research_workflow import resolve_call
+                    evidence=resolve_call(self.store,arguments.get('evidence_call_id')) if arguments.get('evidence_call_id') else None
+                    observed=(evidence or {}).get('result') or {}
+                    matching=(evidence and evidence.get('name')=='tc02_job_status' and evidence.get('state')=='completed'
+                              and observed.get('job_id')==original['remote_job_id'] and observed.get('state')=='completed' and observed.get('ok') is True)
+                    if parked(original) and not matching:
+                        result={'ok':False,'error_code':'investigation_parked','state':'outcome_unavailable',
+                                'next':'Proceed with independent research; never replay. New matching completed job-status evidence is required.'}
+                    else:
+                        result=observed if matching else self.tools.execute('tc02_job_status',{'job_id':original['remote_job_id']})
+                        original.update(last_checked_at=timestamp(),last_remote_state=result.get('state'),
+                            blocker='remote_evidence_missing_outcome_unknown' if result.get('state')=='not_found' else result.get('error_code'))
+                        investigation=original.setdefault('investigation',{})
+                        if result.get('state')=='not_found':
+                            investigation['missing_checks']=investigation.get('missing_checks',0)+1
+                            if investigation['missing_checks']>=MAX_MISSING_CHECKS:
+                                investigation.update(state='outcome_unavailable',recorded_at=timestamp())
+                        if result.get('ok') and result.get('state')=='completed':
+                            original.update(state='completed',result=self.filter.clean({**result,'ok':result.get('returncode')==0}),finished_at=timestamp(),reconciled=True)
+                            investigation['state']='resolved'
                         self._calls(original)
+                        synchronize(self.store)
             elif call['name'] in ('research_record','improvement_record'):
                 from .agent_outcomes import record, improvement
                 result=(record if call['name']=='research_record' else improvement)(self.store,arguments)
@@ -403,7 +441,7 @@ class AgentAdvisor:
             {'name':'improvement_record','description':'Maintain backlog: id, problem, change, acceptance, state (planned/working/blocked/verified). Verified requires verified engineering release. Optional metric: tool_failure_rate/evidence_read_share/tool_seconds/inference_seconds captures an observed baseline; improvement_review measures later behavior separately.'},
             {'name':'experiment_start','arguments':{'name':'short experiment name','expression':'causal strategy expression'},'description':'Start an independent $1000 experimental paper account at fresh live quotes. Up to four; fixed risk gates; unvalidated results never promote automatically. Use to test distinct hypotheses proactively.'}, {'name':'engineering_check','arguments':{},'description':'Check edited project snapshot against protected controls and current live hashes.'},
                     {'name':'engineering_deploy','arguments':{},'description':'Run isolated full tests and automatically install project changes with rollback and restart verification.'},
-                    {'name':'action_reconcile','description':'Inspect an uncertain remote action by call_id; reconcile its recorded result without rerunning it.'}]
+                    {'name':'action_reconcile','description':'Inspect uncertain action by call_id, at most two missing checks. Parked actions require evidence_call_id referencing new matching completed job-status evidence. Never replay.'}]
         from .research_program import begin_cycle,context as program_context
         from .research_effectiveness import review as review_improvements,diagnostics,inference
         begin_cycle(self.store)
@@ -423,6 +461,7 @@ class AgentAdvisor:
                      'experiment_review':__import__('xauusd.agent_experiments',fromlist=['review']).review(self.store),
                      'engineering_release':{'release_id':__import__('xauusd.research_effectiveness',fromlist=['release_id']).release_id(self.store),'state':'verified' if __import__('xauusd.research_effectiveness',fromlist=['release_id']).release_id(self.store) else 'unverified'},
                      'engineering_snapshot':snapshot,'current_runtime':self.store.meta('status'),
+                     'research_recovery':__import__('xauusd.research_recovery',fromlist=['status']).status(self.store),
                      'instructions':'Choose your own evolving agenda. Ask tools for missing evidence; improve methods and the platform.'}
             context['research_diagnostics']['measurements']=context['research_diagnostics']['measurements'][-5:]
             context=compact_context(context)
@@ -467,5 +506,5 @@ class AgentAdvisor:
         state.update(phase='waiting',evidence_digest=digest,stagnation_cycles=0 if changed else state['stagnation_cycles']+1)
         self.store.meta('agent',state)
         if state['stagnation_cycles']>=3:
-            self.store.event('plan','No changed experimental evidence in three sessions; the advisor must change its approach.',{'stagnation_cycles':state['stagnation_cycles']})
+            self.store.event('plan','No changed experimental evidence; the advisor must change its experiment or implement a concrete repair.',{'stagnation_cycles':state['stagnation_cycles']})
         return {'summary':response['summary'],'candidates':candidates[:3],'data_requests':requests[:3],'memory':response['memory']}
