@@ -138,6 +138,8 @@ def rotate(transcript,now=None):
             removed['inference_samples']=len(samples)-len(inference['samples'])
             tx.put('lab:research_inference',inference)
     # Batch table operations use short transactions, independent of trade-loop cadence.
+    from .agent_conversation import ConversationStore
+    removed['conversation_entries']=ConversationStore(store).prune(now)
     removed['monitor_marks']=prune_monitor_records(store,now)
     jobs=_job_outputs(store,now,cutoff,refs)
     removed['transcript_steps']=_transcripts(store,cutoff,refs)

@@ -23,6 +23,13 @@ The engine halt, paper kill switches, demo host pins and account restrictions
 remain authoritative. See [the open-agent runbook](docs/operator-runbook-agent.md)
 and [strategy qualification](docs/operator-runbook-codex.md).
 
+The active Codex advisor runs with operator-authorized `--yolo` full service OS
+access. In **Research → Conversation & application prompts**, new application
+inputs, public replies and tool exchanges have short, expandable pages and explicit
+record downloads. Conversation storage rotates after seven days with a 20 MB /
+2,000-entry ceiling; unchanged instruction bodies deduplicate. Existing trading
+controls remain authoritative. See [permissions and visibility](docs/agent-conversation.md).
+
 ## Architecture
 
 ```text

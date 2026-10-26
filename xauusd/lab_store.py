@@ -51,12 +51,19 @@ class LabStore:
     def event(self, kind: str, summary: str, detail: dict | None = None):
         import json
         safe = self.filter.clean(detail or {})
+        if kind in ('instructions','input','assistant','commentary','tool','coding','tool_call','tool_result','compaction','session'):
+            from .agent_conversation import ConversationStore
+            record = ConversationStore(self).append(kind, {'summary': summary, 'detail': safe},
+                safe.get('session_id', ''), safe.get('turn_id', ''))
+            safe = {"conversation_id": record['id'], "digest": record['digest'],
+                    "preview": json.dumps(safe, ensure_ascii=False, allow_nan=False)[:2000],
+                    "session_id": record['session_id'], "turn_id": record['turn_id']}
         if len(json.dumps(safe, allow_nan=False)) > 8000:
             safe = {"output_omitted": True, "reason": "event_size_limit"}
         def add(current):
             current = current or {"next_id": 1, "events": []}
             row = {"id": current["next_id"], "time": timestamp(), "kind": kind[:80],
-                   "summary": self.filter.clean(summary[:2000]), "detail": safe}
+                   "summary": self.filter.clean(summary)[:1500], "detail": safe}
             return {"next_id": row["id"] + 1, "events": (current["events"] + [row])[-300:]}
         return self.update("events", add)["events"][-1]
 

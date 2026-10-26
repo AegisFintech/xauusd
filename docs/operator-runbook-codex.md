@@ -17,12 +17,16 @@ but no browser surface starts, stops or places trades.
 1. Freeze the most recent 100,000 closed M1 rows once. The 60% training window is
    purged by 256 bars; the next 20% is validation; the final 20% is protected and
    is never evaluated for candidate selection. The frozen content hash is checked.
-2. Give Codex only the training parquet, a bounded numeric sample, compact memory,
-   previous expression identities and public sources. Its tools cannot read the
-   live repository, credentials, protected partitions or application state. The
-   child profile grants training-workspace writes and runtime-library reads.
-   Auth stays in the Codex client transport, outside the tool sandbox. This does
-   not change the legacy Bits arbitrary-shell permission model.
+2. Supply the prepared training CSV/parquet, checked UTC schema, compact memory,
+   prior evidence and public sources. The advisor now runs `codex exec --yolo`
+   under the service OS permissions, with no Codex sandbox or approval prompts.
+   The former advisor filesystem/domain profile is removed from its launcher.
+   Broker secrets are not inherited in its environment, but full filesystem
+   access is **not credential isolation**. Instructions prohibit credential and
+   protected-partition access; deterministic validation and trading controls stay
+   authoritative. The explicit `analysis` and dependency tools retain their
+   separate sandbox profile. See [conversation visibility](agent-conversation.md).
+
 3. Codex can write research tools and behavioral tests. Sandbox pytest must pass,
    with network disabled, before immutable hash-addressed tools are reused. Such
    tests demonstrate software behavior, not profitability. Application changes may use the tested release path described in

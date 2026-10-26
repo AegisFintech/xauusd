@@ -68,7 +68,8 @@ def child_environment(workspace: Path) -> dict:
 def permission_arguments(workspace: Path) -> list[str]:
     """Deny reads outside the supplied training workspace and Python runtime.
 
-    These are child-Codex permissions only. The existing Bits shell capability
+    These are explicit analysis/dependency tool permissions only. The advisor
+    launcher uses operator-authorized --yolo and does not use this profile. The existing Bits shell capability
     and its user-authorized permission model are unchanged.
     """
     from .lab_sources import DEFAULT_DOMAINS
@@ -148,7 +149,7 @@ class CodexResearchClient:
 
     def command(self, workspace, prompt):
         command = [self.executable, "exec", "--ignore-user-config", "--skip-git-repo-check",
-                   *permission_arguments(workspace), "-c", 'approval_policy="never"',
+                   "--yolo", "-c", 'approval_policy="never"',
                    "--json", "--color", "never",
                    "--cd", str(workspace), "--output-schema", str(workspace / "proposal-schema.json"),
                    "--output-last-message", str(workspace / "proposal.json")]
@@ -192,6 +193,20 @@ class CodexResearchClient:
                   "Follow proposal-schema.json. Do not attempt broker calls, change the live repository, "
                   "read credentials, commit, or deploy: the harness validates and promotes programs.")
         prompt = "Current workspace: " + str(workspace) + ". Read its AGENTS.md and brief.json anew; current account and tool evidence override historical claims. " + prompt
+        from uuid import uuid4
+        turn_id = uuid4().hex
+        self.current_turn_id = turn_id
+        sink = emit
+        def emit(kind, summary, detail):
+            sink(kind, summary, {**detail, 'turn_id': turn_id,
+                                'session_id': getattr(self, 'thread_id', '')})
+        instructions = (workspace / "AGENTS.md").read_text()
+        emit("instructions", "Application instructions for this Codex turn", {"text": instructions})
+        emit("input", "Application prompt and current turn context", {
+            "prompt": prompt, "brief": brief, "response_schema": schema or PROPOSAL_SCHEMA,
+            "instructions_sha256": __import__('hashlib').sha256(instructions.encode()).hexdigest(),
+            "permissions": "yolo", "model": "gpt-6-luna", "reasoning_effort": "low",
+            "auto_compact_token_limit": 80000})
         command = self.command(workspace, prompt)
         process = subprocess.Popen(command, cwd=workspace, env=child_environment(workspace),
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
@@ -250,6 +265,7 @@ class CodexResearchClient:
             proposal = (validator or validate_proposal)(json.loads(path.read_text()))
             if self.filter.unsafe(json.dumps(proposal)):
                 raise ValueError("sensitive_proposal_withheld")
+            emit("assistant", "Codex returned its structured decision", {"response": proposal})
             return proposal
         finally:
             if process.poll() is None:
@@ -287,6 +303,7 @@ class CodexResearchClient:
             callback = getattr(self, "save_thread", None)
             if callback:
                 callback(thread)
+            emit("session", "Codex persistent session connected", {"session_id": thread})
         if event.get("type") in ("thread.compacted", "context.compacted"):
             emit("compaction", "Codex context compacted; durable evidence and account state retained.", {})
         item = event.get("item") or {}
@@ -301,14 +318,14 @@ class CodexResearchClient:
                     structured=isinstance(contract,dict) and set(PROPOSAL_SCHEMA['required']).issubset(contract)
                 except (ValueError,TypeError): structured=False
                 if text and not structured:
-                    emit("commentary", self.filter.clean(text[:2000]), {})
+                    emit("commentary", self.filter.clean(text)[:1500], {"text": self.filter.clean(text)})
         elif kind in ("command_execution", "file_change", "web_search", "mcp_tool_call"):
-            detail = {k: item[k] for k in ("command", "status", "exit_code", "query") if k in item}
+            detail = {k: item[k] for k in ("command", "status", "exit_code", "query", "arguments", "result", "content", "server", "tool") if k in item}
             if isinstance(item.get("aggregated_output"), str):
-                detail["output"] = self.filter.clean(item["aggregated_output"][:3000])
-                detail["output_truncated"] = len(item["aggregated_output"]) > 3000
+                detail["output"] = self.filter.clean(item["aggregated_output"])
+                detail["output_truncated"] = False
             if isinstance(item.get("changes"), list):
-                detail["changes"] = self.filter.clean(item["changes"][:10])
+                detail["changes"] = self.filter.clean(item["changes"])
             emit("coding" if kind == "file_change" else "tool", kind.replace("_", " "), self.filter.clean(detail))
 
 

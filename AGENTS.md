@@ -337,3 +337,25 @@ The read-only Statistics tab refreshes with the dashboard and consolidates retai
   real post-release samples only; tests/smokes do not prove live productivity.
 - Overview/Research show outcomes and blockers before activity. Preserve chat
   auto-follow and browser GET-only boundaries. See docs/research-completion-2026-10-26.md.
+
+## Full-access Codex and visible exchanges — 2026-10-26
+
+- The operator explicitly approved the active Codex advisor running `exec --yolo`
+  with full service OS permissions and no approval prompts. Keep persistent
+  sessions, Luna/low and native 80k auto-compaction. The standalone analysis and
+  dependency tools retain their own sandbox profile; do not pass --yolo to those.
+  Full filesystem access is not credential isolation. Existing demo-only gates,
+  protected data, operator-only actions and persistent stops remain authoritative.
+- Capture application instructions/input context, public replies, tool exchanges,
+  session connection and compaction events through `agent_conversation`. Filter
+  entire values before hashing or slicing; never capture private model reasoning.
+- Keep browser routes GET-only, with metadata lists and bounded, inert text pages.
+  UI previews: input/instructions 2k, assistant/commentary 1.5k, tools 3k characters.
+  Whole retained records are explicit plain-text attachment downloads.
+- Conversation bodies deduplicate by digest and rotate after seven UTC days or
+  2,000 entries / 20 MB unique content. Mark the two-million-character capture
+  ceiling. Prune on append and hourly maintenance; never mix this retention with
+  learning, unknown-job evidence, account state or idempotency records.
+- Historic full prompts were not captured; do not fabricate them or claim that
+  additional permissions have resolved unknown actions or research stagnation.
+  See docs/agent-conversation.md.
