@@ -364,3 +364,13 @@ Research recovery now bounds missing remote-job investigations to two recorded
 `not_found` checks. Investigated outcomes remain unknown and non-replayable;
 only dependent plans are parked, freeing independent research slots. Research
 shows actual stagnation cycles, pending checks and historical unknown counts.
+
+Research completion repair (2026-10-27): tool-call evidence now retains complete
+JSON up to 256 KiB instead of storing a 14,000-character fragment. Larger results
+fail explicitly and require a bounded artifact summary. Experiment reviews report
+success explicitly and expose compact account decision fields. Recent bottlenecks
+use the same 20-call window as metrics; recurring verified issues reopen planned
+repairs without erasing release history. Each advisor turn receives a durable
+research stage (interpret result, repair, or independent experiment). Full paper
+slots do not block independent research. These changes do not qualify a strategy
+or change any trading controls.

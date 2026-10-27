@@ -59,9 +59,17 @@ def review(store):
     observations=diagnostics(store)
     backlog=store.meta('improvements') or []
     for issue in observations['bottlenecks']:
-        name={'retrieval_overhead':'evidence_read_share','repeated_inspection':'tool_seconds'}.get(issue['id'])
+        name={'retrieval_overhead':'evidence_read_share','repeated_inspection':'tool_seconds','inference_failures':'inference_seconds'}.get(issue['id'])
         identifier='observed:'+issue['id']
-        if name and not any(r['id']==identifier for r in backlog):
+        existing=next((r for r in backlog if r['id']==identifier),None)
+        if name and existing and existing.get('state')=='verified':
+            # Historical release verification survives; recurrence creates fresh work.
+            def reopen(rows):
+                return [{**r,'state':'planned','recurrence':True,'previous_verified_release_id':r.get('release_id'),
+                         'problem':issue['problem'],'change':issue['next'],'updated_at':timestamp()}
+                        if r['id']==identifier else r for r in rows]
+            store.update('improvements',reopen,[])
+        if name and existing is None:
             from .agent_outcomes import improvement
             improvement(store,{'id':identifier,'problem':issue['problem'],'change':issue['next'],
                 'acceptance':'Observed improvement of at least 10% with ten samples per window; existing tests and controls unchanged.',
@@ -94,14 +102,19 @@ def review(store):
 
 def diagnostics(store):
     calls=[r for r in store.meta('agent_calls') or [] if r.get('state') in ('completed','unknown')]
-    counts=Counter(r.get('name') for r in calls)
+    recent=sorted(calls,key=lambda r:r.get('finished_at') or r.get('started_at') or '')[-20:]
+    counts=Counter(r.get('name') for r in recent)
     findings=store.meta('research_outcomes') or []
     recent_inference=store.meta('research_inference') or {}
     warnings=[]
-    if len(calls)>=10 and counts['evidence_read']/len(calls)>=.5:
+    samples=recent_inference.get('samples',[])[-20:]
+    if len(samples)>=10 and sum(not r['ok'] for r in samples)/len(samples)>=.2:
+        warnings.append({'id':'inference_failures','problem':'At least 20% of recent advisor turns failed.',
+                         'next':'Repair turn completion with a reproducible regression; preserve durable tool results and avoid replay.'})
+    if len(recent)>=10 and counts['evidence_read']/len(recent)>=.5:
         warnings.append({'id':'retrieval_overhead','problem':'At least half of retained calls retrieve evidence.',
                          'next':'Inspect result structure; build/test a targeted summary or batch tool, then measure evidence_read_share.'})
-    if len(calls)>=10 and counts['tc02_inspect']/len(calls)>=.2:
+    if len(recent)>=10 and counts['tc02_inspect']/len(recent)>=.2:
         warnings.append({'id':'repeated_inspection','problem':'Worker inspection is at least 20% of retained calls.',
                          'next':'Reuse recent capability evidence and measure tool_seconds.'})
     from .research_recovery import parked
@@ -117,4 +130,7 @@ def diagnostics(store):
             'calls':len(calls),'findings':len(findings),'unresolved':unknown,'historical_unknown':historical,
             'inference':{k:v for k,v in recent_inference.items() if k!='samples'},
             'metrics':{name:metric(store,name) for name in METRICS},'bottlenecks':warnings,
-            'measurements':store.meta('improvement_measurements') or []}
+            'measurements':store.meta('improvement_measurements') or [],
+            'current_regressions':[{'id':w['id'],'state':'recurring','historical_verification_preserved':True}
+                for w in warnings if any(r.get('id')=='observed:'+w['id'] and r.get('state')=='verified'
+                    for r in store.meta('improvements') or [])]}

@@ -87,6 +87,7 @@ def result_summary(store, identifier):
     return {'ok':True,'call_id':identifier,'state':row['state'],'execution_ok':result.get('ok') is True,
             'returncode':result.get('returncode'),'error_code':result.get('error_code'),
             'classification':'unvalidated_evidence_summary','metrics':metrics,
+            'decision_fields':decision_fields(data),
             'provenance':row.get('provenance',{}),'complete_evidence':False,
             'evidence_sha256':hashlib.sha256(json.dumps(result,sort_keys=True,allow_nan=False).encode()).hexdigest(),
             'retrieval':'evidence_read uses this exact call_id across workspaces; read raw pages only for missing details.'}
@@ -123,3 +124,15 @@ def workflow_status(store):
                             'next':'Prepare reproducible regression and concrete patch; escalate protected changes once. Do not bypass the boundary.'}
                            for r in store.meta('improvements') or [] if r.get('state')=='blocked'],
             'completion_policy':'At most two running plans, one working repair. Computation success is not a finding; software verification is not trading qualification.'}
+
+
+def decision_fields(data):
+    """Bounded typed decisions, without recopying fills or raw observation windows."""
+    if not isinstance(data,dict):return {}
+    fields={k:data[k] for k in ('ok','error_code','state','active','capacity','retired','recommendation') if k in data}
+    if isinstance(data.get('accounts'),list):
+        fields['accounts']=[{**{k:r.get(k) for k in ('id','name','state')},
+            'metrics':{k:(r.get('summary') or {}).get(k) for k in
+                       ('equity','day_pl','position','realized_pl','drawdown_pct','stopped','trades_today')}}
+                            for r in data['accounts'][:4]]
+    return fields

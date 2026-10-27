@@ -240,6 +240,10 @@ class CodexResearchClient:
                                 break
                     last_disk_check = time.monotonic()
                 if failure:
+                    emit('error', 'Codex turn stopped before a structured decision',
+                         {'error_code':failure,'elapsed_seconds':round(time.monotonic()-started,3),
+                          'timeout_seconds':self.timeout,'received_bytes':total,
+                          'recovery':'Retain completed server calls; never replay uncertain side effects. Repair turn completion before unrelated inspection.'})
                     os.killpg(process.pid, signal.SIGKILL)
                     break
                 for key, _ in selector.select(.25):

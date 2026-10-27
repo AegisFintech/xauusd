@@ -82,7 +82,7 @@ def retire(store, arguments):
 def review(store):
     rows = store.meta('experiments') or []
     archive = store.meta('experiment_archive') or []
-    return {'active': len(rows), 'capacity': 4, 'retired': len(archive),
+    return {'ok': True, 'active': len(rows), 'capacity': 4, 'retired': len(archive),
             'accounts': [{'id': r['id'], 'name': r['name'], 'state': r.get('state', 'running'),
                           'summary': r.get('summary'), 'last_verdict': r.get('last_verdict')} for r in rows],
             'archived': [{'id': r['id'], 'name': r['name'], 'summary': r.get('summary'),

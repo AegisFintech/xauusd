@@ -371,3 +371,16 @@ At stagnation, identical read-only research requests are limited to two per evid
 revision. Dashboard recovery counts distinguish pending investigations and historical
 unknowns; stagnation shows actual completed cycles. Never reset evidence counters or
 clear trading controls to hide a warning.
+
+## Evidence completion repair — 2026-10-27
+
+Keep full tool-call JSON up to 256 KiB; never store a fragment as retrievable
+complete evidence. Oversize outcomes explicitly require bounded artifact summaries;
+preserve uncertain-side-effect classification and never retry them. Experiment
+reviews return explicit success and bounded account decision fields. Research
+bottlenecks use the latest 20 calls, and recurrent verified bottlenecks reopen
+planned repair while retaining their prior release identity. The durable
+`research_execution` stage selects completed-result interpretation, measured
+repair or independent experimentation each turn. Paper slot capacity does not
+block independent computation, discovery or engineering. Protected repairs require
+one concrete escalation and independent work can continue; no control bypass.

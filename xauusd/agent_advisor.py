@@ -116,7 +116,7 @@ Use research_lookup before repeating a hypothesis. Supply experiment metadata: f
 dataset_version, actual code_sha256, parameters, costs, numeric metrics (undefined=null),
 failure_reason, parent_id (prior finding or null). Describe what changed from the parent.
 These are advisor-reported measurements, not independent validation or permission to trade.
-Use experiment_review each cycle; retire weak or sparse accounts with a reason and replace
+Use the supplied compact experiment_review; call the tool only for missing current fields; retire weak or sparse accounts with a reason and replace
 freed slots with distinct hypotheses. Retiring exposure waits for normal gates; never force it.
 Use improvement_review and the supplied diagnostics to identify measured bottlenecks.
 Use improvement_record for defects with concrete acceptance criteria; optional metric
@@ -164,6 +164,11 @@ qualified-account trades. Submit causal candidates promptly when supported.
 Efficient operation: choose one measurable task per turn. Prefer existing tools and
 short reusable commands over writing bespoke runners. Return concise numeric summaries
 including sample size, cost stress and failure reasons; keep raw data in workspace files.
+Paper experiment capacity never blocks independent backtesting, source research or software repair.
+research_execution is the authoritative next-stage directive. Follow its repair or experiment
+completion stage before unrelated inspection. Return one concrete action promptly; do not
+spend a turn exploring project/ or rereading unchanged instructions. Native shell is available
+for concrete implementation, not repeated discovery of the harness tool API.
 Large tool results appear as previews with evidence_ref: use evidence_read to retrieve
 needed pages, never treat an omitted section as observed or rerun an uncertain action.
 Use tool IDs and findings as durable references. Do not repeat the catalog, long prior
@@ -214,7 +219,8 @@ def compact_context(context):
             result = row.get('result') or {}
             results.append({**{k: v for k, v in row.items() if k != 'result'},
                 'result': {**summary({k: result[k] for k in ('ok', 'state', 'error_code', 'returncode', 'job_id', 'uncertain') if k in result}),
-                           'preview': encoded[:500], 'preview_only': True, **({'evidence_summary':row['evidence_summary']} if row.get('evidence_summary') else {})},
+                           'preview': encoded[:500], 'preview_only': True,
+                           'decision_fields':__import__('xauusd.research_workflow',fromlist=['decision_fields']).decision_fields(result), **({'evidence_summary':row['evidence_summary']} if row.get('evidence_summary') else {})},
                 'evidence_ref': row['id'], 'evidence_chars': len(encoded),
                 'retrieval': 'evidence_read with call_id, offset and limit; do not rerun the action.'})
     value['tool_results'] = results
@@ -290,7 +296,7 @@ class AgentAdvisor:
                 return self.execute({**call,'name':'action_reconcile','arguments_json':json.dumps({'call_id':target['id']})},workspace)
         # Read-only repetition is bounded per evidence revision once research stalls.
         if (self.state().get('stagnation_cycles',0)>=3 and call['name'] in
-                ('tc02_inspect','research_program','improvement_review','research_lookup','result_summary','evidence_read')):
+                ('tc02_inspect','research_program','improvement_review','research_lookup','result_summary','evidence_read','experiment_review')):
             epoch=self.state().get('evidence_digest')
             repeats=sum(r.get('fingerprint')==fingerprint and r.get('progress_epoch')==epoch for r in calls)
             if repeats>=2:
@@ -346,6 +352,10 @@ class AgentAdvisor:
                     from .research_workflow import resolve_call
                     source=resolve_call(self.store,arguments.get('call_id'))
                     if source is None: result={'ok':False,'error_code':'evidence_not_retained'}
+                    elif source.get('name')=='evidence_read':
+                        result={'ok':False,'error_code':'nested_evidence_page',
+                                'canonical_call_id':(source.get('result') or {}).get('call_id'),
+                                'next':'Read the original result with its original offset; never paginate an evidence page.'}
                     else:
                         content=json.dumps(source.get('result', {}),allow_nan=False,sort_keys=True)
                         end=min(offset+limit,len(content))
@@ -405,8 +415,11 @@ class AgentAdvisor:
             if captured:result={**result,'source_records':captured}
             full_result=result
             encoded=json.dumps(result,allow_nan=False)
-            if len(encoded)>16000:
-                result={'ok':bool(result.get('ok')),'output':encoded[:14000],'truncated':True}
+            if len(encoded)>262144:
+                result={'ok':False,'error_code':'tool_result_retention_limit',
+                        'original_characters':len(encoded),'complete_evidence':False,
+                        'uncertain':result.get('uncertain') is True or 'uncertain' in str(result.get('error_code','')) or str(result.get('error_code','')).endswith('_no_retry'),
+                        'next':'Produce a bounded structured artifact summary; do not replay uncertain side effects.'}
             side_effect=call['name'] in ('tc02_run','analysis','dependency_install','engineering_deploy')
             uncertain = side_effect and (result.get('uncertain') is True or 'uncertain' in str(result.get('error_code','')) or str(result.get('error_code','')).endswith('_no_retry'))
             row.update(state='unknown' if uncertain else 'completed',result=result,finished_at=timestamp())
@@ -458,6 +471,7 @@ class AgentAdvisor:
                      'compute_policy':{'preferred_backtest_worker':'tc02','local_role':'live monitoring, orchestration and lightweight smoke checks'},
                      'tools':catalog,'tool_results':results[-8:],'experiments':self.store.meta('experiments') or [],
                      'research_outcomes':(self.store.meta('research_outcomes') or [])[-10:],'improvements':self.store.meta('improvements') or [],
+                     'research_execution':__import__('xauusd.research_execution',fromlist=['directive']).directive(self.store),
                      'experiment_review':__import__('xauusd.agent_experiments',fromlist=['review']).review(self.store),
                      'engineering_release':{'release_id':__import__('xauusd.research_effectiveness',fromlist=['release_id']).release_id(self.store),'state':'verified' if __import__('xauusd.research_effectiveness',fromlist=['release_id']).release_id(self.store) else 'unverified'},
                      'engineering_snapshot':snapshot,'current_runtime':self.store.meta('status'),
