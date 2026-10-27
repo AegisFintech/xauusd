@@ -87,6 +87,8 @@ def result_summary(store, identifier):
     return {'ok':True,'call_id':identifier,'state':row['state'],'execution_ok':result.get('ok') is True,
             'returncode':result.get('returncode'),'error_code':result.get('error_code'),
             'classification':'unvalidated_evidence_summary','metrics':metrics,
+            'raw_evidence_complete':row['state']=='completed' and not any(result.get(k) for k in ('truncated','output_truncated')),
+            'summary_policy':'Use explicit decision fields and metrics when sufficient for the question; omitted unrelated raw fields do not require paging.',
             'decision_fields':decision_fields(data),
             'provenance':row.get('provenance',{}),'complete_evidence':False,
             'evidence_sha256':hashlib.sha256(json.dumps(result,sort_keys=True,allow_nan=False).encode()).hexdigest(),
@@ -111,7 +113,7 @@ def workflow_status(store):
                       'Reproduce once, test a bounded fix, then create a linked replacement plan; preserve the original outcome.'}
               for p in plans if p['state']=='blocked']
     pending=[{'plan_id':p['id'],'call_id':v['call_id'],'state':p['state']}
-             for p in plans if not p.get('finding_ids')
+             for p in plans if p['state']=='running' and not p.get('finding_ids')
              for v in p.get('variants',{}).values() if v.get('state')=='completed' and v.get('ok') is True]
     counts=Counter(p['state'] for p in plans)
     return {'scope':'retained_research_records','counts':dict(counts),'blockers':blockers,

@@ -388,3 +388,14 @@ one concrete escalation and independent work can continue; no control bypass.
 Use SSH compression for tc02 artifact uploads. Retain safe size/time/timeout/exit
 transport measurements; never raw SSH diagnostics or credentials. Transport
 failures remain unknown and cannot be replayed, including after enabling compression.
+
+Advisor turns should choose one concrete stage action or a small completion batch.
+Do not prompt generic project inspection every turn. Use actual returned results
+for `research_record`, then close the plan; native shell is for concrete work,
+not repeated discovery of the JSON tool contract. Preserve persistent sessions.
+
+Only running plans with successful completed variants await interpretation; blocked
+historical plans never preempt a current result. Include that result's metrics,
+provenance and plan identity directly in the stage directive. Carry four recent
+tool results, older durable references and compact plan identities in the brief;
+retain full records in the authoritative store, never silently invent omissions.

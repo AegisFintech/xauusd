@@ -110,3 +110,22 @@ def test_tc02_upload_compression_and_transport_diagnostics_never_retry(tmp_path,
     assert len(sent)==1 and 'Compression=yes' in sent[0]
     assert result['error_code']=='remote_outcome_uncertain_no_retry'
     assert result['transport']['upload_bytes']==60000 and result['transport']['timed_out']
+
+
+def test_advisor_prompt_prioritizes_result_completion_over_generic_discovery(tmp_path):
+    import sys
+    from xauusd.lab_codex import CodexResearchClient
+    client=CodexResearchClient(sys.executable)
+    client._run=lambda *a:a[6]
+    prompt=client.run_turn(tmp_path,{},lambda *a:None)
+    assert 'ONE concrete next action' in prompt
+    assert 'return research_record' in prompt
+    assert 'Inspect project/ and the actual tool results' not in prompt
+
+
+def test_blocked_historical_plan_cannot_preempt_current_completed_result(tmp_path):
+    from xauusd.research_execution import directive
+    store,_=setup(tmp_path)
+    store.meta('research_plans',[{'id':'old','family':'old','state':'blocked','reason':'missing hash','variants':{'v':{'state':'completed','ok':True,'call_id':'old:c'}},'finding_ids':[]},
+                                 {'id':'new','family':'new','state':'running','variants':{'v':{'state':'completed','ok':True,'call_id':'new:c'}},'finding_ids':[]}])
+    assert directive(store)['target']['call_id']=='new:c'

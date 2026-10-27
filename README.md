@@ -380,3 +380,12 @@ time and timeout/exit status without retaining transport output. A transport
 failure remains uncertain and is never retried automatically. The operator's
 2026-10-27 full-training smoke timed out before a remote job record was found;
 compression targets that transfer overhead without changing job identities.
+
+Advisor prompts prioritize one concrete stage action, interpreting completed results
+before general discovery. Project inspection is requested only for a specific
+repair; the JSON tool contract is stated explicitly to avoid shell-based API discovery.
+
+Current result interpretation now receives exact-call metrics/provenance and plan
+identity directly. Historical blocked plans cannot preempt it. Context keeps four
+recent tool results plus explicit older references and compact plan identities;
+full immutable records remain available from the state store.

@@ -223,7 +223,14 @@ def compact_context(context):
                            'decision_fields':__import__('xauusd.research_workflow',fromlist=['decision_fields']).decision_fields(result), **({'evidence_summary':row['evidence_summary']} if row.get('evidence_summary') else {})},
                 'evidence_ref': row['id'], 'evidence_chars': len(encoded),
                 'retrieval': 'evidence_read with call_id, offset and limit; do not rerun the action.'})
-    value['tool_results'] = results
+    # Carry full recent pages, with explicit durable references for older results.
+    value['older_tool_result_refs']=[{k:r.get(k) for k in ('id','name','state')} for r in results[:-4]]
+    value['tool_results'] = results[-4:]
+    program=value.get('research_program')
+    if isinstance(program,dict) and isinstance(program.get('plans'),list):
+        value['research_program']={**program,'plans':[{k:p.get(k) for k in
+            ('id','topic','family','state','question','finding_ids')} for p in program['plans']],
+            'plan_details':'research_program kind=plan id retrieves the immutable full record when needed.'}
     return value
 
 

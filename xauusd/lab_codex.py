@@ -166,11 +166,17 @@ class CodexResearchClient:
 
     def run_turn(self, workspace: Path, brief: dict, emit, stop=None) -> dict:
         from .agent_advisor import TURN_SCHEMA, ADVISOR_RULES, validate_turn
-        prompt = ('Read AGENTS.md and brief.json. Act as the persistent core advisor, '
-                  'choose the most useful next research or engineering work, and use tools. '
-                  'Inspect project/ and the actual tool results. Return the strict turn schema; '
-                  'tool_calls are executed by the harness and their results return next turn. '
-                  'Emit public progress commentary. Do not claim success without evidence.')
+        prompt = ('Read current AGENTS.md and brief.json once. Use research_execution and current '
+                  'tool_results to choose ONE concrete next action, or a small dependent completion batch. '
+                  'When a completed result is awaiting a finding, interpret it and return research_record; '
+                  'then close its plan. For a measured defect, prepare a bounded regression and repair. '
+                  'If a protected repair is blocked, record one escalation and pursue independent research. '
+                  'Return the strict turn schema promptly: tool_calls are JSON proposals executed by the '
+                  'harness after this reply, not native tools to rediscover with shell commands. '
+                  'Inspect project/ only when a specific code repair requires it. Do not recursively read '
+                  'old evidence pages or refresh complete account reviews. A summary is sufficient when its '
+                  'explicit fields answer the question; complete_evidence=false alone does not require all raw pages. Full paper slots do not block '
+                  'independent research. Emit concise public progress; never claim unobserved success.')
         return self._run(workspace, brief, emit, stop, TURN_SCHEMA, ADVISOR_RULES, prompt, validate_turn)
 
     def run(self, workspace: Path, brief: dict, emit, stop=None) -> dict:

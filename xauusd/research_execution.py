@@ -1,6 +1,6 @@
 """Deterministic research stage selection; no trading or recovery authority."""
 from .research_effectiveness import diagnostics
-from .research_workflow import workflow_status
+from .research_workflow import workflow_status, result_summary
 
 
 def directive(store):
@@ -17,6 +17,10 @@ def directive(store):
          'next':'Interpret the exact completed call and record its finding.' if pending else
                 'Reproduce this defect, prepare one bounded patch and regression, check and deploy through existing engineering tools.' if issues else
                 'Preregister one independent hypothesis and execute it on supplied training data; use tc02 for heavy computation.'}
+    if pending:
+        row['result']=result_summary(store,target['call_id'])
+        plan=next((p for p in store.meta('research_plans') or [] if p['id']==target['plan_id']),{})
+        row['plan']={k:plan.get(k) for k in ('id','family','dataset_version','hypothesis','costs','success_criteria')}
     # Durable stage, refreshed from current evidence; never resets progress or clears controls.
     store.meta('research_execution',row)
     return row
