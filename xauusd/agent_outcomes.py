@@ -7,7 +7,7 @@ from .lab_store import serialized, timestamp
 
 
 @serialized
-def record(store, arguments):
+def record(store, arguments, *, recorded_by=None):
     required = {'hypothesis', 'verdict', 'conclusion', 'call_id'}
     if not required <= set(arguments) or set(arguments) - required - {'experiment'}:
         return {'ok': False, 'error_code': 'invalid_outcome'}
@@ -53,6 +53,8 @@ def record(store, arguments):
         return {'ok': True, 'id': prior['id'], 'replayed': True}
     evidence = call['result']
     row = {**arguments, 'id': hashlib.sha256(arguments['call_id'].encode()).hexdigest()[:24],
+           'origin':call.get('origin','legacy_unknown'),'recorded_by':(recorded_by or {}).get('origin','operator'),
+           'recorded_cycle_id':(recorded_by or {}).get('cycle_id'),
            'recorded_at': timestamp(), 'classification': 'advisor_conclusion_unvalidated',
            'evidence_sha256': hashlib.sha256(json.dumps(evidence, sort_keys=True, allow_nan=False).encode()).hexdigest(),
            'evidence': evidence, 'experiment_identity': identity}
@@ -92,6 +94,9 @@ def progress_signature(store):
     release = store.meta('engineering') or {}
     data = {'insights':[r['id'] for r in store.meta('research_insights') or []], 'outcomes': [r['id'] for r in store.meta('research_outcomes') or []],
             'retired': [r['id'] for r in store.meta('experiment_archive') or []],
+            'paper_reviews':sorted({hashlib.sha256(json.dumps(v['metrics'],sort_keys=True,allow_nan=False).encode()).hexdigest()
+                for r in (store.meta('experiments') or [])+(store.meta('experiment_archive') or [])
+                for v in (r.get('learning') or {}).get('reviews',[])}),
             'release': release.get('release_id') if release.get('state') == 'verified' else None}
     return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
 

@@ -403,3 +403,26 @@ retain full records in the authoritative store, never silently invent omissions.
 Embed the bounded current-stage metrics in the advisor's actual prompt as data.
 Do not conflate unvalidated trading significance with missing measured fields;
 read the larger brief only for details needed by the current decision.
+
+## Measurable learning loop — 2026-10-27
+
+`experiment_learning` observes accepted non-replayed paper fills only. It never
+changes accounts, executable prices, risk or stops. Midpoint gross/net attribution
+requires retained entry quotes; legacy open entries remain unmatched. Keep bounded
+aggregates, best-two sensitivity and at most twelve reviews per account. Schedule
+reviews every seven observed UTC days, with thirty closed fills as a descriptive
+threshold, not qualification. `experiment_review_record` requires the current
+learning digest and records a continue/retire recommendation; actual retirement
+still uses `experiment_retire` and unchanged gates.
+
+The paired `research_runner.py train.csv --compare comparison.json` requires one
+frozen rule change and preserves identical data/cost assumptions. It is training
+research, never account performance, significance, protected holdout access or
+promotion authority. Upload the config so pre-dispatch provenance captures it.
+
+Production constructs `AgentAdvisor(origin='autonomous')`; other callers default
+to operator. Server-assigned call and finding provenance and bounded cycle records
+feed `learning_audit`. Autonomous findings require autonomous evidence AND
+interpretation. Preserve legacy unknown provenance; never credit operator-driven
+verification as unattended learning. The read-only scorecards separate software,
+research and trading outcomes. See docs/learning-loop-plan-2026-10-27.md.

@@ -51,9 +51,31 @@ def run(rows, lookback, hold, mode):
             'remove_best_two':metrics(sorted(values)[:-2]),'gap_windows_skipped':skipped}
 
 
+
+def compare(rows, config):
+    """Frozen one-change comparison on the exact same training rows and fixed costs."""
+    if not isinstance(config,dict) or set(config)!={'baseline','challenger','reason'} or not isinstance(config['reason'],str) or not 1<=len(config['reason'])<=1000:
+        raise ValueError('invalid_comparison')
+    for rule in (config['baseline'],config['challenger']):
+        if not isinstance(rule,dict) or set(rule)!={'lookback','hold','mode'} or any(type(rule[k]) is not int for k in ('lookback','hold')):
+            raise ValueError('invalid_comparison_rule')
+    changed=[k for k in config['baseline'] if config['baseline'][k]!=config['challenger'][k]]
+    if len(changed)!=1:raise ValueError('one_preregistered_change_required')
+    reports={name:run(rows,**config[name]) for name in ('baseline','challenger')}
+    b,c=reports['baseline'],reports['challenger']
+    return {'schema':'xauusd.paired-training/1','classification':'unvalidated_training_only',
+            'rows':len(rows),'changed_fields':changed,'config':config,
+            'config_sha256':hashlib.sha256(json.dumps(config,sort_keys=True,allow_nan=False).encode()).hexdigest(),
+            'costs_per_roundtrip':b['costs_per_roundtrip'],'reports':reports,
+            'delta':{k:c[k]-b[k] for k in ('gross','base_net','stress_net','trades')},
+            'thirds_stress_delta':[v['stress_net']-u['stress_net'] for u,v in zip(b['thirds'],c['thirds'])],
+            'limitations':'Same source rows, fixed one-ounce sizing and cost model; strategy-dependent eligibility and holding time may differ. No statistical significance, account/risk simulation, protected validation, holdout or deployment qualification.',
+            'promotion_allowed':False}
+
 if __name__ == '__main__':
     path=Path(sys.argv[1]); content=path.read_bytes()
     rows=list(csv.DictReader(content.decode().splitlines()))
-    result=run(rows,int(sys.argv[2]),int(sys.argv[3]),sys.argv[4])
+    result=compare(rows,json.loads(Path(sys.argv[3]).read_text())) if sys.argv[2]=='--compare' else run(rows,int(sys.argv[2]),int(sys.argv[3]),sys.argv[4])
+    result['runner_sha256']=hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
     result['data_sha256']=hashlib.sha256(content).hexdigest()
     print(json.dumps(result,allow_nan=False))

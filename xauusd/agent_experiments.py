@@ -40,10 +40,15 @@ def tick(store, config, bars, now, quote, quantity=.1):
         account_store=ShadowStore(row['account']);account=PaperTrading(account_store,config)
         mark=(quote['bid']+quote['ask'])/2
         account.monitor(mark,bar,now)
+        from .experiment_learning import initialize, observe_fill
+        initialize(row,account.state(),now)
         if row['last_bar']!=bar.isoformat():
             decision=target_decision({**row, 'expression': '0'} if row.get('state')=='retiring' else row,closed,account.state(),now,quote,quantity)
             if decision:
+                before=dict(account.state())
                 result=account.evaluate(decision,now)
+                if result.get('accepted') and not result.get('replayed'):
+                    observe_fill(row,before,decision,quote,now)
                 store.event('experimental_trade','Experimental paper proposal evaluated.',{'id':row['id'],'accepted':result.get('accepted',False),'side':decision.side,'reasons':[result.get('reason','unknown')]})
                 row['last_verdict']={'accepted':result.get('accepted',False),'reasons':[result.get('reason','unknown')],'recorded_at':now.isoformat()}
             row['last_bar']=bar.isoformat()
@@ -80,10 +85,11 @@ def retire(store, arguments):
 
 
 def review(store):
+    from .experiment_learning import assessment
     rows = store.meta('experiments') or []
     archive = store.meta('experiment_archive') or []
     return {'ok': True, 'active': len(rows), 'capacity': 4, 'retired': len(archive),
             'accounts': [{'id': r['id'], 'name': r['name'], 'state': r.get('state', 'running'),
-                          'summary': r.get('summary'), 'last_verdict': r.get('last_verdict')} for r in rows],
+                          'summary': r.get('summary'), 'last_verdict': r.get('last_verdict'), 'learning':assessment(r)} for r in rows],
             'archived': [{'id': r['id'], 'name': r['name'], 'summary': r.get('summary'),
                           'reason': r.get('retirement_reason')} for r in archive]}

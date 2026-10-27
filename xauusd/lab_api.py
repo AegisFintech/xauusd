@@ -161,7 +161,7 @@ def snapshot(transcript, paper) -> dict:
         alerts.append("Engineering release recovery needs attention.")
     from .research_program import context as program_context
     from .research_effectiveness import diagnostics
-    return {"research_recovery": recovery, "research_program": program_context(store) if hasattr(transcript, "connect") else {},
+    return {"learning": __import__("xauusd.learning_audit",fromlist=["scorecard"]).scorecard(store) if hasattr(transcript,"connect") else {}, "research_recovery": recovery, "research_program": program_context(store) if hasattr(transcript, "connect") else {},
             "research_diagnostics": diagnostics(store) if hasattr(transcript, "connect") else {},
             "research_alerts": research_alerts, "operational_alerts": [a for a in alerts if a not in research_alerts],
             "statistics": retained_statistics(store) if hasattr(transcript, "connect") else {}, "status": status, "alerts": alerts, "account": account, "active": active, "candidates": candidates[:40],

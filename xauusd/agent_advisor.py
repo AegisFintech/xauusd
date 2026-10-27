@@ -14,6 +14,7 @@ from uuid import uuid4
 
 from .lab_codex import PROPOSAL_SCHEMA, validate_proposal
 from .lab_store import timestamp
+from .learning_audit import tracked_cycle
 
 TURN_SCHEMA = deepcopy(PROPOSAL_SCHEMA)
 TURN_SCHEMA['properties'].update({
@@ -118,6 +119,14 @@ failure_reason, parent_id (prior finding or null). Describe what changed from th
 These are advisor-reported measurements, not independent validation or permission to trade.
 Use the supplied compact experiment_review; call the tool only for missing current fields; retire weak or sparse accounts with a reason and replace
 freed slots with distinct hypotheses. Retiring exposure waits for normal gates; never force it.
+Paper learning is prospective: review learning.diagnosis and costs, never invent historical attribution.
+When a review is due, record experiment_review_record with its evidence_digest, decision and reason;
+retire only through experiment_retire and unchanged gates. Insufficient samples need longer observation.
+Compare one preregistered change against a baseline on identical training data and costs using
+research_runner.py train.csv --compare comparison.json. Upload that config with the runner so
+its hash is retained. This is diagnostic evidence, never account returns or qualification.
+Use source_search/source_fetch to answer a specific failure explanation, not generic trading tips.
+Software verification and operator-driven checks do not prove autonomous strategy improvement.
 Use improvement_review and the supplied diagnostics to identify measured bottlenecks.
 Use improvement_record for defects with concrete acceptance criteria; optional metric
 is tool_failure_rate, evidence_read_share, tool_seconds or inference_seconds. This
@@ -195,7 +204,7 @@ def compact_context(context):
         return {k: v for k, v in (row or {}).items() if not isinstance(v, (dict, list))}
     def experiment(row):
         return {k: (summary(v) if k == 'summary' else v) for k, v in row.items()
-                if k in ('id', 'name', 'state', 'expression', 'summary', 'last_verdict', 'reason')}
+                if k in ('id', 'name', 'state', 'expression', 'summary', 'last_verdict', 'reason', 'learning')}
     if 'experiments' in value:
         value['experiments'] = [experiment(r) for r in value['experiments']]
     if 'experiment_review' in value:
@@ -235,7 +244,9 @@ def compact_context(context):
 
 
 class AgentAdvisor:
-    def __init__(self, store, client, project_root, tools=None, engineering=None, max_turns=4):
+    def __init__(self, store, client, project_root, tools=None, engineering=None, max_turns=4, origin='operator'):
+        if origin not in ('operator','autonomous'):raise ValueError('invalid_cycle_origin')
+        self.origin=origin;self.cycle_id=None
         self.store,self.client,self.root=store,client,Path(project_root)
         self.tools,self.engineering=tools,engineering
         self.max_turns=max(1,min(8,max_turns))
@@ -320,7 +331,8 @@ class AgentAdvisor:
             return row
         arguments=reservation['arguments']
         row={'id':cid,'name':call['name'],'fingerprint':fingerprint,'state':'running','started_at':timestamp(),
-             'progress_epoch':self.state().get('evidence_digest'),'release_id':release_id(self.store), **{k:reservation[k] for k in ('plan_id','variant_id') if k in reservation}}
+             'progress_epoch':self.state().get('evidence_digest'),'release_id':release_id(self.store),
+             'origin':self.origin,'cycle_id':self.cycle_id, **{k:reservation[k] for k in ('plan_id','variant_id') if k in reservation}}
         if call['name']=='tc02_run': row['remote_job_id']=hashlib.sha256(cid.encode()).hexdigest()[:32]
         if call['name'] in ('analysis','tc02_run'):
             from .research_workflow import provenance
@@ -403,7 +415,10 @@ class AgentAdvisor:
                         synchronize(self.store)
             elif call['name'] in ('research_record','improvement_record'):
                 from .agent_outcomes import record, improvement
-                result=(record if call['name']=='research_record' else improvement)(self.store,arguments)
+                result=record(self.store,arguments,recorded_by={'origin':self.origin,'cycle_id':self.cycle_id}) if call['name']=='research_record' else improvement(self.store,arguments)
+            elif call['name']=='experiment_review_record':
+                from .experiment_learning import record_review
+                result=record_review(self.store,arguments)
             elif call['name'] in ('experiment_retire','experiment_review'):
                 from .agent_experiments import retire, review
                 result=retire(self.store,arguments) if call['name']=='experiment_retire' else review(self.store)
@@ -443,6 +458,7 @@ class AgentAdvisor:
             state=self.state();state['compute']=row['result'];state['compute_observed_at']=row.get('finished_at');self.store.meta('agent',state)
         return row
 
+    @tracked_cycle
     def run(self,workspace,brief,stop):
         workspace=Path(workspace);workspace.mkdir(parents=True,exist_ok=True)
         catalog=self.tools.catalog() if self.tools else []
@@ -455,6 +471,7 @@ class AgentAdvisor:
             {'name':'result_summary','description':'Compact deterministic numeric result and artifact/code hashes: exact call_id from any workspace. Read this before paging raw evidence. Does not run work or validate claims.'},
             {'name':'evidence_read','description':'Read retained tool result without re-execution: call_id, offset (default 0), limit (1..4000). Follow next_offset until null; evidence_not_retained means unavailable, never invent it.'},
             {'name':'experiment_retire','description':'Retire by id and reason. Flat accounts archive immediately; open accounts wait for normal gated flattening. Never bypasses stops or limits.'},
+            {'name':'experiment_review_record','description':'Record review without trading: id, evidence_digest from experiment_review learning, decision continue|retire, reason. Retire still needs experiment_retire; no automatic promotion.'},
             {'name':'experiment_review','description':'Read all active and retired account outcomes. No arguments.'},
             {'name':'research_lookup','description':'Read up to ten retained finding summaries by optional family or id. Use before repeating an experiment.'},
             {'name':'research_record','description':'Record one completed finding: hypothesis, verdict (reject/investigate/retain), conclusion, call_id of successful analysis/tc02_run. Evidence is retained; does not qualify a strategy. Optional experiment object: family, dataset_version, code_sha256, parameters, costs, metrics (finite numbers or null), failure_reason, parent_id (finding ID or null). Equivalent family/dataset/code/parameters/costs deduplicates.'},
@@ -478,6 +495,7 @@ class AgentAdvisor:
                      'compute_policy':{'preferred_backtest_worker':'tc02','local_role':'live monitoring, orchestration and lightweight smoke checks'},
                      'tools':catalog,'tool_results':results[-8:],'experiments':self.store.meta('experiments') or [],
                      'research_outcomes':(self.store.meta('research_outcomes') or [])[-10:],'improvements':self.store.meta('improvements') or [],
+                     'learning_scorecard':__import__('xauusd.learning_audit',fromlist=['scorecard']).scorecard(self.store),
                      'research_execution':__import__('xauusd.research_execution',fromlist=['directive']).directive(self.store),
                      'experiment_review':__import__('xauusd.agent_experiments',fromlist=['review']).review(self.store),
                      'engineering_release':{'release_id':__import__('xauusd.research_effectiveness',fromlist=['release_id']).release_id(self.store),'state':'verified' if __import__('xauusd.research_effectiveness',fromlist=['release_id']).release_id(self.store) else 'unverified'},

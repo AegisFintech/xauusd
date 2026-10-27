@@ -298,7 +298,7 @@ class ResearchHarness:
             from .agent_engineering import EngineeringManager
             advisor = AgentAdvisor(self.store, self.client, Path.cwd(),
                                    AgentTools(self.store, workspace, Path.cwd()),
-                                   EngineeringManager(Path.cwd(), self.store))
+                                   EngineeringManager(Path.cwd(), self.store),origin='autonomous')
             brief.update(account=self.paper.summary(),
                          risk_limits=__import__('dataclasses').asdict(self.paper.config),
                          objective={"aspirational_daily_net_return_pct":100,"capital_planning_ceiling":2000000,

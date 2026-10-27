@@ -393,3 +393,14 @@ full immutable records remain available from the state store.
 The current stage and its explicit server metrics are also embedded in the actual
 Codex prompt, avoiding dependence on partial shell reads of a large brief. An
 unvalidated research summary does not imply that its measured fields are absent.
+
+### Measurable learning loop — 2026-10-27
+
+See [the implementation checklist](docs/learning-loop-plan-2026-10-27.md).
+Experimental paper accounts collect bounded prospective midpoint/net/cost
+attribution and receive seven-day evidence-linked reviews. Legacy entry quotes
+are never reconstructed. A paired training runner compares one frozen change on
+the same data/costs with data, config and code hashes. Operator/autonomous call,
+finding and cycle provenance feeds separate software/research/trading scorecards
+in Research and Statistics. Historical provenance stays unknown; operator checks
+and software releases do not establish autonomous strategy discovery or profit.
