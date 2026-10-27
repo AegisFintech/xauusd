@@ -389,3 +389,7 @@ Current result interpretation now receives exact-call metrics/provenance and pla
 identity directly. Historical blocked plans cannot preempt it. Context keeps four
 recent tool results plus explicit older references and compact plan identities;
 full immutable records remain available from the state store.
+
+The current stage and its explicit server metrics are also embedded in the actual
+Codex prompt, avoiding dependence on partial shell reads of a large brief. An
+unvalidated research summary does not imply that its measured fields are absent.

@@ -399,3 +399,7 @@ historical plans never preempt a current result. Include that result's metrics,
 provenance and plan identity directly in the stage directive. Carry four recent
 tool results, older durable references and compact plan identities in the brief;
 retain full records in the authoritative store, never silently invent omissions.
+
+Embed the bounded current-stage metrics in the advisor's actual prompt as data.
+Do not conflate unvalidated trading significance with missing measured fields;
+read the larger brief only for details needed by the current decision.

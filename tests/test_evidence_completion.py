@@ -129,3 +129,11 @@ def test_blocked_historical_plan_cannot_preempt_current_completed_result(tmp_pat
     store.meta('research_plans',[{'id':'old','family':'old','state':'blocked','reason':'missing hash','variants':{'v':{'state':'completed','ok':True,'call_id':'old:c'}},'finding_ids':[]},
                                  {'id':'new','family':'new','state':'running','variants':{'v':{'state':'completed','ok':True,'call_id':'new:c'}},'finding_ids':[]}])
     assert directive(store)['target']['call_id']=='new:c'
+
+
+def test_current_stage_metrics_are_in_the_actual_prompt(tmp_path):
+    import sys
+    from xauusd.lab_codex import CodexResearchClient
+    client=CodexResearchClient(sys.executable);client._run=lambda *a:a[6]
+    prompt=client.run_turn(tmp_path,{'research_execution':{'stage':'interpret_result','result':{'metrics':{'rows':1000}}}},lambda *a:None)
+    assert '"rows": 1000' in prompt and '"interpret_result"' in prompt
