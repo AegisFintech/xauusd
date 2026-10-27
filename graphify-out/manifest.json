@@ -522,15 +522,15 @@
     "semantic_hash": ""
   },
   "AGENTS.md": {
-    "mtime": 1793065099.568586,
-    "seen": 1793065141.8083162,
-    "ast_hash": "fd1f1ecdbcacaa0d741e69375e8c8deb",
+    "mtime": 1793065424.7450726,
+    "seen": 1793065489.4550653,
+    "ast_hash": "c7def84c0fc03f6a37ed34cfaa3e8ef1",
     "semantic_hash": ""
   },
   "README.md": {
-    "mtime": 1793065099.568586,
-    "seen": 1793065141.808317,
-    "ast_hash": "9e658b61bed1b6733caf3980f4ad5b6d",
+    "mtime": 1793065424.7450726,
+    "seen": 1793065489.4550667,
+    "ast_hash": "225d6bb7c4aa7e624a3d5749bc181d42",
     "semantic_hash": ""
   },
   "docker-compose.yml": {
@@ -1002,9 +1002,9 @@
     "semantic_hash": ""
   },
   "xauusd/agent_tools.py": {
-    "mtime": 1793064927.2843318,
-    "seen": 1793065141.8082204,
-    "ast_hash": "8a989ff2c0a6bcad5613b1b7379bda41",
+    "mtime": 1793065424.7370725,
+    "seen": 1793065489.4549675,
+    "ast_hash": "c680ecb219abae626dae6acdaa342062",
     "semantic_hash": ""
   },
   "xauusd/lab.py": {
@@ -1266,9 +1266,9 @@
     "semantic_hash": ""
   },
   "tests/test_evidence_completion.py": {
-    "mtime": 1793065175.3246932,
-    "seen": 1793065255.5999162,
-    "ast_hash": "d591771f2fce5254fec333c57e97be6a",
+    "mtime": 1793065424.7450726,
+    "seen": 1793065489.4548965,
+    "ast_hash": "6789d557407cbe65a83c11a30ed9b9da",
     "semantic_hash": ""
   },
   "xauusd/research_execution.py": {

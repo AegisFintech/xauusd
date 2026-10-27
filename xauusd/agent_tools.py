@@ -374,9 +374,12 @@ class AgentTools:
         for name in retrieve: self._relative(name)
         job_id=hashlib.sha256(self.action_id.encode()).hexdigest()[:32]
         payload=json.dumps({'job_id':job_id,'command':command,'timeout':timeout,'files':files,'retrieve':retrieve}).encode()
-        result=bounded_process(['ssh','-o','BatchMode=yes','-o','ConnectTimeout=10','tc02','python3 -c '+shlex.quote(REMOTE)],
+        started=time.monotonic()
+        result=bounded_process(['ssh','-o','Compression=yes','-o','BatchMode=yes','-o','ConnectTimeout=10','tc02','python3 -c '+shlex.quote(REMOTE)],
                                timeout=timeout+20,input_data=payload,env=self._ssh_env())
-        if result['returncode'] or result['timed_out']: return {'ok':False,'error_code':'remote_outcome_uncertain_no_retry','job_id':job_id}
+        transport={'upload_bytes':total,'payload_bytes':len(payload),'seconds':round(time.monotonic()-started,3),
+                   'timed_out':result['timed_out'],'returncode':result['returncode'],'compression':True}
+        if result['returncode'] or result['timed_out']: return {'ok':False,'error_code':'remote_outcome_uncertain_no_retry','job_id':job_id,'transport':transport}
         remote=json.loads(result['output']); retrieved={}
         from .atomic import atomic_write_bytes
         for name,data in remote.pop('files',{}).items():
@@ -384,7 +387,7 @@ class AgentTools:
             if any(p.is_symlink() for p in [target,*target.parents]): raise ValueError('unsafe_artifact_path')
             target.parent.mkdir(parents=True,exist_ok=True); decoded=base64.b64decode(data)
             atomic_write_bytes(target,decoded); retrieved[name]={'bytes':len(decoded),'sha256':hashlib.sha256(decoded).hexdigest()}
-        return {'ok':remote['returncode']==0,**remote,'job_id':job_id,'retrieved':retrieved}
+        return {'ok':remote['returncode']==0,**remote,'job_id':job_id,'retrieved':retrieved,'transport':transport}
 
     def _tc02_job_status(self,a):
         job_id=a.get('job_id','')

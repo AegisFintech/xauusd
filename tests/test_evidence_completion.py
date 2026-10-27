@@ -95,3 +95,18 @@ def test_pagination_does_not_recursively_page_other_pages(tmp_path):
     nested=invoke(a,tmp_path,3,'evidence_read',{'call_id':page['id']})['result']
     assert nested['error_code']=='nested_evidence_page'
     assert nested['canonical_call_id']==original['id']
+
+
+def test_tc02_upload_compression_and_transport_diagnostics_never_retry(tmp_path,monkeypatch):
+    from xauusd.agent_tools import AgentTools
+    import xauusd.agent_tools as module
+    store,_=setup(tmp_path);sent=[]
+    (tmp_path/'train.csv').write_bytes(b'1,2,3\n'*10000)
+    def transport(argv,**kwargs):
+        sent.append(argv)
+        return {'returncode':255,'timed_out':True}
+    monkeypatch.setattr(module,'bounded_process',transport)
+    result=AgentTools(store,tmp_path).execute('tc02_run',{'command':'true','upload':['train.csv']})
+    assert len(sent)==1 and 'Compression=yes' in sent[0]
+    assert result['error_code']=='remote_outcome_uncertain_no_retry'
+    assert result['transport']['upload_bytes']==60000 and result['transport']['timed_out']

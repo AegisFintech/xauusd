@@ -384,3 +384,7 @@ planned repair while retaining their prior release identity. The durable
 repair or independent experimentation each turn. Paper slot capacity does not
 block independent computation, discovery or engineering. Protected repairs require
 one concrete escalation and independent work can continue; no control bypass.
+
+Use SSH compression for tc02 artifact uploads. Retain safe size/time/timeout/exit
+transport measurements; never raw SSH diagnostics or credentials. Transport
+failures remain unknown and cannot be replayed, including after enabling compression.

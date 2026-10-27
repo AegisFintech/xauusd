@@ -374,3 +374,9 @@ repairs without erasing release history. Each advisor turn receives a durable
 research stage (interpret result, repair, or independent experiment). Full paper
 slots do not block independent research. These changes do not qualify a strategy
 or change any trading controls.
+
+The tc02 upload uses SSH compression and reports payload size, elapsed transport
+time and timeout/exit status without retaining transport output. A transport
+failure remains uncertain and is never retried automatically. The operator's
+2026-10-27 full-training smoke timed out before a remote job record was found;
+compression targets that transfer overhead without changing job identities.
