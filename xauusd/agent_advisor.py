@@ -491,8 +491,7 @@ class AgentAdvisor:
             {'name':'experiment_start','arguments':{'name':'short experiment name','expression':'causal strategy expression'},'description':'Start an independent $1000 experimental paper account at fresh live quotes. Up to four; fixed risk gates; unvalidated results never promote automatically. Use to test distinct hypotheses proactively.'}, {'name':'engineering_check','arguments':{},'description':'Check edited project snapshot against protected controls and current live hashes.'},
                     {'name':'engineering_deploy','arguments':{},'description':'Run isolated full tests and automatically install project changes with rollback and restart verification.'},
                     {'name':'action_reconcile','description':'Inspect uncertain action by call_id, at most two missing checks. Parked actions require evidence_call_id referencing new matching completed job-status evidence. Never replay.'}]
-        from .research_program import PLAN_INPUT_SCHEMA,begin_cycle,context as program_context
-        next(t for t in catalog if t['name']=='research_plan')['input_schema']=deepcopy(PLAN_INPUT_SCHEMA)
+        from .research_program import plan_input_schema,begin_cycle,context as program_context
         from .research_effectiveness import review as review_improvements,diagnostics,inference
         begin_cycle(self.store)
         review_improvements(self.store)
@@ -503,6 +502,7 @@ class AgentAdvisor:
             if stop.is_set() or time.monotonic()>deadline: break
             from .agent_daily import roll_daily_goal
             daily=roll_daily_goal(self.store)
+            next(t for t in catalog if t['name']=='research_plan')['input_schema']=plan_input_schema(self.store)
             context={**brief,'research_program':program_context(self.store,compact=True),'research_diagnostics':diagnostics(self.store),'memory':self.store.memory(),'agent':self.state(),'daily':daily,
                      'compute_evidence':{'observed_at':self.state().get('compute_observed_at'),'result':self.state().get('compute')},
                      'compute_policy':{'preferred_backtest_worker':'tc02','local_role':'live monitoring, orchestration and lightweight smoke checks'},

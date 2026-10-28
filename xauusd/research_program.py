@@ -35,6 +35,21 @@ PLAN_INPUT_SCHEMA = {
 PLAN_INPUT_SCHEMA['required'] = sorted(PLAN_INPUT_SCHEMA['properties'])
 
 
+def dataset_version_hint(store):
+    dataset=store.meta('dataset')
+    if not isinstance(dataset,dict): return None
+    version=dataset.get('version')
+    return version if isinstance(version,str) and re.fullmatch(r'[a-f0-9]{64}',version) else None
+
+
+def plan_input_schema(store):
+    schema=deepcopy(PLAN_INPUT_SCHEMA)
+    version=dataset_version_hint(store)
+    if version is not None:
+        schema['properties']['dataset_version']['const']=version
+    return schema
+
+
 def digest(value):
     return hashlib.sha256(json.dumps(value,sort_keys=True,allow_nan=False).encode()).hexdigest()
 
@@ -141,9 +156,14 @@ def create_plan(store, args):
     costs=args['costs']
     if not isinstance(costs,dict) or not costs or len(costs)>20 or any(not text(k,80) or not finite(v) or v<0 for k,v in costs.items()):
         return {'ok':False,'error_code':'finite_costs_required'}
-    dataset=store.meta('dataset') or {}
+    dataset=store.meta('dataset')
+    if dataset is None: dataset={}
+    if not isinstance(dataset,dict): return {'ok':False,'error_code':'dataset_metadata_invalid'}
     if dataset.get('version') and args['dataset_version']!=dataset['version']:
-        return {'ok':False,'error_code':'current_training_dataset_required'}
+        result={'ok':False,'error_code':'current_training_dataset_required'}
+        version=dataset_version_hint(store)
+        if version is not None: result['expected_dataset_version']=version
+        return result
     sources=store.meta('research_sources') or []
     ids=args['source_ids']
     if not isinstance(ids,list) or len(ids)>5 or any(not isinstance(i,str) for i in ids):

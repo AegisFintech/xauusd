@@ -8,7 +8,9 @@ Research-tool contracts now constrain Codex replies to advertised callable names
 publish the exact thirteen-field plan schema with safe correction diagnostics.
 This prerequisite supports selective research integration into the scalping bot;
 it does not establish successful autonomous learning. See
-[verification and scope](docs/research-tool-contract-2026-10-28.md).
+[verification and scope](docs/research-tool-contract-2026-10-28.md). Current frozen
+dataset plan guidance is documented in
+[dataset guidance](docs/research-dataset-guidance-2026-10-28.md).
 
 The primary local dashboard is an interactive, read-only trading command centre
 at `http://127.0.0.1:8100/`; the previous transcript view remains at `/legacy`.
