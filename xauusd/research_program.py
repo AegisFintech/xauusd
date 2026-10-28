@@ -298,13 +298,14 @@ def context(store, compact=False):
     choices=[k for k in TOPICS if k not in repeated] or list(TOPICS)
     topic=min(choices,key=lambda k:(counts[k]['plans'],counts[k]['findings'],list(TOPICS).index(k)))
     sources=store.meta('research_sources') or []
-    awaiting=[p for p in plans if p['state']=='running' and not p['finding_ids'] and
-              any(v.get('state')=='completed' and v.get('ok') is True for v in p['variants'].values())]
+    from .research_workflow import pending_results
+    awaiting=pending_results(plans,True);failed=pending_results(plans,False)
     open_plans=[p for p in plans if p['state']=='planned']
     stagnation=(store.meta('agent') or {}).get('stagnation_cycles',0)
     action='source_search_then_retrieve'
     target=None
-    if awaiting:action='interpret_and_record_result';target=awaiting[0]['id']
+    if awaiting:action='interpret_and_record_result';target=awaiting[0]['plan_id']
+    elif failed:action='inspect_non_success_result';target=failed[0]['plan_id']
     elif open_plans and stagnation<3:action='execute_preregistered_variant';target=open_plans[0]['id']
     elif program.get('cycles',0)%4==0 and store.meta('improvements'):
         action='review_measured_bottlenecks'

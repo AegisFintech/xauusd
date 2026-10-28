@@ -412,3 +412,5 @@ the same data/costs with data, config and code hashes. Operator/autonomous call,
 finding and cycle provenance feeds separate software/research/trading scorecards
 in Research and Statistics. Historical provenance stays unknown; operator checks
 and software releases do not establish autonomous strategy discovery or profit.
+
+[Research result guidance](docs/research-failed-result-guidance-2026-10-28.md) distinguishes supported findings from non-success and unknown outcomes.

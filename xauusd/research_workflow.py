@@ -84,7 +84,9 @@ def result_summary(store, identifier):
         for k in ('thirds','costs_per_roundtrip','remove_best_two','metrics'):
             value=data.get(k)
             if value is not None and len(json.dumps(value,allow_nan=False))<=1800:metrics[k]=value
-    return {'ok':True,'call_id':identifier,'state':row['state'],'execution_ok':result.get('ok') is True,
+    status=('UNKNOWN' if row['state']!='completed' else 'SUCCEEDED' if result.get('ok') is True
+            else 'REPORTED_FAILURE' if result.get('ok') is False else 'UNKNOWN')
+    return {'ok':True,'call_id':identifier,'state':row['state'],'execution_ok':status=='SUCCEEDED','execution_status':status,
             'returncode':result.get('returncode'),'error_code':result.get('error_code'),
             'classification':'unvalidated_evidence_summary','metrics':metrics,
             'raw_evidence_complete':row['state']=='completed' and not any(result.get(k) for k in ('truncated','output_truncated')),
@@ -104,6 +106,19 @@ def blocker_category(plan):
     return 'experiment_implementation'
 
 
+def pending_results(plans, success):
+    rows=[]
+    for p in plans:
+        variants=p.get('variants',{})
+        if p.get('state')!='running' or p.get('finding_ids'):continue
+        if not success and (any(v.get('state') in ('reserved','running','unknown') for v in variants.values()) or
+                            any(v.get('state')=='completed' and v.get('ok') is True for v in variants.values())):continue
+        rows.extend({'plan_id':p['id'],'call_id':v['call_id'],'state':p['state']}
+                    for v in variants.values() if v.get('state')=='completed' and
+                    (v.get('ok') is True if success else v.get('ok') is not True))
+    return rows
+
+
 def workflow_status(store):
     plans=store.meta('research_plans') or []
     blockers=[{'id':p['id'],'family':p['family'],'category':blocker_category(p),
@@ -112,16 +127,15 @@ def workflow_status(store):
                       'Use result_summary with exact call_id and retained artifact hashes; never re-execute unknown work.' if blocker_category(p)=='evidence_provenance' else
                       'Reproduce once, test a bounded fix, then create a linked replacement plan; preserve the original outcome.'}
               for p in plans if p['state']=='blocked']
-    pending=[{'plan_id':p['id'],'call_id':v['call_id'],'state':p['state']}
-             for p in plans if p['state']=='running' and not p.get('finding_ids')
-             for v in p.get('variants',{}).values() if v.get('state')=='completed' and v.get('ok') is True]
+    pending=pending_results(plans,True)
+    failed=pending_results(plans,False)
     counts=Counter(p['state'] for p in plans)
     return {'scope':'retained_research_records','counts':dict(counts),'blockers':blockers,
             'blocker_categories':dict(Counter(r['category'] for r in blockers)),
             'training_schema':store.meta('training_schema'),
             'operator_release':{k:v for k,v in (store.meta('research_operator_release') or {}).items() if k in ('state','release_id','recorded_at')},
-            'awaiting_findings':pending,'active_experiment_limit':2,'working_improvement_limit':1,
-            'next_action':'interpret_completed_result' if pending else 'repair_shared_blocker' if any(b['category']=='data_schema' for b in blockers) else 'execute_independent_experiment',
+            'awaiting_findings':pending,'awaiting_non_success_results':failed,'active_experiment_limit':2,'working_improvement_limit':1,
+            'next_action':'interpret_completed_result' if pending else 'inspect_non_success_result' if failed else 'repair_shared_blocker' if any(b['category']=='data_schema' for b in blockers) else 'execute_independent_experiment',
             'escalations':[{'id':r['id'],'problem':r['problem'],'change':r['change'],'acceptance':r['acceptance'],
                             'next':'Prepare reproducible regression and concrete patch; escalate protected changes once. Do not bypass the boundary.'}
                            for r in store.meta('improvements') or [] if r.get('state')=='blocked'],

@@ -121,10 +121,11 @@ research_insight -> testable question. Capture contradictory evidence too. Searc
 leads are not retrieved evidence; retrieval time never proves historical availability.
 Before analysis/tc02_run, create an immutable research_plan; attach returned plan_id
 and a fresh variant_id to compute arguments. Reserve only declared variants. Read
-results and research_record them, then research_plan_close. An unresolved variant
+successful results and research_record them, then research_plan_close. An unresolved variant
 must be inspected, never retried. Block a plan honestly if its data cannot be used
 point-in-time, and pursue another topic instead of endlessly searching the same gap.
-Each completed experiment must end with research_record referencing its actual server call_id.
+Each successfully completed experiment must end with research_record referencing its actual server call_id.
+For a terminal non-success call, inspect the exact retained result; block its plan only with a supported reason instead of inventing a finding. Preserve uncertainty and never replay an unknown variant.
 Use research_lookup before repeating a hypothesis. Supply experiment metadata: family,
 dataset_version, actual code_sha256, parameters, costs, numeric metrics (undefined=null),
 failure_reason, parent_id (prior finding or null). Describe what changed from the parent.

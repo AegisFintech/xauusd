@@ -1,5 +1,9 @@
 # Repository Operating Rules
 
+Completed research calls require explicit success before being presented as findings.
+Non-success and missing evidence require honest inspection; unresolved variants never
+replay or authorize plan completion. See `docs/research-failed-result-guidance-2026-10-28.md`.
+
 ## Purpose
 
 This repository develops an XAUUSD research, paper-trading, and cTrader demo-account automation system. It is not approved for real-money execution.
