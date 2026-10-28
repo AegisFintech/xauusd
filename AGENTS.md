@@ -26,6 +26,13 @@ This repository develops an XAUUSD research, paper-trading, and cTrader demo-acc
 - Persist run state and idempotency keys before any broker-side request. Reconcile account and order state after every restart.
 - Keep Firecrawl retrieval scoped to configured domains and retain source URL, retrieval time, and content digest.
 
+## Research plan dataset guidance
+
+- The plan catalog may expose only the current frozen dataset's validated SHA256
+  version. Refresh this hint each advisor turn. Never substitute a model-proposed
+  version, mutate the frozen manifest, or accept stale/malformed metadata to make
+  a plan succeed. See `docs/research-dataset-guidance-2026-10-28.md`.
+
 ## Engineering
 
 - Keep `.venv/`, `__pycache__/`, and Python bytecode untracked. Build virtual environments locally; never commit host-specific environment symlinks.

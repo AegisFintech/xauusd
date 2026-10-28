@@ -81,3 +81,77 @@ def test_invalid_topic_is_a_safe_shape_error(tmp_path, topic):
     bad = plan(); bad['topic'] = topic
     assert rp.create_plan(store, bad)['error_code'] == 'invalid_plan_shape'
     assert not store.meta('research_plans')
+
+
+def test_advisor_exposes_only_current_frozen_dataset_as_plan_hint(tmp_path):
+    from xauusd.agent_advisor import AgentAdvisor
+    from xauusd.research_program import PLAN_INPUT_SCHEMA
+    store, _ = setup(tmp_path)
+    version = 'a' * 64
+    store.meta('dataset', {'version': version})
+
+    class Client:
+        def run_turn(self, workspace, context, emit, stop):
+            schema = next(t for t in context['tools'] if t['name'] == 'research_plan')['input_schema']
+            assert schema['properties']['dataset_version']['const'] == version
+            assert 'const' not in PLAN_INPUT_SCHEMA['properties']['dataset_version']
+            return turn()
+
+    AgentAdvisor(store, Client(), tmp_path).run(tmp_path/'work', {}, threading.Event())
+
+
+def test_stale_dataset_error_exposes_only_valid_current_digest_without_rewriting_plan(tmp_path):
+    from xauusd import research_program as rp
+    store, _ = setup(tmp_path)
+    version = 'b' * 64
+    store.meta('dataset', {'version': version})
+    stale = plan()
+    response = rp.create_plan(store, stale)
+    assert response == {'ok': False, 'error_code': 'current_training_dataset_required', 'expected_dataset_version': version}
+    assert stale['dataset_version'] == 'v1' and not store.meta('research_plans')
+    assert rp.create_plan(store, {**stale, 'dataset_version': version})['ok']
+
+
+def test_malformed_dataset_metadata_is_never_echoed(tmp_path):
+    from xauusd import research_program as rp
+    store, _ = setup(tmp_path)
+    store.meta('dataset', {'version': 'private-invalid-value'})
+    response = rp.create_plan(store, plan())
+    assert response == {'ok': False, 'error_code': 'current_training_dataset_required'}
+    assert 'const' not in rp.plan_input_schema(store)['properties']['dataset_version']
+    assert 'private-invalid-value' not in json.dumps(response)
+
+
+def test_catalog_refreshes_when_frozen_dataset_changes_between_turns(tmp_path):
+    from xauusd.agent_advisor import AgentAdvisor
+    store, _ = setup(tmp_path)
+    first, second = 'a' * 64, 'b' * 64
+    store.meta('dataset', {'version': first})
+
+    class Client:
+        calls = 0
+        def run_turn(self, workspace, context, emit, stop):
+            self.calls += 1
+            schema = next(t for t in context['tools'] if t['name'] == 'research_plan')['input_schema']
+            if self.calls == 1:
+                assert schema['properties']['dataset_version']['const'] == first
+                store.meta('dataset', {'version': second})
+                args = {**plan(), 'dataset_version': first}
+                return turn([{'id': 'stale', 'name': 'research_plan', 'arguments_json': json.dumps(args)}], True)
+            assert schema['properties']['dataset_version']['const'] == second
+            assert context['tool_results'][-1]['result']['expected_dataset_version'] == second
+            return turn()
+
+    client = Client()
+    AgentAdvisor(store, client, tmp_path).run(tmp_path/'work', {}, threading.Event())
+    assert client.calls == 2 and not store.meta('research_plans')
+
+
+@pytest.mark.parametrize('invalid', [['corrupt'], [], 0, 'invalid'])
+def test_invalid_manifest_shape_has_no_hint_and_fails_closed(tmp_path, invalid):
+    from xauusd import research_program as rp
+    store, _ = setup(tmp_path)
+    store.meta('dataset', invalid)
+    assert 'const' not in rp.plan_input_schema(store)['properties']['dataset_version']
+    assert rp.create_plan(store, plan()) == {'ok': False, 'error_code': 'dataset_metadata_invalid'}
+    assert not store.meta('research_plans')
