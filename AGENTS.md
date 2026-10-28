@@ -426,3 +426,15 @@ feed `learning_audit`. Autonomous findings require autonomous evidence AND
 interpretation. Preserve legacy unknown provenance; never credit operator-driven
 verification as unattended learning. The read-only scorecards separate software,
 research and trading outcomes. See docs/learning-loop-plan-2026-10-27.md.
+
+
+## Research tool contracts — 2026-10-28
+
+The actual Codex turn schema and validator derive callable names from tools[].name.
+research_execution, research_recovery and tool_results are brief data, never tools.
+PLAN_INPUT_SCHEMA owns research_plan's thirteen required fields and is included in
+the advisor context. Preserve semantic validation, immutable identity and budgets;
+shape diagnostics expose known missing fields/counts, never supplied private data.
+Only retained successful computation may support a model interpretation; await a
+successful finding receipt before plan close. Tests and operator deployment do not
+prove autonomous learning. See docs/research-tool-contract-2026-10-28.md.
