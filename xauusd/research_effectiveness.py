@@ -123,9 +123,13 @@ def diagnostics(store):
     if unknown:warnings.append({'id':'unknown_results','problem':str(unknown)+' unresolved outcomes remain.',
                                'next':'Retrieve known job status once; absent remote evidence stays unknown and must not replay.'})
     plans=store.meta('research_plans') or []
-    missing=sum(p['state']=='running' and any(v['state']=='completed' and not p['finding_ids'] for v in p['variants'].values()) for p in plans)
-    if missing:warnings.append({'id':'unrecorded_results','problem':str(missing)+' running plans have results but no finding.',
+    from .research_workflow import pending_results
+    missing=len({r['plan_id'] for r in pending_results(plans,True)})
+    if missing:warnings.append({'id':'unrecorded_results','problem':str(missing)+' running plans have successful results but no finding.',
                                'next':'Read results and record a supported conclusion before launching another variation.'})
+    failed=len({r['plan_id'] for r in pending_results(plans,False)})
+    if failed:warnings.append({'id':'non_success_results','problem':str(failed)+' running plans have terminal results not confirmed successful and no finding.',
+                               'next':'Inspect the exact retained result; preserve uncertainty and do not invent a finding or replay unknown work.'})
     return {'scope':'bounded_retained_samples','recorded_at':timestamp(),
             'calls':len(calls),'findings':len(findings),'unresolved':unknown,'historical_unknown':historical,
             'inference':{k:v for k,v in recent_inference.items() if k!='samples'},

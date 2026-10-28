@@ -142,3 +142,104 @@ def test_completed_plan_legacy_evidence_is_backfilled_only_by_exact_id(tmp_path)
     from xauusd.research_workflow import resolve_call
     assert resolve_call(store,'old:call')['result']['ok']
     assert resolve_call(store,'other:old:call') is None
+
+
+def test_failed_terminal_variant_is_not_a_finding_and_gets_recovery_guidance(tmp_path):
+    from xauusd.research_effectiveness import diagnostics
+    from xauusd.research_execution import directive
+    from xauusd.research_workflow import workflow_status
+    store,_=setup(tmp_path);rp.ensure(store)
+    identifier=rp.create_plan(store,plan())['id']
+    rp.reserve(store,'analysis',{'plan_id':identifier,'variant_id':'v','command':'true'},'failed:call')
+    rp.finish_call(store,{'id':'failed:call','name':'analysis','plan_id':identifier,'variant_id':'v',
+                         'state':'completed','result':{'ok':False,'error_code':'fixture_failure'}})
+    before=store.meta('research_plans')
+    warnings=[row['id'] for row in diagnostics(store)['bottlenecks']]
+    assert 'unrecorded_results' not in warnings
+    assert 'non_success_results' in warnings
+    status=workflow_status(store)
+    assert status['awaiting_findings']==[]
+    assert status['awaiting_non_success_results']==[{'plan_id':identifier,'call_id':'failed:call','state':'running'}]
+    guidance=directive(store)
+    assert guidance['stage']=='inspect_non_success_result'
+    assert guidance['target']['call_id']=='failed:call'
+    assert guidance['result']['ok'] is True
+    assert guidance['result']['execution_status']=='REPORTED_FAILURE'
+    assert rp.context(store)['recommendation']['action']=='inspect_non_success_result'
+    assert store.meta('research_plans')==before
+
+
+
+def test_successful_result_has_priority_over_non_success(tmp_path):
+    from xauusd.research_execution import directive
+    store,_=setup(tmp_path);rp.ensure(store)
+    first=rp.create_plan(store,plan())['id']
+    args=plan();args['family']='other';second=rp.create_plan(store,args)['id']
+    for identifier,call,ok in [(first,'failed:call',False),(second,'success:call',True)]:
+        assert rp.reserve(store,'analysis',{'plan_id':identifier,'variant_id':'v','command':'true'},call)['ok']
+        rp.finish_call(store,{'id':call,'name':'analysis','plan_id':identifier,'variant_id':'v',
+                             'state':'completed','result':{'ok':ok,'output':'{"net":-4}' if ok else ''}})
+    guidance=directive(store)
+    assert guidance['stage']=='interpret_result' and guidance['target']['call_id']=='success:call'
+    assert guidance['result']['execution_status']=='SUCCEEDED'
+    assert guidance['result']['metrics']['net']==-4
+
+
+def test_unresolved_variant_is_not_misclassified_or_closed(tmp_path):
+    from xauusd.research_workflow import workflow_status, result_summary
+    store,_=setup(tmp_path);rp.ensure(store)
+    identifier=rp.create_plan(store,plan())['id']
+    rp.reserve(store,'analysis',{'plan_id':identifier,'variant_id':'v','command':'true'},'unknown:call')
+    rp.finish_call(store,{'id':'unknown:call','name':'analysis','plan_id':identifier,'variant_id':'v',
+                         'state':'unknown','result':{'ok':True}})
+    status=workflow_status(store)
+    assert status['awaiting_findings']==[] and status['awaiting_non_success_results']==[]
+    summary=result_summary(store,'unknown:call')
+    assert summary['execution_status']=='UNKNOWN' and summary['execution_ok'] is False
+    assert rp.close_plan(store,{'id':identifier,'state':'blocked','reason':'unknown'})['error_code']=='plan_has_unresolved_variants'
+    assert rp.reserve(store,'analysis',{'plan_id':identifier,'variant_id':'v','command':'true'},'retry')['error_code']=='plan_variant_already_reserved'
+
+
+def test_missing_success_flag_stays_unknown(tmp_path):
+    from xauusd.research_execution import directive
+    store,_=setup(tmp_path);rp.ensure(store)
+    identifier=rp.create_plan(store,plan())['id']
+    rp.reserve(store,'analysis',{'plan_id':identifier,'variant_id':'v','command':'true'},'ambiguous:call')
+    rp.finish_call(store,{'id':'ambiguous:call','name':'analysis','plan_id':identifier,'variant_id':'v',
+                         'state':'completed','result':{'returncode':0}})
+    guidance=directive(store)
+    assert guidance['stage']=='inspect_non_success_result'
+    assert guidance['result']['execution_status']=='UNKNOWN'
+    assert not store.meta('research_plans')[0]['finding_ids']
+
+
+
+def test_legacy_missing_outcome_and_evidence_stay_unknown(tmp_path):
+    from xauusd.research_execution import directive
+    store,_=setup(tmp_path);rp.ensure(store)
+    identifier=rp.create_plan(store,plan())['id']
+    rp.reserve(store,'analysis',{'plan_id':identifier,'variant_id':'v','command':'true'},'missing:call')
+    rp.finish_call(store,{'id':'missing:call','name':'analysis','plan_id':identifier,'variant_id':'v',
+                         'state':'completed','result':{'ok':False}})
+    plans=store.meta('research_plans');variant=plans[0]['variants']['v']
+    del variant['ok'];del variant['evidence'];store.meta('research_plans',plans)
+    guidance=directive(store)
+    assert guidance['stage']=='inspect_non_success_result'
+    assert guidance['result']=={'ok':False,'error_code':'evidence_not_retained'}
+    assert store.meta('research_plans')[0]['state']=='running'
+
+
+def test_non_success_waits_when_peer_variant_is_unresolved(tmp_path):
+    from xauusd.research_effectiveness import diagnostics
+    from xauusd.research_workflow import workflow_status
+    store,_=setup(tmp_path);rp.ensure(store)
+    identifier=rp.create_plan(store,plan())['id']
+    for variant in ('failed','unknown'):
+        assert rp.reserve(store,'analysis',{'plan_id':identifier,'variant_id':variant,'command':'true'},variant)['ok']
+    rp.finish_call(store,{'id':'failed','name':'analysis','plan_id':identifier,'variant_id':'failed',
+                         'state':'completed','result':{'ok':False}})
+    rp.finish_call(store,{'id':'unknown','name':'analysis','plan_id':identifier,'variant_id':'unknown',
+                         'state':'unknown','result':{'ok':False}})
+    assert workflow_status(store)['awaiting_non_success_results']==[]
+    assert 'non_success_results' not in [row['id'] for row in diagnostics(store)['bottlenecks']]
+    assert rp.close_plan(store,{'id':identifier,'state':'blocked','reason':'unresolved'})['error_code']=='plan_has_unresolved_variants'

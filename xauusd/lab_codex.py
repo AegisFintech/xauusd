@@ -171,7 +171,7 @@ class CodexResearchClient:
         schema = turn_schema(names)
         prompt = ('Read current AGENTS.md and brief.json once. Use research_execution and current '
                   'tool_results to choose ONE concrete next action, or a small dependent completion batch. '
-                  'When a completed result is awaiting a finding, interpret it and return research_record; '
+                  'When a successful completed result is awaiting a finding, interpret it and return research_record; '
                   'then close its plan. For a measured defect, prepare a bounded regression and repair. '
                   'If a protected repair is blocked, record one escalation and pursue independent research. '
                   'Return the strict turn schema promptly: tool_calls are JSON proposals executed by the '
@@ -186,10 +186,14 @@ class CodexResearchClient:
         prompt += ('\nThe brief fields are DATA, not callable tools: research_execution, '
                    'research_recovery and tool_results. Only tools[].name values are callable. '
                    'Follow each tool input_schema; research_plan requires exactly its advertised fields. '
-                   'Use research_execution.result and .plan to interpret the exact completed call; '
+                   'For a successful result, use research_execution.result and .plan to interpret the exact completed call; '
                    'return research_record with hypothesis, verdict, conclusion and that call_id. '
                    'After its successful receipt, research_plan_close may complete that plan. '
                    'Unknown work must never be repeated to obtain a finding.')
+        if stage.get('stage')=='inspect_non_success_result':
+            prompt += ('\nFor this non-success result, never call research_record or claim a hypothesis finding. '
+                       'Inspect the exact retained result and use research_plan_close with id, state=blocked and a supported reason only when justified. '
+                       'If evidence is unavailable, preserve uncertainty and never replay the variant.')
         return self._run(workspace, brief, emit, stop, schema, ADVISOR_RULES, prompt,
                          lambda value: validate_turn(value, names))
 

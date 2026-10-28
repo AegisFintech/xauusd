@@ -137,3 +137,16 @@ def test_current_stage_metrics_are_in_the_actual_prompt(tmp_path):
     client=CodexResearchClient(sys.executable);client._run=lambda *a:a[6]
     prompt=client.run_turn(tmp_path,{'research_execution':{'stage':'interpret_result','result':{'metrics':{'rows':1000}}}},lambda *a:None)
     assert '"rows": 1000' in prompt and '"interpret_result"' in prompt
+
+
+def test_non_success_prompt_does_not_request_fabricated_finding(tmp_path):
+    import sys
+    from xauusd.lab_codex import CodexResearchClient
+    client=CodexResearchClient(sys.executable);client._run=lambda *a:a[6]
+    stage={'stage':'inspect_non_success_result','target':{'plan_id':'fixture-plan','call_id':'fixture-call'},
+           'result':{'execution_status':'REPORTED_FAILURE'}}
+    prompt=client.run_turn(tmp_path,{'research_execution':stage},lambda *a:None)
+    assert 'For this non-success result, never call research_record' in prompt
+    assert 'research_plan_close with id, state=blocked' in prompt
+    assert 'fixture-plan' in prompt and 'fixture-call' in prompt
+    assert 'preserve uncertainty and never replay' in prompt
