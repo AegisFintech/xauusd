@@ -15,6 +15,25 @@ TOPICS = {'macro':'Rates, dollar and macro transmission', 'events':'Scheduled ne
           'methods':'Research methods, data quality and tooling', 'price':'Price and volume behavior'}
 TERMINAL = {'completed','blocked','abandoned'}
 
+PLAN_INPUT_SCHEMA = {
+    'type': 'object', 'additionalProperties': False,
+    'properties': {
+        **{k: {'type': 'string', 'minLength': 1, 'maxLength': maximum}
+           for k, maximum in {
+               'family': 100, 'question': 2000, 'hypothesis': 2000,
+               'baseline': 2000, 'dataset_version': 200, 'data_requirements': 2000,
+               'success_criteria': 2000, 'change_reason': 2000}.items()},
+        'topic': {'type': 'string', 'enum': sorted(TOPICS)},
+        'source_ids': {'type': 'array', 'maxItems': 5, 'items': {'type': 'string'}},
+        'costs': {'type': 'object', 'minProperties': 1, 'maxProperties': 20,
+                  'propertyNames': {'minLength': 1, 'maxLength': 80},
+                  'additionalProperties': {'type': 'number', 'minimum': 0}},
+        'max_variants': {'type': 'integer', 'minimum': 1, 'maximum': 12},
+        'parent_id': {'type': ['string', 'null']},
+    },
+}
+PLAN_INPUT_SCHEMA['required'] = sorted(PLAN_INPUT_SCHEMA['properties'])
+
 
 def digest(value):
     return hashlib.sha256(json.dumps(value,sort_keys=True,allow_nan=False).encode()).hexdigest()
@@ -106,10 +125,14 @@ def insight(store, args):
 
 @serialized
 def create_plan(store, args):
-    required={'topic','family','question','hypothesis','baseline','dataset_version','data_requirements',
-              'source_ids','costs','success_criteria','max_variants','parent_id','change_reason'}
-    if set(args)!=required or args.get('topic') not in TOPICS:
-        return {'ok':False,'error_code':'invalid_plan_shape'}
+    required=set(PLAN_INPUT_SCHEMA['required'])
+    if (not isinstance(args,dict) or set(args)!=required or
+            not isinstance(args.get('topic'),str) or args['topic'] not in TOPICS):
+        supplied=set(args) if isinstance(args,dict) else set()
+        return {'ok':False,'error_code':'invalid_plan_shape','path':'$',
+                'expected_fields':sorted(required),'missing_fields':sorted(required-supplied),
+                'unexpected_field_count':len(supplied-required),
+                'allowed_topics':sorted(TOPICS)}
     if any(not text(args[k]) for k in ('family','question','hypothesis','baseline','dataset_version',
                                      'data_requirements','success_criteria','change_reason')):
         return {'ok':False,'error_code':'invalid_plan_text'}

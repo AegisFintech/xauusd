@@ -33,7 +33,17 @@ TURN_SCHEMA['properties'].update({
 TURN_SCHEMA['required'] = list(TURN_SCHEMA['properties'])
 
 
-def validate_turn(value):
+def turn_schema(tool_names):
+    schema = deepcopy(TURN_SCHEMA)
+    calls = schema['properties']['tool_calls']
+    if tool_names:
+        calls['items']['properties']['name']['enum'] = sorted(set(tool_names))
+    else:
+        calls['maxItems'] = 0
+    return schema
+
+
+def validate_turn(value, tool_names=None):
     from .autonomous_harness import _validate_json
     _validate_json(value, TURN_SCHEMA)
     if not isinstance(value,dict) or set(value)!=set(TURN_SCHEMA['required']):
@@ -47,6 +57,8 @@ def validate_turn(value):
         if set(row)!= {'id','title','status'} or not 0<len(row['id'])<=100 or len(row['title'])>500 or row['status'] not in ('planned','running','blocked','completed','abandoned'):
             raise ValueError('invalid_agenda')
     for call in value['tool_calls']:
+        if tool_names is not None and call['name'] not in tool_names:
+            raise ValueError('unadvertised_tool_name')
         if set(call)!= {'id','name','arguments_json'} or not 0<len(call['id'])<=100 or not 0<len(call['name'])<=80 or len(call['arguments_json'])>12000:
             raise ValueError('invalid_tool_call')
         try: arguments=json.loads(call['arguments_json'])
@@ -479,7 +491,8 @@ class AgentAdvisor:
             {'name':'experiment_start','arguments':{'name':'short experiment name','expression':'causal strategy expression'},'description':'Start an independent $1000 experimental paper account at fresh live quotes. Up to four; fixed risk gates; unvalidated results never promote automatically. Use to test distinct hypotheses proactively.'}, {'name':'engineering_check','arguments':{},'description':'Check edited project snapshot against protected controls and current live hashes.'},
                     {'name':'engineering_deploy','arguments':{},'description':'Run isolated full tests and automatically install project changes with rollback and restart verification.'},
                     {'name':'action_reconcile','description':'Inspect uncertain action by call_id, at most two missing checks. Parked actions require evidence_call_id referencing new matching completed job-status evidence. Never replay.'}]
-        from .research_program import begin_cycle,context as program_context
+        from .research_program import PLAN_INPUT_SCHEMA,begin_cycle,context as program_context
+        next(t for t in catalog if t['name']=='research_plan')['input_schema']=deepcopy(PLAN_INPUT_SCHEMA)
         from .research_effectiveness import review as review_improvements,diagnostics,inference
         begin_cycle(self.store)
         review_improvements(self.store)
@@ -493,7 +506,8 @@ class AgentAdvisor:
             context={**brief,'research_program':program_context(self.store,compact=True),'research_diagnostics':diagnostics(self.store),'memory':self.store.memory(),'agent':self.state(),'daily':daily,
                      'compute_evidence':{'observed_at':self.state().get('compute_observed_at'),'result':self.state().get('compute')},
                      'compute_policy':{'preferred_backtest_worker':'tc02','local_role':'live monitoring, orchestration and lightweight smoke checks'},
-                     'tools':catalog,'tool_results':results[-8:],'experiments':self.store.meta('experiments') or [],
+                     'tools':catalog,'brief_fields_not_tools':['research_execution','research_recovery','tool_results'],
+                     'tool_results':results[-8:],'experiments':self.store.meta('experiments') or [],
                      'research_outcomes':(self.store.meta('research_outcomes') or [])[-10:],'improvements':self.store.meta('improvements') or [],
                      'learning_scorecard':__import__('xauusd.learning_audit',fromlist=['scorecard']).scorecard(self.store),
                      'research_execution':__import__('xauusd.research_execution',fromlist=['directive']).directive(self.store),
